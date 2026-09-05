@@ -40,6 +40,16 @@ namespace HexWars.NetServer.Hosting
         /// <summary>Credential re-checks in flight at once, across every socket on this host.</summary>
         internal const int MaxConcurrentRechecks = 8;
 
+        /// <summary>
+        /// Re-checks this loop will even consider starting in one pass.
+        ///
+        /// A cap on the work, not only on the concurrency. A host that has just come up finds every socket
+        /// due at once, and building a task per socket - each with its own linked token source and timer -
+        /// is thousands of allocations before a single query has run, on a tick that has a ping to send.
+        /// Four times the concurrency is enough to keep the slots busy and nothing like enough to notice.
+        /// </summary>
+        internal const int MaxRechecksPerCadence = MaxConcurrentRechecks * 4;
+
         /// <summary>How long one re-check is given before it is abandoned until the next cadence.</summary>
         internal static readonly TimeSpan RecheckTimeout = TimeSpan.FromSeconds(5);
 
@@ -74,13 +84,6 @@ namespace HexWars.NetServer.Hosting
                             continue;
                         }
 
-                        // Started and not awaited. A re-check is a database round trip, and awaiting one
-                        // here would put every socket on this host behind the slowest of them: one match
-                        // querying a wedged connection would hold up the ping that keeps every other match
-                        // alive. The ping is the thing this loop exists for, so it is the thing that must
-                        // never wait.
-                        if (IsRecheckDue(connection, now, recheck)) BeginRecheck(connection, now, stoppingToken);
-
                         if (now - connection.LastInbound >= silence)
                         {
                             logger.LogInformation(
@@ -95,6 +98,12 @@ namespace HexWars.NetServer.Hosting
 
                         connection.TryEnqueue(PingFrame);
                     }
+
+                    // After the pings, and never in the way of them. A re-check is a database round trip,
+                    // and doing one inline would put every socket on this host behind the slowest of them:
+                    // one match querying a wedged connection would hold up the ping that keeps every other
+                    // match alive.
+                    StartDueRechecks(now, recheck, stoppingToken);
 
                     await coordinator.SweepAsync(now).ConfigureAwait(false);
                 }
@@ -118,16 +127,33 @@ namespace HexWars.NetServer.Hosting
             && now - connection.LastCredentialCheck >= recheck;
 
         /// <summary>
-        /// Starts one credential re-check and returns immediately.
+        /// Starts as many due re-checks as there are free slots, oldest first.
         ///
-        /// The cadence is stamped before the work begins rather than after it, so a re-check that is slow
-        /// or times out is not started again by the very next tick - it is simply retried when the cadence
-        /// next comes round, which is the behaviour a store having a bad minute needs.
+        /// Oldest first is what makes it fair. A socket that did not get a slot is not stamped, so it keeps
+        /// the oldest check time on the host and is at the front of the queue next cadence - without that,
+        /// a busy host could starve the same sockets forever while re-checking the same lucky ones.
+        ///
+        /// The slot is taken BEFORE any work is created. Creating a task that will immediately queue for a
+        /// slot is the amplification this cap exists to prevent: the work would be allocated whether or not
+        /// there was anywhere to run it.
         /// </summary>
-        void BeginRecheck(V2Connection connection, DateTimeOffset now, CancellationToken stopping)
+        void StartDueRechecks(DateTimeOffset now, TimeSpan recheck, CancellationToken stopping)
         {
-            connection.LastCredentialCheck = now;
-            _ = RecheckAsync(connection, now, stopping);
+            List<V2Connection> due = registry.Snapshot()
+                .Where(c => c.IsAuthenticated && !c.IsClosed && IsRecheckDue(c, now, recheck))
+                .OrderBy(c => c.LastCredentialCheck)
+                .Take(MaxRechecksPerCadence)
+                .ToList();
+
+            foreach (V2Connection connection in due)
+            {
+                if (!_recheckSlots.Wait(0)) break;
+
+                // Stamped only now, when the check is certain to run. A socket that was skipped keeps its
+                // place at the front of the queue.
+                connection.LastCredentialCheck = now;
+                _ = RecheckAsync(connection, now, stopping);
+            }
         }
 
         /// <summary>
@@ -141,26 +167,11 @@ namespace HexWars.NetServer.Hosting
         /// </summary>
         async Task RecheckAsync(V2Connection connection, DateTimeOffset now, CancellationToken stopping)
         {
-            if (connection.CredentialHash is not byte[] hash) return;
-            if (connection.MatchId is not Guid matchId) return;
-
             try
             {
-                if (!await _recheckSlots.WaitAsync(RecheckTimeout, stopping).ConfigureAwait(false))
-                {
-                    logger.LogWarning(
-                        "A credential re-check waited {Seconds}s for a slot and was left for the next pass",
-                        (int)RecheckTimeout.TotalSeconds);
-                    return;
-                }
-            }
-            catch (OperationCanceledException)
-            {
-                return;
-            }
+                if (connection.CredentialHash is not byte[] hash) return;
+                if (connection.MatchId is not Guid matchId) return;
 
-            try
-            {
                 using var deadline = CancellationTokenSource.CreateLinkedTokenSource(stopping);
                 deadline.CancelAfter(RecheckTimeout);
 

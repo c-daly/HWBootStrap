@@ -48,11 +48,11 @@ namespace HexWars.NetServer.Tests
             _connections.Clear();
         }
 
-        void Start(int recheckSeconds)
+        void Start(int recheckSeconds, int heartbeatSeconds = 1)
         {
             var options = Options.Create(new MatchHostingOptions
             {
-                HeartbeatIntervalSeconds = 1,
+                HeartbeatIntervalSeconds = heartbeatSeconds,
                 StaleConnectionSeconds = 300,
                 CredentialRecheckSeconds = recheckSeconds,
                 MaxSocketsPerIp = 256,
@@ -148,6 +148,53 @@ namespace HexWars.NetServer.Tests
                 "the token handed to the store is a real one, so stopping the host stops the query");
         }
 
+        [Test]
+        public async Task AHostWhereEverySocketIsDueAtOnce_StartsOnlyOneCadenceWorthOfChecks()
+        {
+            // A host that has just come up finds every socket due on its first tick. Building a task per
+            // socket - each with its own linked token source and timer - is thousands of allocations
+            // before a single query has run, on a tick that has a ping to send. The cap is on the work
+            // created, not only on how much of it may run at once.
+            Start(recheckSeconds: 1, heartbeatSeconds: 2);
+
+            for (var i = 0; i < 2000; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+            await WaitUntil(() => _credentials.Started > 0, TimeSpan.FromSeconds(15));
+
+            // Read between ticks: the next one is a whole interval away.
+            Assert.That(_credentials.Started,
+                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxRechecksPerCadence),
+                "one cadence must not try to re-check two thousand sockets");
+            Assert.That(_credentials.InFlightPeak,
+                Is.LessThanOrEqualTo(ConnectionHeartbeatService.MaxConcurrentRechecks));
+        }
+
+        [Test]
+        public async Task SocketsThatMissedASlot_AreTheOnesCheckedNext()
+        {
+            // Fairness is the whole reason the queue is ordered by last check. A socket that did not get a
+            // slot is deliberately not stamped, so it keeps the oldest check time on the host and goes to
+            // the front - without that a busy host would re-check the same lucky sockets forever and never
+            // notice a revoked credential on any of the others.
+            const int seats = ConnectionHeartbeatService.MaxRechecksPerCadence + 8;
+
+            Start(recheckSeconds: 1);
+            for (var i = 0; i < seats; i++) Seat(i);
+
+            await _heartbeat.StartAsync(CancellationToken.None);
+
+            await WaitUntil(() => _credentials.Seen.Count >= seats, TimeSpan.FromSeconds(20));
+
+            Assert.That(_credentials.Seen, Has.Count.EqualTo(seats),
+                "every socket is reached within a few cadences, not merely the first "
+                + ConnectionHeartbeatService.MaxRechecksPerCadence.ToString());
+
+            foreach (V2Connection connection in _connections)
+                Assert.That(connection.LastCredentialCheck, Is.GreaterThan(DateTimeOffset.UtcNow.AddMinutes(-30)),
+                    "a socket that was checked is stamped, and one that was skipped is not");
+        }
+
         static async Task WaitUntil(Func<bool> condition, TimeSpan within)
         {
             DateTimeOffset deadline = DateTimeOffset.UtcNow.Add(within);
@@ -169,7 +216,15 @@ namespace HexWars.NetServer.Tests
             int _inFlight;
             int _inFlightPeak;
 
+            readonly HashSet<byte> _seen = new();
+
             public int Started => Volatile.Read(ref _started);
+
+            /// <summary>Which seats have been asked about at least once.</summary>
+            public IReadOnlySet<byte> Seen
+            {
+                get { lock (_seen) return new HashSet<byte>(_seen); }
+            }
             public int Completed => Volatile.Read(ref _completed);
             public int Cancelled => Volatile.Read(ref _cancelled);
             public int InFlightPeak => Volatile.Read(ref _inFlightPeak);
@@ -186,6 +241,7 @@ namespace HexWars.NetServer.Tests
             {
                 Interlocked.Increment(ref _started);
                 RecordPeak(Interlocked.Increment(ref _inFlight));
+                lock (_seen) _seen.Add(credentialHash[0]);
 
                 bool blocked;
                 lock (_blocked) blocked = _blocked.Contains(credentialHash[0]);
