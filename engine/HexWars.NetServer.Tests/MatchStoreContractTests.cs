@@ -673,6 +673,79 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ReplaceJoinCredential_RetiresTheCredentialItReplaces()
+        {
+            var match = await NewWaitingMatchAsync();
+
+            Assert.That(
+                await Store.ReplaceJoinCredentialAsync(
+                    Hash(60), match.MatchId, match.Seat0, Created.AddMinutes(15), Created, Ct),
+                Is.True);
+            Assert.That(
+                await Store.ReplaceJoinCredentialAsync(
+                    Hash(70), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct),
+                Is.True);
+
+            JoinCredentialRecord? replaced = await Store.FindJoinCredentialAsync(Hash(60), Ct);
+            JoinCredentialRecord? issued = await Store.FindJoinCredentialAsync(Hash(70), Ct);
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(replaced!.RevokedAt, Is.EqualTo(Move1),
+                    "exactly one credential per seat may be live, so issuing retires the one before it");
+                Assert.That(issued!.RevokedAt, Is.Null);
+            });
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_LeavesTheOtherSeatUntouched()
+        {
+            var match = await NewWaitingMatchAsync();
+            await Store.ReplaceJoinCredentialAsync(
+                Hash(61), match.MatchId, match.Seat1, Created.AddMinutes(15), Created, Ct);
+
+            await Store.ReplaceJoinCredentialAsync(
+                Hash(62), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct);
+
+            Assert.That((await Store.FindJoinCredentialAsync(Hash(61), Ct))!.RevokedAt, Is.Null);
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatHasEnded_ChangesNothing()
+        {
+            var match = await NewActiveMatchAsync();
+            await Store.ReplaceJoinCredentialAsync(
+                Hash(63), match.MatchId, match.Seat0, Created.AddMinutes(15), Created, Ct);
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            bool replaced = await Store.ReplaceJoinCredentialAsync(
+                Hash(64), match.MatchId, match.Seat0, Ended.AddMinutes(15), Ended, Ct);
+
+            Assert.That(replaced, Is.False);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(64), Ct), Is.Null,
+                "a refused replace must not store the credential it refused to issue");
+            Assert.That((await Store.FindJoinCredentialAsync(Hash(63), Ct))!.RevokedAt, Is.Null,
+                "nor revoke the one it failed to replace: the caller would be left with none");
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_ForASteamIdWithNoSeat_IsRejected()
+        {
+            var match = await NewWaitingMatchAsync();
+
+            Assert.ThrowsAsync<ArgumentException>(() => Store.ReplaceJoinCredentialAsync(
+                Hash(65), match.MatchId, NextSteamId(), Created.AddMinutes(15), Created, Ct));
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_ForAnUnknownMatch_IsRejectedAsSeatless()
+        {
+            Assert.ThrowsAsync<ArgumentException>(() => Store.ReplaceJoinCredentialAsync(
+                Hash(66), Guid.NewGuid(), NextSteamId(), Created.AddMinutes(15), Created, Ct));
+        }
+
+        [Test]
         public async Task FindJoinCredential_ForAnUnknownHash_IsNull()
         {
             var match = await NewWaitingMatchAsync();

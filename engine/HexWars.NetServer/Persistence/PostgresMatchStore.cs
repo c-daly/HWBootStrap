@@ -57,6 +57,12 @@ namespace HexWars.NetServer.Persistence
         /// so a test can put a new open match in the way.</summary>
         internal Func<Task>? OnCreateRetryForTests { get; set; }
 
+        /// <summary>Test hook: runs inside the credential replacement, after the old credentials are
+        /// revoked and before the new one is inserted. Throwing from it is the only way to reach the
+        /// window that made the two-call version dangerous - the one where a player has lost the
+        /// credential they held and not yet been given its replacement.</summary>
+        internal Func<Task>? AfterRevokeForTests { get; set; }
+
         // ---- allocation ------------------------------------------------------
 
         public async Task<CreateMatchResult> CreateMatchForLobbyAsync(CreateMatchRequest request, CancellationToken ct)
@@ -583,6 +589,78 @@ namespace HexWars.NetServer.Persistence
             command.Parameters.AddWithValue("steamId", steamId);
 
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+        }
+
+        public async Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
+            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+        {
+            MatchStoreGuard.ValidateCredentialHash(credentialHash, nameof(credentialHash));
+            MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
+
+            await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
+            await using NpgsqlTransaction transaction =
+                await connection.BeginTransactionAsync(ct).ConfigureAwait(false);
+
+            // The match row first and the seat row second, which is the order AppendCommandAsync and
+            // TryCompleteMatchAsync take them in. Locking the seat first would invert that order against an
+            // append (whose foreign key takes a key-share lock on the same seat) and the two would deadlock
+            // under exactly the concurrent reconnect this method exists to serialise.
+            string? statusText = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct)
+                .ConfigureAwait(false);
+
+            await using (var seat = new NpgsqlCommand(
+                "SELECT 1 FROM match_players WHERE match_id = @matchId AND steam_id = @steamId FOR UPDATE",
+                connection, transaction))
+            {
+                seat.Parameters.AddWithValue("matchId", matchId);
+                seat.Parameters.AddWithValue("steamId", steamId);
+
+                // Before the status answer on purpose: a credential belongs to a seat, so a missing seat is
+                // a caller error however the match is doing, and an unknown match has no seat either.
+                if (await seat.ExecuteScalarAsync(ct).ConfigureAwait(false) is null)
+                    throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
+            }
+
+            if (statusText is null) return false;
+            MatchStatus status = MatchStatusText.FromDb(statusText);
+            if (status is not (MatchStatus.Waiting or MatchStatus.Active)) return false;
+
+            await using (var revoke = new NpgsqlCommand(
+                "UPDATE match_join_credentials SET revoked_at = @now "
+                + "WHERE match_id = @matchId AND steam_id = @steamId AND revoked_at IS NULL",
+                connection, transaction))
+            {
+                revoke.Parameters.Add(Timestamp("now", now));
+                revoke.Parameters.AddWithValue("matchId", matchId);
+                revoke.Parameters.AddWithValue("steamId", steamId);
+                await revoke.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+
+            if (AfterRevokeForTests is not null) await AfterRevokeForTests().ConfigureAwait(false);
+
+            try
+            {
+                await using var insert = new NpgsqlCommand(
+                    "INSERT INTO match_join_credentials (credential_hash, match_id, steam_id, expires_at, revoked_at) "
+                    + "VALUES (@credentialHash, @matchId, @steamId, @expiresAt, NULL)",
+                    connection, transaction);
+                insert.Parameters.AddWithValue("credentialHash", credentialHash);
+                insert.Parameters.AddWithValue("matchId", matchId);
+                insert.Parameters.AddWithValue("steamId", steamId);
+                insert.Parameters.Add(Timestamp("expiresAt", expiresAt));
+
+                await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
+            }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
+            {
+                // A plain insert rather than ON CONFLICT DO NOTHING: unlike the retry-tolerant
+                // StoreJoinCredentialAsync, every call here carries a freshly generated 32 byte hash, so a
+                // collision is a caller reusing one and must not be quietly treated as success.
+                throw new InvalidOperationException("credential hash already bound to another seat", ex);
+            }
+
+            await transaction.CommitAsync(ct).ConfigureAwait(false);
+            return true;
         }
 
         // ---- shared plumbing -------------------------------------------------

@@ -1,8 +1,11 @@
+using HexWars.NetServer.Auth;
+using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Tests.Fakes;
 using HexWars.NetServer.Tests.Fixtures;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Npgsql;
 using NUnit.Framework;
 
@@ -359,6 +362,181 @@ namespace HexWars.NetServer.Tests
         }
 
         // ---- helpers ------------------------------------------------------------
+
+        // ---- credential rotation is one transaction -----------------------------
+
+        [Test]
+        public async Task ASecondIssueForOneSeat_QueuesBehindTheFirst_LeavingExactlyOneLiveCredential()
+        {
+            var match = await NewWaitingMatchAsync();
+            MatchCredentialService service = NewCredentialService(_store);
+            IssuedCredential firstCredential = await service.IssueAsync(match.MatchId, match.Seat0, Ct);
+
+            // The seat row rather than the match row: two reconnects for ONE seat are what must serialise,
+            // and holding this is the only way to make them overlap on purpose rather than by luck.
+            await using NpgsqlConnection holder = await _db.DataSource.OpenConnectionAsync();
+            await using NpgsqlTransaction holding = await holder.BeginTransactionAsync();
+
+            await using (var takeLock = new NpgsqlCommand(
+                "SELECT seat FROM match_players WHERE match_id = @matchId AND steam_id = @steamId FOR UPDATE",
+                holder, holding))
+            {
+                takeLock.Parameters.AddWithValue("matchId", match.MatchId);
+                takeLock.Parameters.AddWithValue("steamId", match.Seat0);
+                Assert.That(await takeLock.ExecuteScalarAsync(), Is.EqualTo(0));
+            }
+
+            await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
+            var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
+            Task<IssuedCredential> second = NewCredentialService(other).IssueAsync(match.MatchId, match.Seat0, Ct);
+
+            Task first = await Task.WhenAny(second, Task.Delay(BlockedFor));
+            Assert.That(first, Is.Not.SameAs(second),
+                "issuing must lock the seat, or two overlapping reconnects both revoke first and both then insert");
+
+            // The discriminating assertion. Revoke-then-insert as two calls revokes on its own connection
+            // and commits that immediately, so the player loses the credential they are holding and only
+            // then blocks on the insert - and if the insert never lands they have none at all. One
+            // transaction means nothing at all is visible until the whole replacement can commit.
+            Assert.That(await service.ValidateAsync(match.MatchId, firstCredential.Credential, Ct), Is.Not.Null,
+                "nothing may be revoked while the replacement is still waiting to commit");
+
+            await holding.RollbackAsync();
+            IssuedCredential secondCredential = await second;
+
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1));
+            Assert.That(await service.ValidateAsync(match.MatchId, firstCredential.Credential, Ct), Is.Null);
+            Assert.That(await service.ValidateAsync(match.MatchId, secondCredential.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task AnIssueOverlappingTheMatchEnding_WaitsForItAndThenRefuses()
+        {
+            var match = await NewActiveMatchAsync();
+            MatchCredentialService service = NewCredentialService(_store);
+            IssuedCredential held = await service.IssueAsync(match.MatchId, match.Seat0, Ct);
+
+            await using NpgsqlConnection holder = await _db.DataSource.OpenConnectionAsync();
+            await using NpgsqlTransaction holding = await holder.BeginTransactionAsync();
+
+            await using (var takeLock = new NpgsqlCommand(
+                "SELECT status FROM matches WHERE match_id = @matchId FOR UPDATE", holder, holding))
+            {
+                takeLock.Parameters.AddWithValue("matchId", match.MatchId);
+                Assert.That(await takeLock.ExecuteScalarAsync(), Is.EqualTo("active"));
+            }
+
+            await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
+            var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
+            Task<IssuedCredential> issue = NewCredentialService(other).IssueAsync(match.MatchId, match.Seat0, Ct);
+
+            Task first = await Task.WhenAny(issue, Task.Delay(BlockedFor));
+            Assert.That(first, Is.Not.SameAs(issue),
+                "issuing must take the match row lock, or it cannot see a completion that is still in flight");
+
+            await using (var complete = new NpgsqlCommand(
+                "UPDATE matches SET status = \u0027completed\u0027, winner_seat = 0, completed_at = now(), "
+                + "last_activity_at = now() WHERE match_id = @matchId", holder, holding))
+            {
+                complete.Parameters.AddWithValue("matchId", match.MatchId);
+                Assert.That(await complete.ExecuteNonQueryAsync(), Is.EqualTo(1));
+            }
+
+            await holding.CommitAsync();
+
+            var refused = Assert.ThrowsAsync<InvalidOperationException>(() => issue);
+            Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1),
+                "a refused issue must leave the credential the player already held exactly as it was");
+            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Null,
+                "which still stops working, because the match it names is over");
+        }
+
+        [Test]
+        public async Task TwoIssuesForOneSeatSubmittedTogether_LeaveExactlyOneUsableCredential()
+        {
+            // No held lock and no hook: two services on two pools, submitted together and left to
+            // interleave however the database schedules them. It cannot prove the mechanism the way the
+            // blocked test above does, but it is the shape the deployment actually produces - one player
+            // reconnecting through two instances at the same moment - and the outcome must hold whatever
+            // order they land in.
+            var match = await NewWaitingMatchAsync();
+
+            await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
+            var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
+
+            MatchCredentialService first = NewCredentialService(_store);
+            MatchCredentialService second = NewCredentialService(other);
+
+            IssuedCredential[] issued = await Task.WhenAll(
+                first.IssueAsync(match.MatchId, match.Seat0, Ct),
+                second.IssueAsync(match.MatchId, match.Seat0, Ct));
+
+            CredentialValidation?[] validations = await Task.WhenAll(
+                first.ValidateAsync(match.MatchId, issued[0].Credential, Ct),
+                first.ValidateAsync(match.MatchId, issued[1].Credential, Ct));
+
+            Assert.That(validations.Count(validation => validation is not null), Is.EqualTo(1),
+                "one seat may have one usable credential, whichever of the two issues committed last");
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1));
+        }
+
+        [Test]
+        public async Task AFailureAfterTheRevoke_RollsBackAndLeavesTheOldCredentialUsable()
+        {
+            // The window that made the two-call version dangerous: the old credential is already revoked
+            // and the new one has not landed. One transaction means the player keeps what they had rather
+            // than being left holding nothing.
+            var match = await NewWaitingMatchAsync();
+            MatchCredentialService service = NewCredentialService(_store);
+            IssuedCredential held = await service.IssueAsync(match.MatchId, match.Seat0, Ct);
+
+            _store.AfterRevokeForTests = () => throw new TimeoutException("the connection went away");
+
+            Assert.ThrowsAsync<TimeoutException>(() => service.IssueAsync(match.MatchId, match.Seat0, Ct));
+
+            _store.AfterRevokeForTests = null;
+
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1));
+            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Not.Null,
+                "a failed reissue must not cost the player the credential they were already holding");
+        }
+
+        MatchCredentialService NewCredentialService(IMatchStore store) => new(
+            store,
+            Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),
+            new FakeTimeProvider(Created),
+            NullLogger<MatchCredentialService>.Instance);
+
+        [Test]
+        public async Task AnIssueForAMatchThatHasFinished_IsRefusedAndWritesNothing()
+        {
+            var match = await NewActiveMatchAsync();
+            Assert.That(
+                await _store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct), Is.True);
+
+            var service = new MatchCredentialService(
+                _store,
+                Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),
+                new FakeTimeProvider(Created),
+                NullLogger<MatchCredentialService>.Instance);
+
+            var refused = Assert.ThrowsAsync<InvalidOperationException>(
+                () => service.IssueAsync(match.MatchId, match.Seat0, Ct));
+
+            Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
+            Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.Zero);
+        }
+
+        async Task<long> LiveCredentialCountAsync(Guid matchId, string steamId)
+        {
+            await using var command = _db.DataSource.CreateCommand(
+                "SELECT count(*) FROM match_join_credentials "
+                + "WHERE match_id = @matchId AND steam_id = @steamId AND revoked_at IS NULL");
+            command.Parameters.AddWithValue("matchId", matchId);
+            command.Parameters.AddWithValue("steamId", steamId);
+            return (long)(await command.ExecuteScalarAsync())!;
+        }
 
         static string NextLobbyId() =>
             "1097752" + Interlocked.Increment(ref _identifiers).ToString("D11");

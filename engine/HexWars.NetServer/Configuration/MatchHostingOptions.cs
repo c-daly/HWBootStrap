@@ -30,6 +30,25 @@ namespace HexWars.NetServer.Configuration
 
         public bool TrustForwardedHeaders { get; set; }
 
+        /// <summary>
+        /// The addresses and networks whose X-Forwarded-For this server will believe, as bare IP addresses
+        /// or CIDR prefixes. Only consulted when <see cref="TrustForwardedHeaders"/> is on.
+        ///
+        /// Empty means every peer is trusted to name the client, which is only safe when nothing can reach
+        /// this process except the platform proxy. The server says so at startup rather than assuming the
+        /// operator meant it.
+        /// </summary>
+        public string[] TrustedProxyCidrs { get; set; } = Array.Empty<string>();
+
+        /// <summary>
+        /// The operator saying, in as many words, that trusting every peer to name the client is what they
+        /// meant. Required when <see cref="TrustForwardedHeaders"/> is on and
+        /// <see cref="TrustedProxyCidrs"/> is empty, because that combination is a real deployment on a
+        /// platform whose proxy addresses are not published, and also exactly what an unfinished
+        /// configuration looks like. Startup should not have to guess which one it is looking at.
+        /// </summary>
+        public bool TrustAllProxies { get; set; }
+
         public string[] BlockedSteamIds { get; set; } = Array.Empty<string>();
 
         public string? MetricsToken { get; set; }
