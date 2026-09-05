@@ -17,6 +17,11 @@ namespace HexWars.NetServer
         {
             if (args.Length > 0 && args[0] == "selftest") return await SelfTest.Run();
 
+            // The durable proof: a match played on one process, continued by another over the same
+            // database. It needs a throwaway Postgres and says so - exit 3, never a quiet 0 - because a
+            // self-test that passed for want of anything to test is worse than one that did not run.
+            if (args.Length > 0 && args[0] == "selftest-durable") return await SelfTest.RunDurable();
+
             if (args.Length > 0 && args[0] == "describe-environment")
             {
                 // Built WITHOUT args on purpose: the command-line configuration provider rejects a bare
