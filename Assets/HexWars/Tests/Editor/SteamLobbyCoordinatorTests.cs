@@ -1114,6 +1114,43 @@ namespace HexWars.Presentation.Tests
                 "hosting on top of the lobby already held would strand it");
         }
 
+        [Test]
+        public void AStaleJoinCallbackAfterAdoption_LeavesTheMatchJoinDeadlineArmed()
+        {
+            const string lobbyId = "109775240000000851";
+            _steam.AvailableLobbies.Add(OpenLobby(lobbyId));
+            _steam.AutoDeliverAuthTickets = false;   // park the guest join in RequestingTicket
+
+            _sut.QuickMatch();
+            _steam.Pump();                                   // the search answers, the first join goes out
+            _steam.SetRemoteLobbyData(lobbyId, SteamLobbyKeys.Match, "match-9");
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable));
+
+            _sut.Retry();
+            _steam.PumpAt(2);                                // the retry search answers, its join goes out
+            _steam.Pump();                                   // the abandoned join succeeds and is adopted
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.RequestingTicket),
+                "adoption reads the lobby and starts the guest match join");
+            var apiCancels = _api.CancelCalls;
+            var ticketCancels = _steam.CancelAuthTicketCalls;
+
+            _steam.PumpAt(1);                                // the replacement join finally answers
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.RequestingTicket));
+
+            _sut.Tick(Clock);
+            _sut.Tick(Clock + _config.AllocationTimeoutSeconds);
+
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.BackendUnavailable),
+                "a stale join answer must not disarm the deadline the match join is running under");
+            Assert.That(_api.CancelCalls, Is.EqualTo(apiCancels + 1));
+            Assert.That(_steam.CancelAuthTicketCalls, Is.EqualTo(ticketCancels + 1));
+        }
+
         // ----- helpers -------------------------------------------------------------------------
 
         void Pump()

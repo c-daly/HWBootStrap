@@ -524,15 +524,12 @@ namespace HexWars.Presentation
             }
 
             // The answer to a join whose lobby a late success already adopted. A success adds
-            // nothing, and a failure must not tear down the membership that adoption confirmed.
+            // nothing and a failure must not tear down the membership adoption confirmed, so this is
+            // a true no-op: adoption already cleared the join deadline and its flags, and whatever is
+            // armed NOW belongs to whatever adoption started next. Clearing it here disarmed the guest
+            // match join, which then sat in RequestingTicket for ever with its ticket still live.
             if (!string.IsNullOrEmpty(_lobbyId)
-                && string.Equals(lobbyId, _lobbyId, StringComparison.Ordinal))
-            {
-                ClearDeadline();
-                _joinInFlight = false;
-                _joiningLobbyId = null;
-                return;
-            }
+                && string.Equals(lobbyId, _lobbyId, StringComparison.Ordinal)) return;
 
             ClearDeadline();
             _joinInFlight = false;
