@@ -50,19 +50,12 @@ namespace HexWars.NetServer.Runtime
         /// <exception cref="MatchRecoveryException">This build will not host this match.</exception>
         public async Task<LiveMatch> LoadAsync(Guid matchId, CancellationToken ct)
         {
-            MatchJournal? journal;
-            try
-            {
-                journal = await store.LoadJournalAsync(matchId, ct).ConfigureAwait(false);
-            }
-            catch (Exception unreadable)
-            {
-                // Counted and rethrown. A store that will not answer is not a bad journal, and the caller
-                // has to keep telling those apart - but an operator watching the database counter should
-                // still see that the recovery pass was one of the things it happened to.
-                metrics.DbFailure(MatchMetrics.DbOp.RecoveryLoad);
-                throw;
-            }
+            // Untagged here on purpose. This method is the shared ILiveMatchLoader: the startup pass
+            // calls it, and so does every live handshake and every stale reload. Counting a recovery
+            // failure here tagged an outage during a normal reconnect as a startup problem, and counted
+            // it twice, because the caller counts it as load or reload as well. The startup pass tags its
+            // own attempt instead, where the context is actually known.
+            MatchJournal? journal = await store.LoadJournalAsync(matchId, ct).ConfigureAwait(false);
 
 
             if (journal is null)
@@ -101,12 +94,11 @@ namespace HexWars.NetServer.Runtime
 
             foreach (Guid matchId in open)
             {
+                LiveMatch live;
                 try
                 {
-                    LiveMatch live = await LoadAsync(matchId, ct).ConfigureAwait(false);
+                    live = await LoadAsync(matchId, ct).ConfigureAwait(false);
                     verified++;
-
-                    if (await HealAsync(live, ct).ConfigureAwait(false)) healed++;
                 }
                 catch (MatchRecoveryException refusal)
                 {
@@ -114,7 +106,19 @@ namespace HexWars.NetServer.Runtime
                     logger.LogError(
                         "Match {MatchId} cannot be recovered: {Failure} {Detail} - maintenance required",
                         Short(matchId), refusal.Failure, refusal.Detail);
+                    continue;
                 }
+                catch (Exception)
+                {
+                    // A store that will not answer, on the startup path specifically. Rethrown so the
+                    // caller keeps telling an outage apart from a bad journal, and tagged here so the
+                    // database counter says which pass it happened to.
+                    metrics.DbFailure(MatchMetrics.DbOp.RecoveryLoad);
+                    throw;
+                }
+
+                if (await HealAsync(live, ct).ConfigureAwait(false)) healed++;
+
             }
 
             // Counted here rather than where the report is read, so a pass that nobody consults is still
@@ -167,6 +171,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
+                metrics.DbFailure(MatchMetrics.DbOp.RecoveryHeal);
                 logger.LogError(failure,
                     "Match {MatchId} is finished and could not be closed at startup", Short(live.MatchId));
                 return false;

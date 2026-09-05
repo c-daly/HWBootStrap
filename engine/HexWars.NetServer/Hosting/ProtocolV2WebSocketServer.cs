@@ -59,6 +59,25 @@ namespace HexWars.NetServer.Hosting
         static readonly SemaphoreSlim ValidationSlots =
             new(MaxConcurrentValidations, MaxConcurrentValidations);
 
+        /// <summary>
+        /// Test seam: holds every validation slot until the returned handle is disposed.
+        ///
+        /// The ceiling is process-wide and static, which is what makes it a ceiling; a test that wanted to
+        /// reach it by opening sixty-four real handshakes would be testing the thread pool. It is only
+        /// reachable from the test assembly.
+        /// </summary>
+        internal static IDisposable HoldEveryValidationSlot()
+        {
+            for (var taken = 0; taken < MaxConcurrentValidations; taken++) ValidationSlots.Wait();
+
+            return new SlotRelease();
+        }
+
+        sealed class SlotRelease : IDisposable
+        {
+            public void Dispose() => ValidationSlots.Release(MaxConcurrentValidations);
+        }
+
         const string LoggerCategory = "HexWars.NetServer.Hosting.ProtocolV2WebSocketServer";
 
         /// <summary>How much of an inbound payload a debug line is allowed to carry.</summary>

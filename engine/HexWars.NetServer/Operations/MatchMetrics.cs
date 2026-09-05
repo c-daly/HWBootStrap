@@ -105,7 +105,12 @@ namespace HexWars.NetServer.Operations
             public const string RecoveryList = "recovery_list";
 
             /// <summary>The startup recovery pass reading one journal.</summary>
+            /// <summary>The startup recovery pass reading one journal. Only the startup pass: the
+            /// loader it shares with every live handshake counts as load or reload instead.</summary>
             public const string RecoveryLoad = "recovery_load";
+
+            /// <summary>The startup recovery pass closing a match the engine already calls over.</summary>
+            public const string RecoveryHeal = "recovery_heal";
         }
 
         /// <summary>How far a refused handshake got. A frame refusal never cost a database read; a

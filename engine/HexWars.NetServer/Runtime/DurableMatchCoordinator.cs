@@ -302,6 +302,13 @@ namespace HexWars.NetServer.Runtime
 
             try
             {
+                // FIRST, before anything is reloaded, healed, dealt or broadcast. A handshake that was
+                // queued on this gate when the host was told to stop has done none of that yet, and every
+                // one of those steps is a write or a frame: a reload re-deals START to sockets that are
+                // about to be closed, and a heal writes a completion during a drain. Reading the barrier
+                // only at the end refuses the seat but leaves the side effects behind it.
+                if (Stopping) return RefusedForShutdown();
+
                 var dealt = false;
 
                 if (match.Stale)
@@ -336,8 +343,12 @@ namespace HexWars.NetServer.Runtime
                 // be served would be a liveness signal that agrees with itself.
                 try
                 {
-                    await store.TouchAsync(matchId, validation.SteamId, time.GetUtcNow(), ct)
-                        .ConfigureAwait(false);
+                    // Skipped while stopping, for the same reason the heartbeat stops re-checking
+                    // credentials: a liveness stamp for a seat that is about to be refused is work against
+                    // a store during a drain, and it is the last write this path can still make.
+                    if (!Stopping)
+                        await store.TouchAsync(matchId, validation.SteamId, time.GetUtcNow(), ct)
+                            .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -366,12 +377,8 @@ namespace HexWars.NetServer.Runtime
                 //
                 // Not counted as an auth failure: nothing about this caller was wrong. It is reported as
                 // the shutdown it is, and the socket layer closes it with 1012 rather than 1008.
-                if (Stopping)
-                {
-                    logger.LogDebug(
-                        "Turned a handshake away: this host began shutting down while it was in flight");
-                    return new AuthOutcome(false, -1, AuthFailUnavailable, ShuttingDown: true);
-                }
+                // And again, because the awaits above take time the first read cannot cover.
+                if (Stopping) return RefusedForShutdown();
 
                 if (!WithinTerminalWindow(match, now))
                 {
@@ -1454,6 +1461,19 @@ namespace HexWars.NetServer.Runtime
 
         /// <summary>A handshake that got no seat. Counted here rather than at each refusal so a
         /// refusal added later is counted by construction.</summary>
+        /// <summary>
+        /// Refused because this host is leaving, not because anything about the caller was wrong.
+        ///
+        /// Deliberately not counted as an authentication failure, and deliberately flagged rather than
+        /// given a new wire code: the socket layer closes it with 1012, so the client is told to come back
+        /// rather than that its credential is bad.
+        /// </summary>
+        AuthOutcome RefusedForShutdown()
+        {
+            logger.LogDebug("Turned a handshake away: this host began shutting down while it was in flight");
+            return new AuthOutcome(false, -1, AuthFailUnavailable, ShuttingDown: true);
+        }
+
         AuthOutcome Failed(string code)
         {
             // Credential stage by construction: the socket layer refuses everything before this point, so
