@@ -21,7 +21,10 @@ namespace HexWars.NetServer.Persistence
     /// older timestamp last, and a match dragged far enough into the past gets abandoned while it is still
     /// being played.
     /// </summary>
-    public sealed class PostgresMatchStore(NpgsqlDataSource dataSource, ILogger<PostgresMatchStore> logger) : IMatchStore
+    public sealed class PostgresMatchStore(
+        NpgsqlDataSource dataSource,
+        ILogger<PostgresMatchStore> logger,
+        TimeProvider? time = null) : IMatchStore
     {
         /// <summary>The partial unique index from 001_match_journal. A unique violation naming it is not an
         /// error, it is the answer "someone else allocated this lobby first".</summary>
@@ -61,7 +64,21 @@ namespace HexWars.NetServer.Persistence
         /// revoked and before the new one is inserted. Throwing from it is the only way to reach the
         /// window that made the two-call version dangerous - the one where a player has lost the
         /// credential they held and not yet been given its replacement.</summary>
+        /// <summary>
+        /// The clock a transaction judges a match by, read while it holds the row.
+        ///
+        /// Optional only for the doubles this project builds by hand; the host always supplies one. A
+        /// caller decides what to ask for and then queues for a lock, so the instant it was reasoning
+        /// about is already history by the time the row is held.
+        /// </summary>
+        DateTimeOffset AtLock(DateTimeOffset callerNow) => time?.GetUtcNow() ?? callerNow;
+
         internal Func<Task>? AfterRevokeForTests { get; set; }
+
+        /// <summary>Runs before the credential transaction takes the match row lock. The seam a test needs
+        /// to end a match in the window between a caller deciding what expiry to ask for and this
+        /// transaction being able to see that the match is over.</summary>
+        internal Func<Task>? BeforeLockForTests { get; set; }
 
         // ---- allocation ------------------------------------------------------
 
@@ -265,8 +282,9 @@ namespace HexWars.NetServer.Persistence
             // wants the same lock. A save therefore either lands before the start and is picked up by the
             // read that builds the start replay, or it arrives after it and does nothing at all. An EXISTS
             // guard would not do: the start could commit between evaluating it and writing the row.
-            string? status = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
-            if (status is null || MatchStatusText.FromDb(status) != MatchStatus.Waiting)
+            TerminalJoinRow? locked =
+                await ReadStatusForUpdateAsync(connection, transaction, matchId, ct).ConfigureAwait(false);
+            if (locked is null || MatchStatusText.FromDb(locked.Status) != MatchStatus.Waiting)
             {
                 await transaction.RollbackAsync(ct).ConfigureAwait(false);
                 return;
@@ -591,11 +609,14 @@ namespace HexWars.NetServer.Persistence
             await command.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
         }
 
-        public async Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+        public async Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash,
+            Guid matchId, string steamId, DateTimeOffset expiresAt, DateTimeOffset now,
+            CancellationToken ct, TimeSpan? allowTerminalWithin = null)
         {
             MatchStoreGuard.ValidateCredentialHash(credentialHash, nameof(credentialHash));
             MatchStoreGuard.ValidateSteamId(steamId, nameof(steamId));
+
+            if (BeforeLockForTests is not null) await BeforeLockForTests().ConfigureAwait(false);
 
             await using NpgsqlConnection connection = await dataSource.OpenConnectionAsync(ct).ConfigureAwait(false);
             await using NpgsqlTransaction transaction =
@@ -605,7 +626,7 @@ namespace HexWars.NetServer.Persistence
             // TryCompleteMatchAsync take them in. Locking the seat first would invert that order against an
             // append (whose foreign key takes a key-share lock on the same seat) and the two would deadlock
             // under exactly the concurrent reconnect this method exists to serialise.
-            string? statusText = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct)
+            TerminalJoinRow? locked = await ReadStatusForUpdateAsync(connection, transaction, matchId, ct)
                 .ConfigureAwait(false);
 
             await using (var seat = new NpgsqlCommand(
@@ -621,9 +642,37 @@ namespace HexWars.NetServer.Persistence
                     throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
             }
 
-            if (statusText is null) return false;
-            MatchStatus status = MatchStatusText.FromDb(statusText);
-            if (status is not (MatchStatus.Waiting or MatchStatus.Active)) return false;
+            if (locked is null) return new CredentialReplacement(false, null);
+            MatchStatus status = MatchStatusText.FromDb(locked.Status);
+            DateTimeOffset effectiveExpiresAt = expiresAt;
+
+            if (status is not (MatchStatus.Waiting or MatchStatus.Active))
+            {
+                // A terminal match is normally refused: a credential for a game that is over opens nothing
+                // worth opening. The exception is the reconnect window, where a seat that missed the final
+                // APPLY has to be able to get back in and be shown how the match ended - and only if the
+                // match actually started, because one that expired while waiting has no game to show.
+                //
+                // Judged against the clock read HERE. The caller decided what to ask for before it queued
+                // for this lock, and the window it was reasoning about may have closed while it waited.
+                // The boundary is strict: at exactly the closing instant there is no window left to give.
+                DateTimeOffset atLock = AtLock(now);
+
+                if (allowTerminalWithin is not TimeSpan allowed
+                    || allowed <= TimeSpan.Zero
+                    || !locked.HasStartReplay
+                    || locked.CompletedAt is not DateTimeOffset finishedAt
+                    || atLock >= finishedAt + allowed)
+                    return new CredentialReplacement(false, null);
+
+                // Capped HERE and not by the caller, for the same reason.
+                DateTimeOffset closes = finishedAt + allowed;
+                if (closes < effectiveExpiresAt) effectiveExpiresAt = closes;
+
+                // A credential that is already dead is not a credential: it would be stored, handed back,
+                // and refused by the very next thing that looked at it.
+                if (effectiveExpiresAt <= atLock) return new CredentialReplacement(false, null);
+            }
 
             await using (var revoke = new NpgsqlCommand(
                 "UPDATE match_join_credentials SET revoked_at = @now "
@@ -647,7 +696,7 @@ namespace HexWars.NetServer.Persistence
                 insert.Parameters.AddWithValue("credentialHash", credentialHash);
                 insert.Parameters.AddWithValue("matchId", matchId);
                 insert.Parameters.AddWithValue("steamId", steamId);
-                insert.Parameters.Add(Timestamp("expiresAt", expiresAt));
+                insert.Parameters.Add(Timestamp("expiresAt", effectiveExpiresAt));
 
                 await insert.ExecuteNonQueryAsync(ct).ConfigureAwait(false);
             }
@@ -660,7 +709,7 @@ namespace HexWars.NetServer.Persistence
             }
 
             await transaction.CommitAsync(ct).ConfigureAwait(false);
-            return true;
+            return new CredentialReplacement(true, effectiveExpiresAt);
         }
 
         // ---- shared plumbing -------------------------------------------------
@@ -737,13 +786,27 @@ namespace HexWars.NetServer.Persistence
             return (reader.GetString(0), reader.GetBoolean(1));
         }
 
-        static async Task<string?> ReadStatusForUpdateAsync(NpgsqlConnection connection,
+        /// <summary>Everything the credential transaction has to decide on, read under the row lock in one
+        /// statement so the status and the ending it is being judged against cannot disagree.</summary>
+        sealed record TerminalJoinRow(string Status, bool HasStartReplay, DateTimeOffset? CompletedAt);
+
+        static async Task<TerminalJoinRow?> ReadStatusForUpdateAsync(NpgsqlConnection connection,
             NpgsqlTransaction transaction, Guid matchId, CancellationToken ct)
         {
             await using var command = new NpgsqlCommand(
-                "SELECT status FROM matches WHERE match_id = @matchId FOR UPDATE", connection, transaction);
+                "SELECT status, start_replay IS NOT NULL, completed_at FROM matches "
+                + "WHERE match_id = @matchId FOR UPDATE", connection, transaction);
             command.Parameters.AddWithValue("matchId", matchId);
-            return await command.ExecuteScalarAsync(ct).ConfigureAwait(false) as string;
+
+            await using NpgsqlDataReader reader =
+                await command.ExecuteReaderAsync(ct).ConfigureAwait(false);
+
+            if (!await reader.ReadAsync(ct).ConfigureAwait(false)) return null;
+
+            return new TerminalJoinRow(
+                reader.GetString(0),
+                reader.GetBoolean(1),
+                reader.IsDBNull(2) ? null : ReadTimestamp(reader, 2));
         }
 
         static PersistedMatch ReadMatch(NpgsqlDataReader reader) => new(

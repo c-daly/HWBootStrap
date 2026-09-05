@@ -428,7 +428,12 @@ namespace HexWars.NetServer.Tests
 
             await using NpgsqlDataSource otherPool = NpgsqlDataSource.Create(_db.ConnectionString);
             var other = new PostgresMatchStore(otherPool, NullLogger<PostgresMatchStore>.Instance);
-            Task<IssuedCredential> issue = NewCredentialService(other).IssueAsync(match.MatchId, match.Seat0, Ct);
+            // The window is closed for this issue on purpose. What is being proved is that issuing takes
+            // the match row lock and therefore sees a completion that is still in flight; leaving the
+            // window open would have it granted for a different and correct reason, and prove nothing
+            // about the lock.
+            Task<IssuedCredential> issue = NewCredentialService(other, terminalWindowSeconds: 0)
+                .IssueAsync(match.MatchId, match.Seat0, Ct);
 
             Task first = await Task.WhenAny(issue, Task.Delay(BlockedFor));
             Assert.That(first, Is.Not.SameAs(issue),
@@ -448,8 +453,24 @@ namespace HexWars.NetServer.Tests
             Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
             Assert.That(await LiveCredentialCountAsync(match.MatchId, match.Seat0), Is.EqualTo(1),
                 "a refused issue must leave the credential the player already held exactly as it was");
-            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Null,
-                "which still stops working, because the match it names is over");
+            // The ending does not revoke it. A seat that missed the final APPLY still needs a way to learn
+            // how the game finished, so the credential opens the match for the terminal reconnect window
+            // and for nothing beyond it.
+            Assert.That(await service.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Not.Null,
+                "inside the terminal window a finished match is still reachable");
+
+            MatchCredentialService windowClosed = new(
+                _store,
+                Options.Create(new MatchHostingOptions
+                {
+                    JoinTokenTtlSeconds = 900,
+                    TerminalReconnectSeconds = 0,
+                }),
+                new FakeTimeProvider(Created),
+                NullLogger<MatchCredentialService>.Instance);
+
+            Assert.That(await windowClosed.ValidateAsync(match.MatchId, held.Credential, Ct), Is.Null,
+                "and with the window closed it stops working the moment the match is over");
         }
 
         [Test]
@@ -502,11 +523,77 @@ namespace HexWars.NetServer.Tests
                 "a failed reissue must not cost the player the credential they were already holding");
         }
 
-        MatchCredentialService NewCredentialService(IMatchStore store) => new(
+        MatchCredentialService NewCredentialService(
+            IMatchStore store,
+            int terminalWindowSeconds = MatchHostingOptions.DefaultTerminalReconnectSeconds) => new(
             store,
-            Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),
+            Options.Create(new MatchHostingOptions
+            {
+                JoinTokenTtlSeconds = 900,
+                TerminalReconnectSeconds = terminalWindowSeconds,
+            }),
             new FakeTimeProvider(Created),
             NullLogger<MatchCredentialService>.Instance);
+
+        [Test]
+        public async Task AWindowThatClosesWhileTheCallerQueuesForTheLock_IsRefused()
+        {
+            // The caller decided its request was inside the window and then waited for this lock. Judging
+            // it against the instant the caller was reasoning about would hand out a credential for a
+            // window that had already closed, so the clock is read while the row is held.
+            var match = await NewActiveMatchAsync();
+            TimeSpan window = TimeSpan.FromMinutes(10);
+
+            var clock = new FakeTimeProvider(Move1);
+            var store = new PostgresMatchStore(
+                _db.DataSource, NullLogger<PostgresMatchStore>.Instance, clock);
+
+            Assert.That(
+                await store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct),
+                Is.True);
+
+            store.BeforeLockForTests = () =>
+            {
+                store.BeforeLockForTests = null;
+                clock.Advance(window + TimeSpan.FromMinutes(1));
+                return Task.CompletedTask;
+            };
+
+            CredentialReplacement replacement = await store.ReplaceJoinCredentialAsync(
+                Hash(81), match.MatchId, match.Seat0, Move1.AddMinutes(5), Move1, Ct, window);
+
+            Assert.That(replacement.Replaced, Is.False);
+            Assert.That(await store.FindJoinCredentialAsync(Hash(81), Ct), Is.Null);
+        }
+
+        [Test]
+        public async Task AMatchThatFinishesBeforeTheLock_CapsTheCredentialAtTheWindow()
+        {
+            // The caller decides on a full TTL, and the match ends before this transaction can take the
+            // match row lock. Only the value computed under that lock knows the match is over, so only it
+            // can be capped - a caller that read the status first read it before it changed.
+            var match = await NewActiveMatchAsync();
+            TimeSpan window = TimeSpan.FromMinutes(10);
+
+            _store.BeforeLockForTests = async () =>
+            {
+                _store.BeforeLockForTests = null;
+                Assert.That(
+                    await _store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct),
+                    Is.True);
+            };
+
+            CredentialReplacement replacement = await _store.ReplaceJoinCredentialAsync(
+                Hash(80), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct, window);
+
+            Assert.That(replacement.Replaced, Is.True);
+            Assert.That(replacement.EffectiveExpiresAt, Is.EqualTo(Move1 + window),
+                "the returned expiry is the one the row was locked against");
+
+            JoinCredentialRecord stored = (await _store.FindJoinCredentialAsync(Hash(80), Ct))!;
+            Assert.That(stored.ExpiresAt, Is.EqualTo(Move1 + window),
+                "and it is what was actually written, not merely what was reported");
+        }
 
         [Test]
         public async Task AnIssueForAMatchThatHasFinished_IsRefusedAndWritesNothing()
@@ -515,9 +602,15 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await _store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Move1, Ct), Is.True);
 
+            // The window closed, so the only answer left is a refusal. Inside it a finished match is
+            // joinable on purpose - that is what lets a seat come back and be shown how the game ended.
             var service = new MatchCredentialService(
                 _store,
-                Options.Create(new MatchHostingOptions { JoinTokenTtlSeconds = 900 }),
+                Options.Create(new MatchHostingOptions
+                {
+                    JoinTokenTtlSeconds = 900,
+                    TerminalReconnectSeconds = 0,
+                }),
                 new FakeTimeProvider(Created),
                 NullLogger<MatchCredentialService>.Instance);
 

@@ -7,6 +7,7 @@ using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Steam;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
@@ -60,7 +61,55 @@ namespace HexWars.NetServer.Hosting
                 // for a legacy deployment with no database would turn a service nobody resolves into a
                 // startup failure. Singleton for the same reason the store is: it holds no state itself.
                 builder.Services.AddSingleton<IMatchCredentialService, MatchCredentialService>();
+
+                // The durable runtime lives next to the store for the same reason the credential
+                // service does: it cannot be built without one, and in Development the container is
+                // validated at build time, so registering it for a legacy deployment with no database
+                // would turn a service nobody resolves into a startup failure.
+                builder.Services.AddSingleton<MatchRecoveryService>();
+
+                // The same instance behind both names. The coordinator only ever needs a projection, and
+                // the startup pass needs the verification method the interface deliberately does not carry;
+                // registering them separately would give the two of them different loaders and let a match
+                // pass startup under rules the handshake then refuses it under.
+                builder.Services.AddSingleton<ILiveMatchLoader>(
+                    provider => provider.GetRequiredService<MatchRecoveryService>());
+
+                // The live v2 sockets, and the sink the coordinator broadcasts through: the same object
+                // under both names. The coordinator only wants somewhere to put a frame addressed to a
+                // connection id; the socket route and the heartbeat want the connections themselves. Two
+                // registrations would be two dictionaries that have to agree, and the moment they did not,
+                // a frame would be queued for a socket that had already gone.
+                builder.Services.TryAddSingleton<V2ConnectionRegistry>();
+                builder.Services.TryAddSingleton<IConnectionSink>(
+                    provider => provider.GetRequiredService<V2ConnectionRegistry>());
+
+                // One coordinator for the process. It holds every match this host is playing, so a
+                // per-request instance would hold none of them.
+                builder.Services.AddSingleton<DurableMatchCoordinator>();
+
+                // Registered next to the coordinator it sweeps, and after it, because it resolves it. It
+                // is the only thing that touches an idle socket at all, so it is also the only thing that
+                // notices a client which went away without saying so.
+                builder.Services.AddHostedService<ConnectionHeartbeatService>();
             }
+
+            // Both registered unconditionally, and AFTER the Postgres branch on purpose.
+            //
+            // Unconditionally, because readiness has to be able to say something about recovery on every
+            // deployment, and "the pass never ran" is a different answer from "there was nothing to check".
+            // After the branch, because hosted services start in registration order and this one must run
+            // once the migrations have: journals checked against a schema that has not been brought up to
+            // date yet would be refused for a reason that has nothing to do with the matches.
+            //
+            // The recovery service is resolved optionally rather than required - a legacy deployment with
+            // no DATABASE_URL never registered one, and there is nothing for the pass to verify there.
+            builder.Services.TryAddSingleton<RecoveryState>();
+            builder.Services.AddSingleton<IHostedService>(provider => new RecoveryStartupService(
+                provider.GetRequiredService<RecoveryState>(),
+                provider.GetService<MatchRecoveryService>(),
+                provider.GetRequiredService<TimeProvider>(),
+                provider.GetRequiredService<ILogger<RecoveryStartupService>>()));
 
             // Registered unconditionally: the typed client resolves its options lazily, so a
             // Legacy-only deployment with no Steam credentials is unaffected by it being here.
@@ -222,10 +271,10 @@ namespace HexWars.NetServer.Hosting
             {
                 app.MapSteamMatchEndpoints();
 
-                // The create and join responses point every client at this route, so something has to
-                // answer it in the shape those clients parse. Replaced by the real v2 handler when the
-                // durable-gameplay work lands.
-                app.MapProtocolV2Placeholder();
+                // The route every create and join response points a client at. Mapped here rather than
+                // beside the HTTP endpoints because it is not one: it upgrades, and what happens after the
+                // upgrade is the whole durable runtime.
+                app.Map(SteamMatchEndpoints.WebSocketPath, ProtocolV2WebSocketServer.Handle);
             }
 
             return app;

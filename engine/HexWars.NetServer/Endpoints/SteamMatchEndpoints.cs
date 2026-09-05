@@ -56,22 +56,6 @@ namespace HexWars.NetServer.Endpoints
             return app;
         }
 
-        /// <summary>
-        /// Answers the websocket route these endpoints advertise, until the durable-gameplay work replaces
-        /// this with the real handler.
-        ///
-        /// A placeholder rather than nothing, because the create and join responses hand every client a
-        /// URL pointing here: leaving it unmapped means a client that does exactly what it was told gets a
-        /// 404 and an HTML error body, which is neither a shape it can parse nor a state it can act on.
-        /// The 503 it gets instead is the same refusal it would see during an outage, and its reconnect
-        /// backoff already knows what to do with that.
-        /// </summary>
-        public static IEndpointRouteBuilder MapProtocolV2Placeholder(this IEndpointRouteBuilder app)
-        {
-            app.Map(WebSocketPath, () => ApiErrors.UnavailableResult());
-            return app;
-        }
-
         static async Task<IResult> CreateAsync(
             HttpContext http,
             ISteamWebApiClient steam,
@@ -262,6 +246,7 @@ namespace HexWars.NetServer.Endpoints
             AuthFailureThrottle throttle,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
+            TimeProvider time,
             ILoggerFactory loggerFactory,
             CancellationToken ct)
         {
@@ -305,7 +290,12 @@ namespace HexWars.NetServer.Endpoints
                         StatusCodes.Status404NotFound, ApiErrors.NotFound, ApiErrors.NotFoundMessage);
                 }
 
-                if (match.Status is not (MatchStatus.Waiting or MatchStatus.Active))
+                // A finished match is refused, with one exception: a game that STARTED and ended within the
+                // reconnect window is still joinable, so a seat that missed the final APPLY can get a
+                // credential and be shown how it ended. The credential the service then issues is capped at
+                // what is left of that window.
+                if (match.Status is not (MatchStatus.Waiting or MatchStatus.Active)
+                    && !IsInsideTheTerminalWindow(match, options, time.GetUtcNow()))
                 {
                     return ApiErrors.Failure(
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.MatchEndedMessage);
@@ -415,6 +405,21 @@ namespace HexWars.NetServer.Endpoints
         /// there is none. Never anything from the request, which the caller controls.</summary>
         public static string CallerKey(HttpContext http) =>
             http.Connection.RemoteIpAddress?.ToString() ?? UnknownCaller;
+
+        /// <summary>Whether a match that is over is close enough to its ending for a seat to rejoin it. Only
+        /// a match that actually started - one that expired while waiting has no game to show anybody.</summary>
+        static bool IsInsideTheTerminalWindow(
+            PersistedMatch match, MatchHostingOptions options, DateTimeOffset now)
+        {
+            if (match.StartReplay is null) return false;
+            if (match.CompletedAt is not DateTimeOffset finishedAt) return false;
+            if (options.TerminalReconnectSeconds <= 0) return false;
+
+            // Strict, and matched by both stores: at exactly the closing instant there is no window left.
+            // This answer is only ever a fast refusal, though - the store re-reads the clock under the row
+            // lock, and its answer is the one that decides whether a credential exists.
+            return now < finishedAt + TimeSpan.FromSeconds(options.TerminalReconnectSeconds);
+        }
 
         /// <summary>
         /// The websocket URL for this deployment: the public base URL with an upgraded scheme and the v2

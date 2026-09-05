@@ -14,8 +14,13 @@ namespace HexWars.NetServer.Tests.Fakes
     /// microsecond, because timestamptz cannot hold a .NET tick; and the recorded rows are copied on the way
     /// in and out, so a caller mutating an array it passed in cannot reach into stored state.
     /// </summary>
-    public sealed class InMemoryMatchStore : IMatchStore
+    public sealed class InMemoryMatchStore(TimeProvider? time = null) : IMatchStore
     {
+        /// <summary>The clock a write judges a match by, read as the lock is taken - the same rule the
+        /// Postgres store follows. Without one, the instant the caller passed is used, which keeps every
+        /// test that does not care about the window behaving exactly as it did.</summary>
+        DateTimeOffset AtLock(DateTimeOffset callerNow) => time?.GetUtcNow() ?? callerNow;
+
         const long TicksPerMicrosecond = 10;
 
         readonly object _gate = new();
@@ -327,8 +332,9 @@ namespace HexWars.NetServer.Tests.Fakes
             }
         }
 
-        public Task<bool> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId, string steamId,
-            DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct)
+        public Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId,
+            string steamId, DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
+            TimeSpan? allowTerminalWithin = null)
         {
             ValidateCredentialHash(credentialHash, nameof(credentialHash));
             ValidateSteamId(steamId, nameof(steamId));
@@ -345,7 +351,24 @@ namespace HexWars.NetServer.Tests.Fakes
                     throw new ArgumentException(MatchStoreGuard.NoSeatMessage, nameof(steamId));
 
                 MatchRow row = _matches[matchId];
-                if (!row.IsOpen) return Task.FromResult(false);
+                DateTimeOffset effectiveExpiresAt = expiresAt;
+
+                if (!row.IsOpen)
+                {
+                    DateTimeOffset atLock = AtLock(now);
+
+                    if (!ReachableAfterTheEnd(row, atLock, allowTerminalWithin))
+                        return Task.FromResult(new CredentialReplacement(false, null));
+
+                    // Capped under the same lock Postgres caps it under: a caller that decided on a full
+                    // TTL before the match finished cannot have known, and only the value computed here is
+                    // certain to be inside the window.
+                    DateTimeOffset closes = row.CompletedAt!.Value + allowTerminalWithin!.Value;
+                    if (closes < effectiveExpiresAt) effectiveExpiresAt = closes;
+
+                    if (effectiveExpiresAt <= atLock)
+                        return Task.FromResult(new CredentialReplacement(false, null));
+                }
 
                 CredentialRow? clash = Credential(credentialHash);
                 if (clash is not null)
@@ -362,11 +385,27 @@ namespace HexWars.NetServer.Tests.Fakes
                     Hash = (byte[])credentialHash.Clone(),
                     MatchId = matchId,
                     SteamId = steamId,
-                    ExpiresAt = Stored(expiresAt),
+                    ExpiresAt = Stored(effectiveExpiresAt),
                 });
 
-                return Task.FromResult(true);
+                return Task.FromResult(new CredentialReplacement(true, Stored(effectiveExpiresAt)));
             }
+        }
+
+        /// <summary>
+        /// Whether a match that is over is still close enough to its ending to be joined.
+        ///
+        /// Only a match that actually started: a waiting match that expired never had a game in it, so
+        /// there is nothing a returning seat could be shown.
+        /// </summary>
+        static bool ReachableAfterTheEnd(MatchRow row, DateTimeOffset now, TimeSpan? window)
+        {
+            if (window is not TimeSpan allowed || allowed <= TimeSpan.Zero) return false;
+            if (row.StartReplay is null) return false;
+            if (row.CompletedAt is not DateTimeOffset completedAt) return false;
+
+            // Strict: at exactly the closing instant there is no window left to give.
+            return now < completedAt + allowed;
         }
 
         public Task RevokeJoinCredentialsAsync(Guid matchId, string steamId, DateTimeOffset revokedAt, CancellationToken ct)

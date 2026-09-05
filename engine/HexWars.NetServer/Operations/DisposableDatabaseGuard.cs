@@ -1,28 +1,30 @@
+using HexWars.NetServer.Persistence;
 using Npgsql;
-using DbUrl = HexWars.NetServer.Persistence.DatabaseUrl;
 
-namespace HexWars.NetServer.Tests.Fixtures
+namespace HexWars.NetServer.Operations
 {
     /// <summary>
-    /// Decides whether a database is one this test run is allowed to destroy.
+    /// Decides whether a database is one a destructive self-test is allowed to destroy.
     ///
-    /// Every database-backed fixture begins by dropping and recreating the public schema, so the only
-    /// thing between HEXWARS_TEST_DATABASE_URL and somebody's real data is this check. A warning in a
-    /// comment is not a check: a pasted URL for the wrong database reads exactly like one for the right
-    /// database, and by the time anyone notices the difference the schema is gone.
+    /// This is a deliberate copy of the rule the test fixture enforces, not a shared implementation. The
+    /// server assembly cannot reference the test project, and the alternative - trusting an operator who
+    /// typed a URL - is not an alternative: the durable self-test opens by dropping and recreating the
+    /// public schema of whatever it is given, and a pasted URL for the wrong database reads exactly like
+    /// one for the right database. The two copies are kept identical on purpose, and each is tested where
+    /// it lives.
     ///
-    /// A database qualifies one of two ways. Either its name says what it is - the word "test" standing
-    /// on its own - or somebody named it explicitly in the confirmation variable. The confirmation is by
-    /// name rather than a bare "yes" on purpose: a stale "yes" left in a shell would happily authorise
-    /// the next database that came along, while a stale name only ever authorises the same one.
+    /// A database qualifies one of two ways. Either its name says what it is - the word "test" standing on
+    /// its own - or somebody named it explicitly in the confirmation variable. The confirmation is by name
+    /// rather than a bare yes: a stale yes left in a shell would authorise the next database that came
+    /// along, while a stale name only ever authorises the same one.
     ///
-    /// Pure and static, with the environment as a parameter, so the rule can be tested without a
-    /// database and without mutating the environment of the process running the tests.
+    /// Pure and static, with the environment as a parameter, so the rule can be exercised without a
+    /// database and without mutating the environment of the process asking.
     /// </summary>
-    public static class DisposableDatabaseGuard
+    internal static class DisposableDatabaseGuard
     {
-        /// <summary>Set to the exact database name to authorise a database whose name does not say it is
-        /// a test database.</summary>
+        /// <summary>Set to the exact database name to authorise a database whose name does not say it is a
+        /// test database.</summary>
         public const string ConfirmationEnvironmentVariable = "HEXWARS_TEST_DATABASE_DISPOSABLE";
 
         /// <summary>The word a database name has to be built from to authorise itself.</summary>
@@ -54,8 +56,8 @@ namespace HexWars.NetServer.Tests.Fixtures
         /// <summary>True when this target may be dropped and recreated. <paramref name="reason"/> always
         /// explains the answer and never contains a username or a password, because it is written to a
         /// console that may well be a CI log.</summary>
-        public static bool IsDisposable(string databaseUrlOrConnectionString, Func<string, string?> env,
-            out string reason)
+        public static bool IsDisposable(
+            string databaseUrlOrConnectionString, Func<string, string?> env, out string reason)
         {
             ArgumentNullException.ThrowIfNull(env);
 
@@ -81,7 +83,7 @@ namespace HexWars.NetServer.Tests.Fixtures
                 return true;
             }
 
-            reason = "database \"" + database + "\" is not marked disposable. This test run DROPs and "
+            reason = "database \"" + database + "\" is not marked disposable. This self-test DROPs and "
                 + "recreates the public schema of whatever it is given, so it will only do that to a "
                 + "database called \"" + TestNameMarker + "\", or whose name carries \"" + TestNameMarker
                 + "\" as a word delimited by _ or - , or to one named explicitly in "
@@ -99,7 +101,7 @@ namespace HexWars.NetServer.Tests.Fixtures
             try
             {
                 var parts = new NpgsqlConnectionStringBuilder(
-                    DbUrl.ToNpgsqlConnectionString(databaseUrlOrConnectionString));
+                    DatabaseUrl.ToNpgsqlConnectionString(databaseUrlOrConnectionString));
                 return string.IsNullOrEmpty(parts.Database) ? null : parts.Database;
             }
             catch (Exception ex) when (ex is FormatException or ArgumentException)

@@ -51,6 +51,15 @@ namespace HexWars.NetServer.Configuration
         public const string MatchBlockedSteamIdsKey = "MATCH_BLOCKED_STEAM_IDS";
         public const string MatchMetricsTokenKey = "MATCH_METRICS_TOKEN";
         public const string MatchLogPseudonymKeyKey = "MATCH_LOG_PSEUDONYM_KEY";
+        public const string MatchHeartbeatSecondsKey = "MATCH_HEARTBEAT_SECONDS";
+        public const string MatchStaleConnectionSecondsKey = "MATCH_STALE_CONNECTION_SECONDS";
+        public const string MatchOutboundQueueCapacityKey = "MATCH_OUTBOUND_QUEUE_CAPACITY";
+        public const string MatchAuthTimeoutSecondsKey = "MATCH_AUTH_TIMEOUT_SECONDS";
+        public const string MatchTerminalReconnectSecondsKey = "MATCH_TERMINAL_RECONNECT_SECONDS";
+        public const string MatchMaxSocketsPerIpKey = "MATCH_MAX_SOCKETS_PER_IP";
+        public const string MatchOutboundQueueBytesKey = "MATCH_OUTBOUND_QUEUE_BYTES";
+        public const string MatchCredentialRecheckSecondsKey = "MATCH_CREDENTIAL_RECHECK_SECONDS";
+        public const string MatchMaxRechecksPerCadenceKey = "MATCH_MAX_RECHECKS_PER_CADENCE";
 
         /// <summary>Keys whose failures belong to <see cref="SteamOptions"/> rather than the match host.</summary>
         public static readonly string[] SteamKeys =
@@ -129,11 +138,16 @@ namespace HexWars.NetServer.Configuration
             string? protocolRaw = Value(config, MatchProtocolVersionKey);
             if (protocolRaw is not null)
             {
+                // A supported value rather than any positive integer. The number is written into every
+                // match row and compared against the number a later host carries, so a typo here does not
+                // fail now - it fails months from now, as every match this host wrote becoming
+                // unrecoverable. There is no code path for a protocol this build does not speak.
                 if (int.TryParse(protocolRaw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int protocol)
-                    && protocol > 0)
+                    && ProtocolContract.SupportedVersions.Contains(protocol))
                     match.ProtocolVersion = protocol;
                 else
-                    errors.Add(MatchProtocolVersionKey + ": must be a positive integer");
+                    errors.Add(MatchProtocolVersionKey + ": must be one of " + ProtocolContract.SupportedList
+                        + ", the wire protocol(s) this build speaks");
             }
 
             string? ttlRaw = Value(config, MatchJoinTokenTtlSecondsKey);
@@ -148,6 +162,67 @@ namespace HexWars.NetServer.Configuration
                         + MatchHostingOptions.MinJoinTokenTtlSeconds + " and "
                         + MatchHostingOptions.MaxJoinTokenTtlSeconds);
             }
+
+            match.HeartbeatIntervalSeconds = BoundedInt(
+                config, MatchHeartbeatSecondsKey,
+                MatchHostingOptions.MinHeartbeatIntervalSeconds,
+                MatchHostingOptions.MaxHeartbeatIntervalSeconds,
+                MatchHostingOptions.DefaultHeartbeatIntervalSeconds, errors);
+
+            match.StaleConnectionSeconds = BoundedInt(
+                config, MatchStaleConnectionSecondsKey,
+                MatchHostingOptions.MinStaleConnectionSeconds,
+                MatchHostingOptions.MaxStaleConnectionSeconds,
+                MatchHostingOptions.DefaultStaleConnectionSeconds, errors);
+
+            match.OutboundQueueCapacity = BoundedInt(
+                config, MatchOutboundQueueCapacityKey,
+                MatchHostingOptions.MinOutboundQueueCapacity,
+                MatchHostingOptions.MaxOutboundQueueCapacity,
+                MatchHostingOptions.DefaultOutboundQueueCapacity, errors);
+
+            match.AuthFrameTimeoutSeconds = BoundedInt(
+                config, MatchAuthTimeoutSecondsKey,
+                MatchHostingOptions.MinAuthFrameTimeoutSeconds,
+                MatchHostingOptions.MaxAuthFrameTimeoutSeconds,
+                MatchHostingOptions.DefaultAuthFrameTimeoutSeconds, errors);
+
+            match.TerminalReconnectSeconds = BoundedInt(
+                config, MatchTerminalReconnectSecondsKey,
+                MatchHostingOptions.MinTerminalReconnectSeconds,
+                MatchHostingOptions.MaxTerminalReconnectSeconds,
+                MatchHostingOptions.DefaultTerminalReconnectSeconds, errors);
+
+            match.MaxSocketsPerIp = BoundedInt(
+                config, MatchMaxSocketsPerIpKey,
+                MatchHostingOptions.MinMaxSocketsPerIp,
+                MatchHostingOptions.MaxMaxSocketsPerIp,
+                MatchHostingOptions.DefaultMaxSocketsPerIp, errors);
+
+            match.OutboundQueueBytes = BoundedInt(
+                config, MatchOutboundQueueBytesKey,
+                MatchHostingOptions.MinOutboundQueueBytes,
+                MatchHostingOptions.MaxOutboundQueueBytes,
+                MatchHostingOptions.DefaultOutboundQueueBytes, errors);
+
+            match.CredentialRecheckSeconds = BoundedInt(
+                config, MatchCredentialRecheckSecondsKey,
+                MatchHostingOptions.MinCredentialRecheckSeconds,
+                MatchHostingOptions.MaxCredentialRecheckSeconds,
+                MatchHostingOptions.DefaultCredentialRecheckSeconds, errors);
+
+            match.MaxRechecksPerCadence = BoundedInt(
+                config, MatchMaxRechecksPerCadenceKey,
+                MatchHostingOptions.MinMaxRechecksPerCadence,
+                MatchHostingOptions.MaxMaxRechecksPerCadence,
+                MatchHostingOptions.DefaultMaxRechecksPerCadence, errors);
+
+            // Checked as a pair rather than as two ranges, because either value alone can be perfectly
+            // reasonable and the combination still closes healthy sockets: a window that is not longer than
+            // the ping cadence judges silence over an interval the client was never given a chance to
+            // answer in, and the symptom is players being disconnected mid-game for no visible reason.
+            if (match.StaleConnectionSeconds <= match.HeartbeatIntervalSeconds)
+                errors.Add(MatchStaleConnectionSecondsKey + ": must be greater than " + MatchHeartbeatSecondsKey);
 
             string? trustRaw = Value(config, MatchTrustForwardedHeadersKey);
             if (trustRaw is not null)
@@ -294,6 +369,23 @@ namespace HexWars.NetServer.Configuration
 
         static string[] ReadList(IConfiguration config, string key) => SplitList(Value(config, key) ?? string.Empty);
 
+        /// <summary>An optional integer key with a floor and a ceiling. An absent key keeps the default; a
+        /// value that is not an integer and one that is out of range are the same mistake to an operator,
+        /// so they get the same message naming the range rather than a parser's vocabulary.</summary>
+        static int BoundedInt(
+            IConfiguration config, string key, int min, int max, int fallback, List<string> errors)
+        {
+            string? raw = Value(config, key);
+            if (raw is null) return fallback;
+
+            if (int.TryParse(raw, NumberStyles.Integer, CultureInfo.InvariantCulture, out int parsed)
+                && parsed >= min && parsed <= max)
+                return parsed;
+
+            errors.Add(key + ": must be an integer between " + min + " and " + max);
+            return fallback;
+        }
+
         static string[] SplitList(string raw) => raw
             .Split(",", StringSplitOptions.RemoveEmptyEntries)
             .Select(part => part.Trim())
@@ -324,6 +416,15 @@ namespace HexWars.NetServer.Configuration
             target.BlockedSteamIds = source.BlockedSteamIds;
             target.MetricsToken = source.MetricsToken;
             target.LogPseudonymKey = source.LogPseudonymKey;
+            target.HeartbeatIntervalSeconds = source.HeartbeatIntervalSeconds;
+            target.StaleConnectionSeconds = source.StaleConnectionSeconds;
+            target.OutboundQueueCapacity = source.OutboundQueueCapacity;
+            target.AuthFrameTimeoutSeconds = source.AuthFrameTimeoutSeconds;
+            target.TerminalReconnectSeconds = source.TerminalReconnectSeconds;
+            target.MaxSocketsPerIp = source.MaxSocketsPerIp;
+            target.OutboundQueueBytes = source.OutboundQueueBytes;
+            target.CredentialRecheckSeconds = source.CredentialRecheckSeconds;
+            target.MaxRechecksPerCadence = source.MaxRechecksPerCadence;
         }
 
         /// <summary>Environment variables cannot change under a running process, so the verdict is computed

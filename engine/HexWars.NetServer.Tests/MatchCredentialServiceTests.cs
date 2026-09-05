@@ -225,10 +225,13 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task IssuingForAMatchThatHasEnded_IsRefusedRatherThanStored()
+        public async Task IssuingLongAfterAMatchHasEnded_IsRefusedRatherThanStored()
         {
             await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
             await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            _clock.Advance(
+                TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds + 60));
 
             var refused = Assert.ThrowsAsync<InvalidOperationException>(
                 () => _service.IssueAsync(_matchId, _seat0, Ct));
@@ -237,16 +240,145 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public async Task ACredentialStopsValidatingWhenItsMatchEnds()
+        public async Task IssuingInsideTheTerminalWindow_HandsBackACredentialCappedAtTheWindow()
         {
+            // A seat that missed the final APPLY has to be able to ask for a way back in, and the way back
+            // in has to be no longer than the window it was granted under: a credential that outlived it
+            // would be a working key to a match nobody can play.
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            _clock.Advance(TimeSpan.FromMinutes(5));
+
             IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            Assert.That(issued.ExpiresAt,
+                Is.EqualTo(Origin.AddSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds)),
+                "the credential ends when the window does, not 15 minutes after it was asked for");
             Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task IssuingForAMatchThatEndedWithoutStarting_IsRefused()
+        {
+            // Nothing started, so there is no final position to come back for. The window exists to deal an
+            // ending, and a match that expired while waiting for barracks has none.
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Expired, null, Origin, Ct);
+
+            var refused = Assert.ThrowsAsync<InvalidOperationException>(
+                () => _service.IssueAsync(_matchId, _seat0, Ct));
+
+            Assert.That(refused!.Message, Is.EqualTo(MatchCredentialService.MatchNotOpenMessage));
+        }
+
+        [Test]
+        public async Task ACredentialKeepsValidatingBrieflyAfterTheMatchEnds()
+        {
+            // The last APPLY of a game is the frame most likely to be lost: it goes out at the instant the
+            // match becomes terminal. A player whose socket dropped a moment earlier has no other way to
+            // learn how the game they were playing ended, so the credential still opens the match for a
+            // short while afterwards.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
 
             await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
             await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
 
+            _clock.Advance(TimeSpan.FromSeconds(30));
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task ACredentialStopsValidatingOnceTheTerminalWindowHasPassed()
+        {
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            // Past the window and still inside the credential TTL, so the refusal is about the match and
+            // not about the credential.
+            _clock.Advance(
+                TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds + 60));
+
             Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Null,
-                "a credential outlives the game it was issued for, so a handshake must not seat a finished match");
+                "the window is for learning how the game ended, and it closes");
+        }
+
+        [Test]
+        public async Task ALiveCredentialStopsBeingValidWhenTheTerminalWindowCloses()
+        {
+            // The expiry stored on a credential issued while the match was still being played knows
+            // nothing about the ending that came later, so a socket holding one would outlive the window
+            // by whatever was left of its TTL. The re-check has to judge the match as well as the token.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+            Assert.That(CredentialEncoding.TryFromBase64Url(issued.Credential, out byte[] raw), Is.True);
+            byte[] hash = SHA256.HashData(raw);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Completed, 0, Origin, Ct);
+
+            Assert.That(
+                await _service.IsStillValidAsync(hash, _matchId, Origin.AddMinutes(5), Ct), Is.True);
+
+            DateTimeOffset past = Origin.AddSeconds(
+                MatchHostingOptions.DefaultTerminalReconnectSeconds + 60);
+
+            Assert.That(past, Is.LessThan(issued.ExpiresAt),
+                "the credential itself is still unexpired, so the refusal can only be about the window");
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, past, Ct), Is.False);
+
+            // And the boundary itself is the closing instant, not the last usable one - the same strict
+            // test the handshake and both stores apply.
+            DateTimeOffset boundary =
+                Origin.AddSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds);
+
+            Assert.That(
+                await _service.IsStillValidAsync(hash, _matchId, boundary.AddTicks(-1), Ct), Is.True);
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, boundary, Ct), Is.False);
+        }
+
+        [Test]
+        public async Task ACredentialValidatesIntoAnAbandonedMatchThatHadStarted()
+        {
+            // A game the reaper abandoned underneath its players ended just as definitely as one somebody
+            // won, and the seats deserve to be shown the same final position rather than a bare refusal.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            await _storage.TryStartMatchAsync(_matchId, "START-REPLAY", Origin, Ct);
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Abandoned, null, Origin, Ct);
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task ALiveCredentialIsInvalidTheMomentAMatchThatNeverStartedExpires()
+        {
+            // The window belongs to a match that was PLAYED. One that expired while still waiting for
+            // barracks has no game in it, so there is nothing for a socket to come back and be shown - and
+            // a socket still holding a credential for it is holding nothing.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+            Assert.That(CredentialEncoding.TryFromBase64Url(issued.Credential, out byte[] raw), Is.True);
+            byte[] hash = SHA256.HashData(raw);
+
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, Origin, Ct), Is.True);
+
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Expired, null, Origin, Ct);
+
+            Assert.That(await _service.IsStillValidAsync(hash, _matchId, Origin, Ct), Is.False,
+                "immediately, not after the reconnect window it was never entitled to");
+        }
+
+        [Test]
+        public async Task ACredentialNeverValidatesIntoAMatchThatEndedWithoutStarting()
+        {
+            // No start replay means no game was ever dealt, so there is no ending to show anybody and the
+            // window has nothing to be for.
+            IssuedCredential issued = await _service.IssueAsync(_matchId, _seat0, Ct);
+
+            await _storage.TryCompleteMatchAsync(_matchId, MatchStatus.Expired, null, Origin, Ct);
+
+            Assert.That(await _service.ValidateAsync(_matchId, issued.Credential, Ct), Is.Null);
         }
 
         [TestCaseSource(nameof(CredentialsThatCannotBeCredentials))]

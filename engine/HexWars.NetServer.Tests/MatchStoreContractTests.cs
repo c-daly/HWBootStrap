@@ -678,12 +678,12 @@ namespace HexWars.NetServer.Tests
             var match = await NewWaitingMatchAsync();
 
             Assert.That(
-                await Store.ReplaceJoinCredentialAsync(
-                    Hash(60), match.MatchId, match.Seat0, Created.AddMinutes(15), Created, Ct),
+                (await Store.ReplaceJoinCredentialAsync(
+                    Hash(60), match.MatchId, match.Seat0, Created.AddMinutes(15), Created, Ct)).Replaced,
                 Is.True);
             Assert.That(
-                await Store.ReplaceJoinCredentialAsync(
-                    Hash(70), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct),
+                (await Store.ReplaceJoinCredentialAsync(
+                    Hash(70), match.MatchId, match.Seat0, Move1.AddMinutes(15), Move1, Ct)).Replaced,
                 Is.True);
 
             JoinCredentialRecord? replaced = await Store.FindJoinCredentialAsync(Hash(60), Ct);
@@ -719,14 +719,81 @@ namespace HexWars.NetServer.Tests
             Assert.That(
                 await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
 
-            bool replaced = await Store.ReplaceJoinCredentialAsync(
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
                 Hash(64), match.MatchId, match.Seat0, Ended.AddMinutes(15), Ended, Ct);
 
-            Assert.That(replaced, Is.False);
+            Assert.That(replacement.Replaced, Is.False);
             Assert.That(await Store.FindJoinCredentialAsync(Hash(64), Ct), Is.Null,
                 "a refused replace must not store the credential it refused to issue");
             Assert.That((await Store.FindJoinCredentialAsync(Hash(63), Ct))!.RevokedAt, Is.Null,
                 "nor revoke the one it failed to replace: the caller would be left with none");
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatEndedInsideTheAllowedWindow_Succeeds()
+        {
+            // The one exception to a terminal match refusing credentials: a game that started and ended
+            // recently is still joinable, because a seat that missed the final APPLY has no other way to
+            // learn how it ended.
+            var match = await NewActiveMatchAsync();
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
+                Hash(67), match.MatchId, match.Seat0, Ended.AddMinutes(5), Ended.AddMinutes(3), Ct,
+                allowTerminalWithin: TimeSpan.FromMinutes(10));
+
+            Assert.That(replacement.Replaced, Is.True);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(67), Ct), Is.Not.Null);
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_ExactlyAtTheWindowBoundary_IsRefused()
+        {
+            // At the closing instant there is no window left to give. A credential minted here would be
+            // born dead: stored, handed back, and refused by the very next thing that looked at it.
+            var match = await NewActiveMatchAsync();
+            TimeSpan window = TimeSpan.FromMinutes(10);
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
+                Hash(71), match.MatchId, match.Seat0, Ended.AddMinutes(30), Ended + window, Ct, window);
+
+            Assert.That(replacement.Replaced, Is.False);
+            Assert.That(replacement.EffectiveExpiresAt, Is.Null);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(71), Ct), Is.Null,
+                "a refused replace stores nothing");
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatEndedBeforeTheWindow_IsStillRefused()
+        {
+            var match = await NewActiveMatchAsync();
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Completed, 0, Ended, Ct), Is.True);
+
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
+                Hash(68), match.MatchId, match.Seat0, Ended.AddMinutes(30), Ended.AddMinutes(20), Ct,
+                allowTerminalWithin: TimeSpan.FromMinutes(10));
+
+            Assert.That(replacement.Replaced, Is.False);
+            Assert.That(await Store.FindJoinCredentialAsync(Hash(68), Ct), Is.Null);
+        }
+
+        [Test]
+        public async Task ReplaceJoinCredential_OnAMatchThatEndedWithoutStarting_IsRefusedEvenInTheWindow()
+        {
+            // No start replay: nothing was ever dealt, so there is no ending to come back for.
+            var match = await NewWaitingMatchAsync();
+            Assert.That(
+                await Store.TryCompleteMatchAsync(match.MatchId, MatchStatus.Expired, null, Ended, Ct), Is.True);
+
+            CredentialReplacement replacement = await Store.ReplaceJoinCredentialAsync(
+                Hash(69), match.MatchId, match.Seat0, Ended.AddMinutes(5), Ended.AddMinutes(1), Ct,
+                allowTerminalWithin: TimeSpan.FromMinutes(10));
+
+            Assert.That(replacement.Replaced, Is.False);
         }
 
         [Test]

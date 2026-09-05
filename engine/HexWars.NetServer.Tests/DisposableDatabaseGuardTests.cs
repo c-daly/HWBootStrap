@@ -1,5 +1,6 @@
 using HexWars.NetServer.Tests.Fixtures;
 using NUnit.Framework;
+using ServerGuard = HexWars.NetServer.Operations.DisposableDatabaseGuard;
 
 namespace HexWars.NetServer.Tests
 {
@@ -32,8 +33,12 @@ namespace HexWars.NetServer.Tests
 
         [TestCase("hexwars_test")]
         [TestCase("test")]
-        [TestCase("HexWarsTEST")]
-        [TestCase("ci_TestBed")]
+        [TestCase("test_hexwars")]
+        [TestCase("a_test_b")]
+        [TestCase("HEXWARS_TEST")]
+        [TestCase("ci-test")]
+        [TestCase("test-bed")]
+        [TestCase("ci-test-bed")]
         public void ADatabaseWhoseNameSaysItIsForTests_IsDisposable(string database)
         {
             Assert.That(DisposableDatabaseGuard.IsDisposable(Url(database), NoEnvironment, out string url),
@@ -46,11 +51,39 @@ namespace HexWars.NetServer.Tests
         [TestCase("production")]
         [TestCase("hexwars_prod")]
         [TestCase("postgres")]
+        [TestCase("contest")]
+        [TestCase("latest")]
+        [TestCase("protest_db")]
+        [TestCase("HexWarsTEST")]
+        [TestCase("ci_TestBed")]
         public void ADatabaseWhoseNameDoesNot_IsRefused(string database)
         {
+            // The last five are why the rule is a word and not a substring. Every one of them carries the
+            // letters t-e-s-t and none of them is a database anybody meant to hand to something that drops
+            // schemas: "contest" and "latest" are ordinary English, and a "TestBed" that was never
+            // delimited is indistinguishable from them to a search that only looks for the letters.
             Assert.That(DisposableDatabaseGuard.IsDisposable(Url(database), NoEnvironment, out _), Is.False);
             Assert.That(DisposableDatabaseGuard.IsDisposable(KeyValue(database), NoEnvironment, out _),
                 Is.False, "the key=value form is the same target and must get the same answer");
+        }
+
+        [TestCase("hexwars_test", true)]
+        [TestCase("test", true)]
+        [TestCase("test_hexwars", true)]
+        [TestCase("a_test_b", true)]
+        [TestCase("contest", false)]
+        [TestCase("latest", false)]
+        [TestCase("protest_db", false)]
+        [TestCase("hexwars", false)]
+        public void TheServerCopyAndTheFixtureCopy_AnswerIdentically(string database, bool disposable)
+        {
+            // Two copies of one rule, kept identical on purpose because the server assembly cannot
+            // reference the test project. A drift between them is a self-test that would drop a schema the
+            // test fixture would have refused, or the other way round.
+            Assert.That(ServerGuard.IsDisposable(Url(database), NoEnvironment, out string server),
+                Is.EqualTo(disposable), server);
+            Assert.That(DisposableDatabaseGuard.IsDisposable(Url(database), NoEnvironment, out string fixture),
+                Is.EqualTo(disposable), fixture);
         }
 
         [Test]
@@ -129,14 +162,14 @@ namespace HexWars.NetServer.Tests
             Assert.That(DisposableDatabaseGuard.DatabaseName(url), Is.EqualTo("hexwars_test"));
         }
 
-        [TestCase("prod?test")]
-        [TestCase("test/prod")]
-        [TestCase("test#prod")]
-        [TestCase("test prod")]
+        [TestCase("prod?_test")]
+        [TestCase("test_/prod")]
+        [TestCase("test_#prod")]
+        [TestCase("test_ prod")]
         public void ADatabaseNameCarryingAUrlDelimiter_IsCheckedAndHandedOutAsTheSameDatabase(string database)
         {
             // The fixture hands out a URL as well as a connection string, and host tests feed that URL
-            // into DATABASE_URL. A name like "prod?test" satisfies the name rule, but dropped into a URL
+            // into DATABASE_URL. A name like "prod?_test" satisfies the name rule, but dropped into a URL
             // unescaped the question mark starts a query string and the URL reads back as "prod": the
             // database that was approved and the database that would have been migrated are not the same
             // one, and the second is somebody's production data.
