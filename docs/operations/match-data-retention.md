@@ -88,8 +88,11 @@ The restore procedure itself is not in this document. It belongs to the match re
 
 ## 5. Sweeper contract
 
-The rules above are enforced by a hosted service `MatchRetentionService`, implemented in the
-security and operations task. It runs every 60 minutes and issues exactly these statements:
+The rules above are enforced by the hosted service
+[`MatchRetentionService`](../../engine/HexWars.NetServer/Operations/MatchRetentionService.cs), which is
+registered only when `DATABASE_URL` is set. It runs every `MATCH_RETENTION_SWEEP_MINUTES` (60 by
+default) and calls `IMatchStore.ApplyRetentionAsync`, which issues exactly these statements inside one
+transaction, with the four ages as parameters rather than the literals written here:
 
 ```sql
 UPDATE matches SET status='expired', completed_at=now(), last_activity_at=now()
@@ -127,6 +130,11 @@ Two rules constrain the sweeper:
   it.
 - A sweep logs counts only. Row counts per statement, never match ids, Steam ids, command wires, or
   credential material.
+- Abandoning a match closes whatever sockets it still has, with websocket close code **1001**. The
+  statement returns the ids it changed and the sweeper passes them to the match coordinator; that
+  list is the only identifier a sweep ever carries, and it goes to the coordinator rather than to a
+  log. The four ages are set by `MATCH_RETENTION_WAITING_MINUTES`, `MATCH_RETENTION_ACTIVE_IDLE_DAYS`,
+  `MATCH_RETENTION_TERMINAL_DAYS` and `MATCH_RETENTION_CREDENTIAL_HOURS`.
 
 Pseudonymisation is not part of the sweep. It is a deliberate, requested operation, run separately
 once the follow-up migration in section 3 has shipped.
