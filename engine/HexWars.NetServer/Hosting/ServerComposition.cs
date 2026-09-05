@@ -7,6 +7,7 @@ using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
 using HexWars.NetServer.Endpoints;
 using HexWars.NetServer.Persistence;
+using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Steam;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.RateLimiting;
@@ -60,6 +61,20 @@ namespace HexWars.NetServer.Hosting
                 // for a legacy deployment with no database would turn a service nobody resolves into a
                 // startup failure. Singleton for the same reason the store is: it holds no state itself.
                 builder.Services.AddSingleton<IMatchCredentialService, MatchCredentialService>();
+
+                // The durable runtime lives next to the store for the same reason the credential
+                // service does: it cannot be built without one, and in Development the container is
+                // validated at build time, so registering it for a legacy deployment with no database
+                // would turn a service nobody resolves into a startup failure.
+                builder.Services.AddSingleton<ILiveMatchLoader, JournalLiveMatchLoader>();
+
+                // A placeholder until the websocket route brings a real one. TryAdd so the route can
+                // register its own sink ahead of this call and keep it.
+                builder.Services.TryAddSingleton<IConnectionSink, NullConnectionSink>();
+
+                // One coordinator for the process. It holds every match this host is playing, so a
+                // per-request instance would hold none of them.
+                builder.Services.AddSingleton<DurableMatchCoordinator>();
             }
 
             // Registered unconditionally: the typed client resolves its options lazily, so a
