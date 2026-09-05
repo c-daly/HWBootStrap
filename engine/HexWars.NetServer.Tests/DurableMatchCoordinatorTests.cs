@@ -1198,6 +1198,62 @@ namespace HexWars.NetServer.Tests
             Assert.That(_sink.Sent, Is.Empty);
         }
 
+        [Test]
+        public async Task AWindowThatClosesDuringTheLastDatabaseCall_DoesNotStillDealASeat()
+        {
+            // The touch is the last thing a handshake does before it seats anybody, and it is a database
+            // call: every reading of the clock taken before it has had a round trip to be overtaken by. A
+            // seat validated one tick inside the window was still being dealt afterwards.
+            (MatchRecord _, GameState __) = await PlayToTheEndAsync();
+
+            TimeSpan window = TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds);
+            _clock.SetUtcNow(Begin + window - TimeSpan.FromTicks(1));
+
+            _faults.BeforeTouch = () =>
+            {
+                _clock.Advance(TimeSpan.FromTicks(2));
+                return Task.CompletedTask;
+            };
+
+            _sink.Clear();
+            DurableMatchCoordinator.AuthOutcome refused = await Auth("c2", _credential1);
+
+            Assert.That(refused.Ok, Is.False);
+            Assert.That(refused.Seat, Is.EqualTo(-1));
+            Assert.That(refused.FailCode, Is.EqualTo(DurableMatchCoordinator.AuthFailInvalid));
+
+            Assert.That(_sink.Sent, Is.Empty, "no SEAT and no START");
+            Assert.That(_sink.Closed, Is.Empty,
+                "and the socket this seat already had was not superseded by a handshake that failed");
+            Assert.That(_coordinator.ConnectionCount, Is.EqualTo(2), "the connection was never registered");
+            Assert.That(_coordinator.ConnectionsOf(_matchId), Is.EquivalentTo(new[] { "c0", "c1" }));
+        }
+
+        [Test]
+        public async Task AWindowStillOpenAfterTheLastDatabaseCall_SeatsAsBefore()
+        {
+            (MatchRecord played, GameState start) = await PlayToTheEndAsync();
+
+            TimeSpan window = TimeSpan.FromSeconds(MatchHostingOptions.DefaultTerminalReconnectSeconds);
+            _clock.SetUtcNow(Begin + window - TimeSpan.FromSeconds(30));
+
+            _faults.BeforeTouch = () =>
+            {
+                _clock.Advance(TimeSpan.FromSeconds(1));
+                return Task.CompletedTask;
+            };
+
+            _sink.Clear();
+            DurableMatchCoordinator.AuthOutcome seated = await Auth("c2", _credential1);
+
+            Assert.That(seated.Ok, Is.True, seated.FailCode);
+            Assert.That(_sink.MessagesFor("c2"), Is.EqualTo(new[]
+            {
+                "SEAT 1",
+                NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
+            }));
+        }
+
         /// <summary>A loader that moves the clock on while it works: a load that takes long enough for the
         /// answer the credential service already gave to have gone stale.</summary>
         sealed class ClockAdvancingLoader(

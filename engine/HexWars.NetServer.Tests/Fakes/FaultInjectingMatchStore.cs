@@ -40,6 +40,10 @@ namespace HexWars.NetServer.Tests.Fakes
         /// somewhere else in the window the coordinator is trying to complete it in.</summary>
         public Func<Task>? BeforeCompletion { get; set; }
 
+        /// <summary>Runs inside TouchAsync. A liveness stamp is the last database call a handshake makes,
+        /// so it is where a test puts the time that a boundary can be crossed in.</summary>
+        public Func<Task>? BeforeTouch { get; set; }
+
         /// <summary>Arms the next AppendCommandAsync to throw, once. Null disarms it.</summary>
         public void FailNextAppend(Exception? failure) => _nextAppendFailure = failure;
 
@@ -179,8 +183,13 @@ namespace HexWars.NetServer.Tests.Fakes
             throw _afterCompletionFailure;
         }
 
-        public Task TouchAsync(Guid matchId, string? steamId, DateTimeOffset seenAt, CancellationToken ct) =>
-            inner.TouchAsync(matchId, steamId, seenAt, ct);
+        public async Task TouchAsync(
+            Guid matchId, string? steamId, DateTimeOffset seenAt, CancellationToken ct)
+        {
+            if (BeforeTouch is not null) await BeforeTouch().ConfigureAwait(false);
+
+            await inner.TouchAsync(matchId, steamId, seenAt, ct).ConfigureAwait(false);
+        }
 
         public Task<IReadOnlyList<Guid>> ListOpenMatchIdsAsync(CancellationToken ct) =>
             inner.ListOpenMatchIdsAsync(ct);

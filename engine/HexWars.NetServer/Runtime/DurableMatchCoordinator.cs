@@ -287,34 +287,25 @@ namespace HexWars.NetServer.Runtime
                 if (!await HealCompletionAsync(match, dealt, ct).ConfigureAwait(false))
                     return Failed(AuthFailUnavailable);
 
-                // Judged HERE as well as in the credential service, and this is the check that counts. The
-                // service answers before the match has been loaded and before this gate was free, so on a
-                // slow load - or behind a queue of other operations on the same match - the window it was
-                // reading can have closed by the time a seat would actually be dealt.
-                if (!CanSeat(match, time.GetUtcNow()))
+                // Is there a seat in this match at all - status and start state only. Whether the seat may
+                // still be TAKEN is a question about the clock, and the clock is not read until every await
+                // is behind us.
+                if (!CanSeat(match))
                 {
-                    logger.LogDebug(
-                        "Turned a player away: this match is {Status} and its reconnect window has closed",
-                        match.Status);
+                    logger.LogDebug("Turned a player away: this match is {Status}", match.Status);
                     return Failed(AuthFailInvalid);
                 }
 
                 int seat = validation.Seat;
-                DateTimeOffset now = time.GetUtcNow();
 
-                // One live socket per seat. A second AUTH on the same seat is far more often a reconnect
-                // whose predecessor has not been noticed yet than it is two clients - and when it is two,
-                // one credential fanning out into an unbounded number of sockets is the shape of an abuse
-                // rather than of a game.
-                SupersedeSeat(match, connectionId, validation.SteamId);
-
-                match.Connections[connectionId] = validation.SteamId;
-                match.LastConnectionAt = now;
-                _connections[connectionId] = matchId;
-
+                // Recorded before anything is decided, and deliberately so. A player who is refused just
+                // below has merely been noted as present, which costs this match a little of its reaper
+                // budget and nothing else - and a stamp that only landed for the seats that were going to
+                // be served would be a liveness signal that agrees with itself.
                 try
                 {
-                    await store.TouchAsync(matchId, validation.SteamId, now, ct).ConfigureAwait(false);
+                    await store.TouchAsync(matchId, validation.SteamId, time.GetUtcNow(), ct)
+                        .ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
@@ -326,6 +317,30 @@ namespace HexWars.NetServer.Runtime
                     // nothing else. Refusing the connection over it would be strictly worse for the player.
                     logger.LogWarning(failure, "Could not record that a player is here");
                 }
+
+                // THE gate, and the last thing that happens before this handshake changes anything. Every
+                // earlier reading of the clock has since had a database call to overtake it: a seat
+                // validated one tick inside the window was still being dealt when the touch above took
+                // longer than that tick. Nothing is superseded, registered or sent until this passes.
+                DateTimeOffset now = time.GetUtcNow();
+
+                if (!WithinTerminalWindow(match, now))
+                {
+                    logger.LogDebug(
+                        "Turned a player away: this match is {Status} and its reconnect window has closed",
+                        match.Status);
+                    return Failed(AuthFailInvalid);
+                }
+
+                // One live socket per seat. A second AUTH on the same seat is far more often a reconnect
+                // whose predecessor has not been noticed yet than it is two clients - and when it is two,
+                // one credential fanning out into an unbounded number of sockets is the shape of an abuse
+                // rather than of a game.
+                SupersedeSeat(match, connectionId, validation.SteamId);
+
+                match.Connections[connectionId] = validation.SteamId;
+                match.LastConnectionAt = now;
+                _connections[connectionId] = matchId;
 
                 sink.Send(connectionId, NetProtocol.Seat((PlayerId)seat));
 
@@ -1110,19 +1125,27 @@ namespace HexWars.NetServer.Runtime
         /// Whether a seat may be taken in this match right now.
         ///
         /// Waiting and active are the game. A match that started and has since ended - completed, expired
-        /// or abandoned - is served too, but only while its reconnect window is open: the final APPLY is
-        /// the frame most likely to be lost, and a player whose socket dropped a moment before it has no
-        /// other way to learn how the game they were playing ended. A match that never started has no game
-        /// in it and is never served once it is over.
+        /// or abandoned - has a seat in it too: the final APPLY is the frame most likely to be lost, and a
+        /// player whose socket dropped a moment before it has no other way to learn how the game they were
+        /// playing ended. A match that never started has no game in it and is never served once it is over.
         ///
-        /// A terminal match whose record carries no completion instant is refused outright. There is no
-        /// honest way to judge a window against an ending nobody wrote down, and guessing it is open is the
-        /// guess that hands out seats forever.
+        /// Whether that seat may still be taken is a separate question, asked of the clock in
+        /// <see cref="WithinTerminalWindow"/> once every await is behind us.
         /// </summary>
-        bool CanSeat(LiveMatch match, DateTimeOffset now)
+        static bool CanSeat(LiveMatch match) =>
+            match.Status is MatchStatus.Waiting or MatchStatus.Active || match.Start is not null;
+
+        /// <summary>
+        /// Whether a match that is over may still be joined at <paramref name="now"/>.
+        ///
+        /// The one place the boundary lives, so it cannot drift between the callers. Strict: at the closing
+        /// instant there is no window left to give. A terminal match whose record carries no completion
+        /// instant is refused outright - there is no honest way to judge a window against an ending nobody
+        /// wrote down, and guessing it is open is the guess that hands out seats forever.
+        /// </summary>
+        bool WithinTerminalWindow(LiveMatch match, DateTimeOffset now)
         {
             if (match.Status is MatchStatus.Waiting or MatchStatus.Active) return true;
-            if (match.Start is null) return false;
 
             TimeSpan window = options.Value.TerminalReconnectWindow;
 

@@ -580,6 +580,67 @@ namespace HexWars.NetServer.Tests
             await startup.StopAsync(Ct).WaitAsync(TimeSpan.FromSeconds(5));
         }
 
+        [Test]
+        public async Task TheStartupService_SettlesIntoTheSteadyCadenceAfterTheBackoff()
+        {
+            // Short at first, because most failures at boot are a database a few seconds behind the host;
+            // longer afterwards, because one still down after a minute and a half is down for a reason
+            // that asking again quickly will not fix.
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var state = new RecoveryState();
+            using var startup = new RecoveryStartupService(
+                state, _recovery, _clock, NullLogger<RecoveryStartupService>.Instance);
+
+            await startup.StartAsync(Ct);
+            Assert.That(_store.OpenMatchQueries, Is.EqualTo(1), "the awaited first attempt");
+
+            foreach (int seconds in new[] { 30, 60, 120, 120, 120 })
+            {
+                int before = _store.OpenMatchQueries;
+
+                await WaitUntil(() => _clock.ScheduledTimers > 0);
+                _clock.Advance(TimeSpan.FromSeconds(seconds));
+                await WaitUntil(() => _store.OpenMatchQueries > before);
+
+                Assert.That(_store.OpenMatchQueries, Is.EqualTo(before + 1),
+                    "exactly one attempt per " + seconds.ToString() + " second wait");
+            }
+
+            Assert.That(_store.OpenMatchQueries, Is.EqualTo(6));
+            Assert.That(state.Completed, Is.False);
+
+            await startup.StopAsync(Ct);
+        }
+
+        [Test]
+        public async Task TheStartupService_StopsWhileAnAttemptIsStillInFlight()
+        {
+            // Shutdown must not wait out a query that is not coming back. The call is genuinely blocked
+            // here rather than merely slow, which is what a database that has stopped answering looks like.
+            _store.Block = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var state = new RecoveryState();
+            using var startup = new RecoveryStartupService(
+                state, _recovery, _clock, NullLogger<RecoveryStartupService>.Instance);
+
+            Task starting = startup.StartAsync(Ct);
+            await WaitUntil(() => _store.OpenMatchQueries > 0);
+            Assert.That(starting.IsCompleted, Is.False, "the first attempt is awaited, and it is blocked");
+
+            DateTimeOffset asked = DateTimeOffset.UtcNow;
+            await startup.StopAsync(Ct).WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.That(DateTimeOffset.UtcNow - asked, Is.LessThan(TimeSpan.FromSeconds(5)),
+                "stopping returns rather than waiting for a call that never answers");
+
+            _store.Block.TrySetResult();
+            await starting.WaitAsync(TimeSpan.FromSeconds(10));
+
+            Assert.That(state.Completed, Is.False.Or.True,
+                "whatever the abandoned attempt concluded, the service is done");
+        }
+
         /// <summary>Gives a retry that has just been woken by the clock a moment to land.</summary>
         static async Task WaitUntil(Func<bool> condition)
         {
@@ -744,14 +805,24 @@ namespace HexWars.NetServer.Tests
             /// <summary>When set, every read throws it - the database being down rather than a bad record.</summary>
             public Exception? Failure { get; set; }
 
+            /// <summary>How many times the open-match query has been asked. What proves a retry cadence.</summary>
+            public int OpenMatchQueries { get; private set; }
+
+            /// <summary>When set, the open-match query waits on it - a call that is genuinely in flight
+            /// rather than one that has already failed.</summary>
+            public TaskCompletionSource? Block { get; set; }
+
             public Task<MatchJournal?> LoadJournalAsync(Guid matchId, CancellationToken ct)
             {
                 if (Failure is not null) throw Failure;
                 return Task.FromResult(Journals.TryGetValue(matchId, out MatchJournal? journal) ? journal : null);
             }
 
-            public Task<IReadOnlyList<Guid>> ListOpenMatchIdsAsync(CancellationToken ct)
+            public async Task<IReadOnlyList<Guid>> ListOpenMatchIdsAsync(CancellationToken ct)
             {
+                OpenMatchQueries++;
+
+                if (Block is not null) await Block.Task.WaitAsync(ct).ConfigureAwait(false);
                 if (Failure is not null) throw Failure;
 
                 IReadOnlyList<Guid> open = Journals
@@ -760,7 +831,7 @@ namespace HexWars.NetServer.Tests
                     .OrderBy(id => id)
                     .ToArray();
 
-                return Task.FromResult(open);
+                return open;
             }
 
             public Task<CreateMatchResult> CreateMatchForLobbyAsync(CreateMatchRequest request, CancellationToken ct) =>
