@@ -95,7 +95,7 @@ class StructuredContinuationConfig:
     trackers: tuple[Mapping[str, Any], ...]
     oracle_expansion_budget: Literal[512, 2048] = 512
 
-    def validate(self) -> None:
+    def validate(self, *, replay_only: bool = False) -> None:
         validate_run_name(self.run_name)
         if not Path(self.source_run).is_dir():
             raise FileNotFoundError(self.source_run)
@@ -114,7 +114,7 @@ class StructuredContinuationConfig:
             raise ValueError("tactical-v3 learner seat is invalid")
         if not self.device.strip():
             raise ValueError("tactical-v3 device is required")
-        if self.oracle_expansion_budget not in {512, 2048}:
+        if self.oracle_expansion_budget not in ({512, 2048, 4096} if replay_only else {512, 2048}):
             raise ValueError("tactical-v3 oracle expansion budget is unsupported")
         normalize_controller_spec(self.opponent)
         validate_tracker_specs(list(self.trackers))
@@ -814,6 +814,7 @@ def _inspect_reusable_collection(
     collection_run: Path,
     run_name: str,
     runs_root: Path,
+    *, replay_only: bool = False,
 ) -> _ReusableCollectionHeader:
     """Authenticate collection-level evidence before reading large game payloads."""
 
@@ -923,14 +924,14 @@ def _inspect_reusable_collection(
         "structured retry oracle",
     )
     raw_oracle_budget = oracle["expansion_budget"]
-    if type(raw_oracle_budget) is not int or raw_oracle_budget not in {512, 2048}:
+    if type(raw_oracle_budget) is not int or raw_oracle_budget not in ({512, 2048, 4096} if replay_only else {512, 2048}):
         raise ValueError("structured retry oracle contract changed")
     (
         expected_teacher_identity,
         expected_teacher_depth,
         expected_teacher_budget,
         expected_teacher_heuristic,
-    ) = _teacher_evidence_contract(identity, raw_oracle_budget)
+    ) = _teacher_evidence_contract(identity, raw_oracle_budget, allow_historical_teacher=replay_only)
     if oracle != {
         "identity": expected_teacher_identity,
         "search_depth": expected_teacher_depth,
@@ -1027,7 +1028,7 @@ def _inspect_reusable_collection(
         trackers=tuple(dict(item) for item in trackers_raw),
         oracle_expansion_budget=raw_oracle_budget,
     )
-    config.validate()
+    config.validate(replay_only=replay_only)
     model_config, _, _ = _pilot_configs(config.seed, config.device)
     if source.model.config != model_config:
         raise ValueError("structured retry source model architecture changed")
@@ -1457,6 +1458,7 @@ def _records_bytes(episodes: Sequence[PilotDaggerEpisode]) -> bytes:
 def _load_reusable_partition(
     header: _ReusableCollectionHeader,
     partition: Literal["train", "validation"],
+    *, replay_only: bool = False,
 ) -> tuple[tuple[PilotDaggerEpisode, ...], str]:
     partition_value = header.collection[partition]
     assert isinstance(partition_value, Mapping)
@@ -1618,6 +1620,7 @@ def _load_reusable_partition(
             header.identity,
             oracle_expansion_budget=header.config.oracle_expansion_budget,
             expected_schedule=schedule,
+            allow_historical_teacher=replay_only,
         )
         # The enclosing collection has already authenticated the full source
         # identity and these exact episode/record bytes. Schema 1 episodes did

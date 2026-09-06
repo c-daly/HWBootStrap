@@ -839,9 +839,15 @@ def _validate_selection(
 def _teacher_evidence_contract(
     identity: TacticalV3SemanticIdentity,
     expansion_budget: Literal[512, 2048],
+    *, allow_historical_teacher: bool = False,
 ) -> tuple[str, int, int, str]:
     """Effective teacher contract for an authenticated match objective."""
 
+    if (allow_historical_teacher and type(expansion_budget) is int
+            and expansion_budget == 4096 and not is_reach_cell_identity(identity)):
+        # Read-only compatibility with the exact teacher-v2 archive contract.
+        # Collection entry points still reject this budget; this is not a new teacher.
+        return ("deep-closing-search-v2", 8, 4096, "material-plus-closing-v2")
     if type(expansion_budget) is not int or expansion_budget not in {512, 2048}:
         raise ValueError("tactical-v3 teacher expansion budget is unsupported")
     if is_reach_cell_identity(identity):
@@ -1290,6 +1296,36 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
     return output
 
 
+def _validate_historical_teacher_diagnostics(meta, path, records) -> None:
+    """Authenticate teacher-v2 diagnostics without rewriting the archived schema.
+
+    Schema 2 in that historical branch meant diagnostic sidecars, not the later
+    embedded actor identity. Only the explicitly requested 4096/depth-8 replay
+    path accepts it; enclosing collection evidence must authenticate the actor.
+    """
+    meta = _exact_mapping(meta, frozenset({"path", "count", "sha256"}), "teacher diagnostics")
+    data = path.read_bytes()
+    if meta["path"] != "teacher-diagnostics.jsonl" or hashlib.sha256(data).hexdigest() != meta["sha256"]:
+        raise ValueError("teacher diagnostics path or digest changed")
+    lines = data.splitlines(keepends=True)
+    if type(meta["count"]) is not int or meta["count"] != len(records) or len(lines) != len(records):
+        raise ValueError("teacher diagnostics count changed")
+    for index, (line, record) in enumerate(zip(lines, records, strict=True)):
+        raw = json.loads(line)
+        if line != _canonical_bytes(raw):
+            raise ValueError("teacher diagnostics must be canonical JSONL")
+        raw = _exact_mapping(raw, frozenset({"record_index", "decision_id", "teacher_candidate_id",
+                                            "actual_expansions", "completed_search_depth"}), "teacher diagnostic")
+        if any(type(value) is not int for value in raw.values()) or (
+            raw["record_index"] != index
+            or raw["decision_id"] != record.example.decision.decision_id
+            or raw["teacher_candidate_id"] != record.teacher_candidate_id
+            or raw["actual_expansions"] != record.example.teacher.actual_expansions
+            or not 1 <= raw["completed_search_depth"] <= 8
+        ):
+            raise ValueError("teacher diagnostic disagrees with its authenticated record")
+
+
 def load_dagger_episode(
     output: Path,
     identity: TacticalV3SemanticIdentity,
@@ -1297,6 +1333,7 @@ def load_dagger_episode(
     oracle_expansion_budget: int,
     expected_schedule: PilotScheduleItem | ContinuationScheduleItem | None = None,
     expected_actor_identity: TacticalV3SemanticIdentity | None = None,
+    allow_historical_teacher: bool = False,
 ) -> PilotDaggerEpisode:
     identity = _validate_identity(identity)
     if expected_actor_identity is not None:
@@ -1312,7 +1349,11 @@ def load_dagger_episode(
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("DAgger episode must be a plain directory")
     entries = {path.name: path for path in output.iterdir()}
-    if set(entries) != {"episode.json", "decisions.jsonl"} or any(
+    historical = allow_historical_teacher and oracle_expansion_budget == 4096
+    expected_files = {"episode.json", "decisions.jsonl"}
+    if historical:
+        expected_files.add("teacher-diagnostics.jsonl")
+    if set(entries) != expected_files or any(
         not path.is_file() or _is_reparse(path) for path in entries.values()
     ):
         raise ValueError("DAgger episode inventory is not exact")
@@ -1324,13 +1365,18 @@ def load_dagger_episode(
         raise ValueError("DAgger episode manifest is invalid JSON") from error
     if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
         raise ValueError("DAgger episode manifest must be canonical JSON")
-    manifest = _exact_mapping(manifest, frozenset({
+    manifest_fields = {
         "schema_version", "kind", "identity", "actor", "teacher",
         "records", "summary",
-    }), "DAgger episode manifest")
+    }
+    if historical:
+        manifest_fields.add("teacher_diagnostics")
+    manifest = _exact_mapping(manifest, frozenset(manifest_fields), "DAgger episode manifest")
     schema_version = manifest["schema_version"]
     if type(schema_version) is not int or schema_version not in {1, 2}:
         raise ValueError("DAgger episode schema version is unsupported")
+    if historical and schema_version != 2:
+        raise ValueError("historical deep teacher requires its diagnostics schema")
     identity_data = _exact_mapping(manifest["identity"], frozenset({
         "scenario_id", "contract_hash", "encoding_hash", "capacity_hash",
         "environment_kind",
@@ -1346,12 +1392,12 @@ def load_dagger_episode(
         "algorithm", "model_state_sha256", "corpus_sha256", "best_epoch",
         "best_validation_policy_nll",
     }
-    if schema_version == 2:
+    if schema_version == 2 and not historical:
         actor_fields.add("semantic_identity")
     actor = _exact_mapping(
         manifest["actor"], frozenset(actor_fields), "DAgger episode actor",
     )
-    if schema_version == 2:
+    if schema_version == 2 and not historical:
         try:
             actor_identity = parse_spaces(actor["semantic_identity"])
         except (TypeError, ValueError) as error:
@@ -1390,7 +1436,8 @@ def load_dagger_episode(
         expected_teacher_depth,
         expected_teacher_budget,
         expected_teacher_heuristic,
-    ) = _teacher_evidence_contract(identity, oracle_expansion_budget)
+    ) = _teacher_evidence_contract(identity, oracle_expansion_budget,
+                                  allow_historical_teacher=allow_historical_teacher)
     records_meta = _exact_mapping(manifest["records"], frozenset({
         "path", "count", "sha256",
     }), "DAgger episode records")
@@ -1437,6 +1484,7 @@ def load_dagger_episode(
         example = _parse_pilot_row(
             data["example"], identity,
             dagger_oracle_expansion_budget=oracle_expansion_budget,
+            allow_historical_teacher=allow_historical_teacher,
         )
         learner_candidate_id = _int(
             data["learner_candidate_id"], f"DAgger record {index} learner candidate",
@@ -1493,6 +1541,11 @@ def load_dagger_episode(
         or not records
     ):
         raise ValueError("DAgger episode records count changed")
+
+    if historical:
+        _validate_historical_teacher_diagnostics(
+            manifest["teacher_diagnostics"], entries["teacher-diagnostics.jsonl"], tuple(records),
+        )
 
     summary_data = _exact_mapping(manifest["summary"], frozenset({
         "schedule", "winner", "terminated", "truncated", "decisions",
@@ -2326,6 +2379,7 @@ def _parse_pilot_row(
     *,
     dagger_oracle_expansion_budget: int | None = None,
     legacy_bounded_search: bool = False,
+    allow_historical_teacher: bool = False,
 ) -> StructuredExample:
     data = _exact_mapping(value, _ROW_FIELDS, "pilot example")
     if _int(data["example_schema_version"], "example.example_schema_version") != 1:
@@ -2353,6 +2407,7 @@ def _parse_pilot_row(
     if dagger_oracle_expansion_budget is not None:
         expected_teacher = _teacher_evidence_contract(
             identity, dagger_oracle_expansion_budget,
+            allow_historical_teacher=allow_historical_teacher,
         )
         actual_teacher = (
             teacher.identity,

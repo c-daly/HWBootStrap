@@ -690,7 +690,7 @@ def _resume_metadata_wire(
         raise TypeError("training state must be TrainingCheckpointState")
     if type(identity) is not TacticalV3SemanticIdentity:
         raise TypeError("training resume identity must be tactical-v3 identity")
-    return {
+    metadata = {
         "identity": semantic_identity_wire(identity),
         "model_config": _dataclass_wire(state.model_config),
         "objective_config": _dataclass_wire(state.objective_config),
@@ -702,6 +702,11 @@ def _resume_metadata_wire(
             "resume source_model_state_sha256",
         ),
     }
+    if state.curriculum_sha256 is not None:
+        metadata["curriculum_sha256"] = _sha256(
+            state.curriculum_sha256, "resume curriculum_sha256",
+        )
+    return metadata
 
 
 def _resume_payload(
@@ -773,7 +778,7 @@ def _resume_payload(
     }
     state_value["state_sha256"] = _checkpoint_tree_sha256(state_value)
     payload = {
-        "format_version": 1,
+        "format_version": 2 if state.curriculum_sha256 is not None else 1,
         "metadata": _resume_metadata_wire(
             state,
             identity=identity,
@@ -815,6 +820,7 @@ def save_training_resume_checkpoint(
             expected_identity=identity,
             expected_corpus_sha256=corpus_sha256,
             expected_source_model_state_sha256=source_model_state_sha256,
+            expected_curriculum_sha256=state.curriculum_sha256,
         )
         os.replace(staged, path)
         _sync_directory(path.parent)
@@ -897,14 +903,27 @@ def load_training_resume_checkpoint(
     expected_identity: TacticalV3SemanticIdentity,
     expected_corpus_sha256: str,
     expected_source_model_state_sha256: str,
+    expected_curriculum_sha256: str | None = None,
 ) -> TrainingCheckpointState:
     """Authenticate a weights-only exact-resume checkpoint."""
 
     raw = torch.load(Path(path), map_location="cpu", weights_only=True)
     if not isinstance(raw, Mapping) or set(raw) != _RESUME_TOP_LEVEL_FIELDS:
         raise ValueError("training resume checkpoint inventory is invalid")
-    if _int(raw["format_version"], "resume format_version") != 1:
+    version = _int(raw["format_version"], "resume format_version")
+    if version not in (1, 2):
         raise ValueError("training resume checkpoint format is unsupported")
+    metadata = raw["metadata"]
+    curriculum_sha256 = None
+    if version == 2:
+        metadata = dict(_plain_mapping(
+            metadata, _RESUME_METADATA_FIELDS | {"curriculum_sha256"}, "resume metadata",
+        ))
+        curriculum_sha256 = _sha256(metadata.pop("curriculum_sha256"), "resume curriculum_sha256")
+    if expected_curriculum_sha256 is not None:
+        _sha256(expected_curriculum_sha256, "expected resume curriculum_sha256")
+    if curriculum_sha256 != expected_curriculum_sha256:
+        raise ValueError("training resume curriculum changed")
     (
         identity,
         model_config,
@@ -913,7 +932,7 @@ def load_training_resume_checkpoint(
         micro_batch_size,
         corpus_sha256,
         source_model_state_sha256,
-    ) = _resume_configs(raw["metadata"])
+    ) = _resume_configs(metadata)
     if identity != expected_identity:
         raise ValueError("training resume identity changed")
     if corpus_sha256 != _sha256(
@@ -1068,6 +1087,7 @@ def load_training_resume_checkpoint(
             for value in cuda_values
         ),
         uses_external_batch_provider=uses_provider,
+        curriculum_sha256=curriculum_sha256,
     )
 
 
