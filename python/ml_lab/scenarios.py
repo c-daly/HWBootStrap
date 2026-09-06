@@ -125,6 +125,7 @@ _TACTICAL_V3_KEYS = frozenset(
         "start_distribution",
     }
 )
+_TACTICAL_V3_OBJECTIVE_KEYS = frozenset({"kind", "target_policy", "radius"})
 _TACTICAL_V3_CAPACITY_KEYS = frozenset(
     {
         "max_cells",
@@ -430,7 +431,10 @@ def _validate_tactical_v3(
     max_steps: int,
 ) -> None:
     section = _mapping(document["tactical_v3"], "tactical_v3")
-    _exact_keys(section, _TACTICAL_V3_KEYS, "tactical_v3")
+    expected_keys = _TACTICAL_V3_KEYS | (
+        frozenset({"objective"}) if "objective" in section else frozenset()
+    )
+    _exact_keys(section, expected_keys, "tactical_v3")
     starting_units = _integer(
         section["starting_unit_count"], "tactical_v3.starting_unit_count"
     )
@@ -467,6 +471,28 @@ def _validate_tactical_v3(
             "tactical_v3.placement_policy must be 'symmetric-random-v1' or "
             "'profiled-seeded-v1'"
         )
+
+    if "objective" in section:
+        objective = _mapping(section["objective"], "tactical_v3.objective")
+        _exact_keys(
+            objective, _TACTICAL_V3_OBJECTIVE_KEYS, "tactical_v3.objective"
+        )
+        if _text(objective["kind"], "tactical_v3.objective.kind") != "reach_cell":
+            raise ValueError("tactical_v3.objective.kind must be 'reach_cell'")
+        if (
+            _text(
+                objective["target_policy"],
+                "tactical_v3.objective.target_policy",
+            )
+            != "seeded_farthest_reachable_unoccupied_v1"
+        ):
+            raise ValueError(
+                "tactical_v3.objective.target_policy must be "
+                "'seeded_farthest_reachable_unoccupied_v1'"
+            )
+        radius = _integer(objective["radius"], "tactical_v3.objective.radius")
+        if radius != 0:
+            raise ValueError("tactical_v3.objective.radius must be 0")
 
     if document["rules"]["fog_of_war"] or document["rules"]["biomes_enabled"]:
         raise ValueError("tactical-v3 requires fog and biomes disabled")

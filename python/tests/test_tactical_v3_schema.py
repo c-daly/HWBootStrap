@@ -178,6 +178,83 @@ def test_spaces_and_view_parse_to_deeply_immutable_semantic_values() -> None:
         view.decision.candidates.append(view.decision.candidates[0])
 
 
+def _reach_spaces_payload() -> dict[str, object]:
+    spaces = minimal_spaces_payload()
+    spaces["match"]["objective"] = {
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    }
+    return spaces
+
+
+def _reach_view_payload() -> dict[str, object]:
+    view = minimal_view_payload()
+    view["candidates"][0]["target"] = {"table": "cells", "row": 0}
+    view["candidates"][0]["projection"]["is_terminal"] = True
+    return view
+
+
+def test_reach_cell_uses_existing_move_target_without_changing_decision_shape() -> None:
+    view = parse_view(_reach_view_payload(), parse_spaces(_reach_spaces_payload()))
+
+    candidate = view.decision.candidates[0]
+    assert candidate.kind == "move"
+    assert candidate.target == candidate.cell
+    assert candidate.projection.is_terminal is True
+
+
+def test_reach_cell_requires_a_cell_target_on_every_move() -> None:
+    missing = minimal_view_payload()
+    with pytest.raises(ValueError, match="reach_cell move.target is required"):
+        parse_view(missing, parse_spaces(_reach_spaces_payload()))
+
+    wrong_family = _reach_view_payload()
+    wrong_family["candidates"][0]["target"] = {"table": "units", "row": 0}
+    with pytest.raises(ValueError, match="move.target references incompatible table"):
+        parse_view(wrong_family, parse_spaces(_reach_spaces_payload()))
+
+
+def test_legacy_annihilation_rejects_reach_targets_and_keeps_old_contract_shape() -> None:
+    view = _reach_view_payload()
+    with pytest.raises(ValueError, match="annihilation move.target must be null"):
+        parse_view(view, parse_spaces(minimal_spaces_payload()))
+
+
+def test_reach_cell_completing_projection_must_be_terminal() -> None:
+    view = _reach_view_payload()
+    view["candidates"][0]["projection"]["is_terminal"] = False
+    with pytest.raises(ValueError, match="completing move projection must be terminal"):
+        parse_view(view, parse_spaces(_reach_spaces_payload()))
+
+
+@pytest.mark.parametrize(
+    "mutation,expected",
+    (
+        ("unknown_kind", "match.objective.kind has an unknown value"),
+        ("unknown_policy", "match.objective.target_policy has an unknown value"),
+        ("negative_radius", "match.objective.radius must be 0"),
+        ("extra_field", "match.objective fields must be exactly"),
+    ),
+)
+def test_spaces_rejects_malformed_reach_objectives(
+    mutation: str, expected: str,
+) -> None:
+    spaces = _reach_spaces_payload()
+    objective = spaces["match"]["objective"]
+    if mutation == "unknown_kind":
+        objective["kind"] = "capture_flag"
+    elif mutation == "unknown_policy":
+        objective["target_policy"] = "random"
+    elif mutation == "negative_radius":
+        objective["radius"] = -1
+    else:
+        objective["extra"] = True
+
+    with pytest.raises((TypeError, ValueError), match=expected):
+        parse_spaces(spaces)
+
+
 
 def test_parse_decision_accepts_the_exact_serialized_decision_mapping() -> None:
     """The public decision parser must not require unrelated full-view fields."""

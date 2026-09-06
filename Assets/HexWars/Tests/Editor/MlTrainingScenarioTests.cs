@@ -50,7 +50,7 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void Library_ContainsTacticalV3StandardFullRosterAndCloseStaticTemplates()
+        public void Library_ContainsTacticalV3StandardFullRosterCloseAndReachTemplates()
         {
             var library = MlTrainingScenarioLibrary.Load(BuiltInLibraryPath);
             MlTrainingScenario[] actual = library
@@ -73,12 +73,14 @@ namespace HexWars.Presentation.Tests
                 "tactical-v3-standard",
                 "tactical-v3-full-roster",
                 "tactical-v3-close-static-v1",
+                "tactical-v3-reach-cell-v1",
             }));
             Assert.That(actual.Select(item => item.Name), Is.EqualTo(new[]
             {
                 "Standard",
                 "Full Roster",
                 "Close Static 1v1",
+                "Reach Beacon 1v1",
             }));
             Assert.That(actual[0].TacticalV3.Templates, Has.Count.EqualTo(3));
             Assert.That(actual[0].TacticalV3.Templates.Select(item => item.Id),
@@ -93,6 +95,16 @@ namespace HexWars.Presentation.Tests
             Assert.That(actual[2].TacticalV3.StartDistribution.Single(
                 item => item.BasisPoints != 0).ProfileId,
                 Is.EqualTo("conversion-1v1-near"));
+            Assert.That(actual[2].TacticalV3.Objective, Is.Null);
+            Assert.That(actual[3].Board.Width, Is.EqualTo(4));
+            Assert.That(actual[3].Board.Height, Is.EqualTo(4));
+            Assert.That(actual[3].TacticalV3.StartDistribution.Single(
+                item => item.BasisPoints != 0).ProfileId,
+                Is.EqualTo("conversion-1v1-near"));
+            Assert.That(actual[3].TacticalV3.Objective.Kind, Is.EqualTo("reach_cell"));
+            Assert.That(actual[3].TacticalV3.Objective.TargetPolicy, Is.EqualTo(
+                "seeded_farthest_reachable_unoccupied_v1"));
+            Assert.That(actual[3].TacticalV3.Objective.Radius, Is.Zero);
             Assert.That(actual[0].TacticalV3.StartProfiles, Has.Count.EqualTo(10));
             Assert.That(actual[1].TacticalV3.StartProfiles, Has.Count.EqualTo(10));
             Assert.That(standardPreflight.ContractHash, Is.EqualTo(
@@ -568,6 +580,87 @@ namespace HexWars.Presentation.Tests
             Assert.That(preflight.DisplayText, Does.Contain(preflight.ContractHash));
             Assert.That(preflight.DisplayText, Does.Contain(preflight.ContractIdentity.EncodingHash));
             Assert.That(preflight.DisplayText, Does.Contain(preflight.ContractIdentity.CapacityHash));
+        }
+
+        [Test]
+        public void TacticalV3ReachCellScenario_RoundTripsObjectiveIntoEnginePreflight()
+        {
+            MlTrainingScenario legacy = Load("tactical-v3-close-static-v1");
+            var session = new MlTrainingScenarioSession(
+                MlTrainingScenarioLibrary.Load(BuiltInLibraryPath));
+            session.SelectEnvironment(MlEnvironmentContract.TacticalV3);
+            session.SelectTemplate("tactical-v3-reach-cell-v1");
+            MlTrainingScenario reach = session.WorkingCopy;
+
+            string legacyPath = MlTrainingScenarioStore.WriteSessionScenario(
+                Path.Combine(_projectRoot, "legacy"), legacy);
+            string reachPath = MlTrainingScenarioStore.WriteSessionScenario(
+                Path.Combine(_projectRoot, "reach"), reach);
+            MlTrainingScenario reloaded = MlTrainingScenarioFile.Load(reachPath);
+            TrainingScenario engine = MlTrainingScenarioPreflight.ToEngine(reloaded);
+            TacticalV3Config runtime = engine.BuildTacticalV3();
+            MlTrainingScenarioPreflight legacyPreflight =
+                MlTrainingScenarioPreflight.Create(legacy);
+            MlTrainingScenarioPreflight reachPreflight =
+                MlTrainingScenarioPreflight.Create(reloaded);
+
+            Assert.That(session.SelectedTemplateId, Is.EqualTo("tactical-v3-reach-cell-v1"));
+            Assert.That(legacy.TacticalV3.Objective, Is.Null);
+            Assert.That(File.ReadAllText(legacyPath), Does.Not.Contain("\"objective\""));
+            Assert.That(reloaded.TacticalV3.Objective.Kind, Is.EqualTo("reach_cell"));
+            Assert.That(reloaded.TacticalV3.Objective.TargetPolicy, Is.EqualTo(
+                "seeded_farthest_reachable_unoccupied_v1"));
+            Assert.That(reloaded.TacticalV3.Objective.Radius, Is.Zero);
+            Assert.That(engine.TacticalV3.Objective.Kind, Is.EqualTo("reach_cell"));
+            Assert.That(engine.TacticalV3.Objective.TargetPolicy, Is.EqualTo(
+                "seeded_farthest_reachable_unoccupied_v1"));
+            Assert.That(engine.TacticalV3.Objective.Radius, Is.Zero);
+            Assert.That(runtime.Objective.Kind, Is.EqualTo("reach_cell"));
+            Assert.That(runtime.Objective.TargetPolicy, Is.EqualTo(
+                "seeded_farthest_reachable_unoccupied_v1"));
+            Assert.That(runtime.Objective.Radius, Is.Zero);
+            Assert.That(reachPreflight.ContractHash,
+                Is.Not.EqualTo(legacyPreflight.ContractHash));
+            Assert.That(reachPreflight.ContractIdentity.EncodingHash,
+                Is.EqualTo(legacyPreflight.ContractIdentity.EncodingHash));
+            Assert.That(reachPreflight.ContractIdentity.CapacityHash,
+                Is.EqualTo(legacyPreflight.ContractIdentity.CapacityHash));
+        }
+
+        [Test]
+        public void TacticalV3ReachCellScenario_StrictJsonRejectsMalformedObjective()
+        {
+            MlTrainingScenario reach = Load("tactical-v3-reach-cell-v1");
+            string path = MlTrainingScenarioStore.WriteSessionScenario(
+                Path.Combine(_projectRoot, "strict-reach"), reach);
+            string valid = File.ReadAllText(path);
+            var mutations = new Func<string, string>[]
+            {
+                json => RemoveProperty(json, "kind"),
+                json => RemoveProperty(json, "target_policy"),
+                json => RemoveProperty(json, "radius"),
+                json => InsertFirstObjectMember(json, "objective", "\"unexpected\": 0,"),
+                json => InsertFirstObjectMember(
+                    json, "objective", "\"\\u006bind\": \"reach_cell\","),
+                json => new Regex(
+                    "\"objective\"\\s*:\\s*\\{[^{}]*\\}",
+                    RegexOptions.CultureInvariant).Replace(
+                        json, "\"objective\": null", 1),
+                json => json.Replace("\"kind\": \"reach_cell\"",
+                    "\"kind\": \"capture_flag\""),
+                json => json.Replace(
+                    "\"target_policy\": \"seeded_farthest_reachable_unoccupied_v1\"",
+                    "\"target_policy\": \"random\""),
+                json => json.Replace("\"radius\": 0", "\"radius\": 1"),
+                json => json.Replace("\"radius\": 0", "\"radius\": 0.0"),
+            };
+
+            foreach (Func<string, string> mutate in mutations)
+            {
+                string changed = mutate(valid);
+                Assert.That(changed, Is.Not.EqualTo(valid));
+                AssertTacticalV3JsonRejected(changed);
+            }
         }
 
         [Test]

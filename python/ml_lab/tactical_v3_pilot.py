@@ -27,6 +27,7 @@ from .tactical_v3_checkpoint import (
     replace_structured_checkpoint,
     save_training_resume_checkpoint,
     save_structured_checkpoint,
+    semantic_identity_wire,
     structured_model_state_sha256,
 )
 from .io import atomic_write_bytes, atomic_write_json
@@ -55,7 +56,9 @@ from .tactical_v3_schema import (
     TacticalV3Decision,
     TacticalV3SemanticIdentity,
     TacticalV3View,
+    is_reach_cell_identity,
     parse_decision,
+    parse_spaces,
 )
 from .tactical_v3_training import (
     EpochMetrics,
@@ -214,6 +217,7 @@ class PilotDaggerEpisode:
     actor_corpus_sha256: str
     actor_best_epoch: int
     actor_best_validation_policy_nll: float
+    actor_identity: TacticalV3SemanticIdentity | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -804,6 +808,8 @@ def _validate_selection(
     selection: TeacherSelection,
     decision: TacticalV3Decision,
     expected_expansion_budget: Literal[512, 2048] = 512,
+    *,
+    identity: TacticalV3SemanticIdentity | None = None,
 ) -> None:
     if type(selection) is not TeacherSelection:
         raise TypeError("pilot oracle selection must be TeacherSelection")
@@ -814,11 +820,49 @@ def _validate_selection(
         raise ValueError("pilot teacher candidate must occur exactly once")
     if expected_expansion_budget not in {512, 2048}:
         raise ValueError("pilot teacher expansion budget is unsupported")
-    if (selection.search_depth != 4 or
-            selection.expansion_budget != expected_expansion_budget or
-            selection.heuristic_identity != "material-plus-pursuit-v1" or
-            not 1 <= selection.actual_expansions <= expected_expansion_budget):
+    reach_cell = identity is not None and is_reach_cell_identity(identity)
+    valid = (
+        selection.search_depth == 0
+        and selection.expansion_budget == expected_expansion_budget
+        and selection.heuristic_identity == "reach-cell-shortest-path-v1"
+        and selection.actual_expansions == 0
+    ) if reach_cell else (
+        selection.search_depth == 4
+        and selection.expansion_budget == expected_expansion_budget
+        and selection.heuristic_identity == "material-plus-pursuit-v1"
+        and 1 <= selection.actual_expansions <= expected_expansion_budget
+    )
+    if not valid:
         raise ValueError("pilot teacher metadata drifted")
+
+
+def _teacher_evidence_contract(
+    identity: TacticalV3SemanticIdentity,
+    expansion_budget: Literal[512, 2048],
+    *, allow_historical_teacher: bool = False,
+) -> tuple[str, int, int, str]:
+    """Effective teacher contract for an authenticated match objective."""
+
+    if (allow_historical_teacher and type(expansion_budget) is int
+            and expansion_budget == 4096 and not is_reach_cell_identity(identity)):
+        # Read-only compatibility with the exact teacher-v2 archive contract.
+        # Collection entry points still reject this budget; this is not a new teacher.
+        return ("deep-closing-search-v2", 8, 4096, "material-plus-closing-v2")
+    if type(expansion_budget) is not int or expansion_budget not in {512, 2048}:
+        raise ValueError("tactical-v3 teacher expansion budget is unsupported")
+    if is_reach_cell_identity(identity):
+        return (
+            "reach-cell-shortest-path-v1",
+            0,
+            expansion_budget,
+            "reach-cell-shortest-path-v1",
+        )
+    return (
+        "bounded-search-v1",
+        4,
+        expansion_budget,
+        "material-plus-pursuit-v1",
+    )
 
 
 def collect_game(
@@ -927,6 +971,13 @@ def collect_dagger_game(
     if type(allow_compatible_identity_transfer) is not bool:
         raise TypeError("DAgger compatible identity transfer flag must be bool")
     identity = _validate_identity(client.identity)
+    (
+        teacher_identity,
+        teacher_depth,
+        teacher_budget,
+        teacher_heuristic,
+    ) = _teacher_evidence_contract(identity, oracle_expansion_budget)
+    reach_curriculum = is_reach_cell_identity(identity)
     actor_identity = loaded.metadata.identity
     if allow_compatible_identity_transfer:
         _validate_compatible_transfer_identity(
@@ -994,7 +1045,9 @@ def collect_dagger_game(
         if view.seat != item.learner_seat:
             if structured_opponent is None:
                 raise ValueError("scripted opponent exposed an external decision")
-            opponent_selection = select_candidate(structured_opponent, view)
+            opponent_selection = select_candidate(
+                structured_opponent, view, target_identity=identity,
+            )
             view = client.duel_step(CandidateSelection(
                 opponent_selection.decision_id,
                 opponent_selection.candidate_id,
@@ -1003,6 +1056,7 @@ def collect_dagger_game(
         batch = collate_decisions(
             (decision,),
             loaded.model.config.horizon_turns,
+            identity=identity,
         )
         learner = loaded.model.select(batch)[0]
         if learner.decision_id != decision.decision_id:
@@ -1018,12 +1072,28 @@ def collect_dagger_game(
             or inspection.learner_candidate_id != learner.candidate_id
         ):
             raise ValueError("selective DAgger inspection identity drifted")
-        if inspection.reasons and inspection.state_hash not in emitted_state_hashes:
-            teacher = client.duel_oracle_query(
-                decision.decision_id,
-                expansion_budget=oracle_expansion_budget,
+        if (reach_curriculum or inspection.reasons) and (
+            inspection.state_hash not in emitted_state_hashes
+        ):
+            teacher = (
+                client.duel_oracle_query(
+                    decision.decision_id,
+                    search_depth=teacher_depth,
+                    expansion_budget=teacher_budget,
+                    heuristic_identity=teacher_heuristic,
+                )
+                if reach_curriculum
+                else client.duel_oracle_query(
+                    decision.decision_id,
+                    expansion_budget=teacher_budget,
+                )
             )
-            _validate_selection(teacher, decision, oracle_expansion_budget)
+            _validate_selection(
+                teacher,
+                decision,
+                oracle_expansion_budget,
+                identity=identity,
+            )
             retained.append((
                 decision, teacher, learner.candidate_id,
                 inspection, learner_decision_index,
@@ -1070,7 +1140,7 @@ def collect_dagger_game(
                     view.truncated,
                 ),
                 TeacherEvidence(
-                    "bounded-search-v1", teacher.search_depth,
+                    teacher_identity, teacher.search_depth,
                     teacher.expansion_budget, teacher.actual_expansions,
                     teacher.heuristic_identity, None,
                 ),
@@ -1086,7 +1156,11 @@ def collect_dagger_game(
             teacher.candidate_id,
             learner_candidate_id != teacher.candidate_id,
             False,
-            inspection.reasons,
+            (
+                ("curriculum_reach_cell",) + tuple(inspection.reasons)
+                if reach_curriculum
+                else inspection.reasons
+            ),
             inspection.state_hash,
             inspection.state_occurrence,
             inspection.normalized_advantage,
@@ -1116,12 +1190,23 @@ def collect_dagger_game(
         loaded.metadata.corpus_sha256,
         loaded.metadata.best_epoch,
         loaded.metadata.best_validation_policy_nll,
+        actor_identity,
     )
 
 
 def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
     if type(episode) is not PilotDaggerEpisode or not episode.records:
         raise ValueError("DAgger episode must contain records")
+    _validate_identity(episode.identity)
+    if episode.actor_identity is None:
+        raise ValueError(
+            "DAgger episode actor semantic identity is required for schema 2"
+        )
+    _validate_compatible_transfer_identity(
+        episode.actor_identity,
+        episode.identity,
+        subject="DAgger episode actor",
+    )
     if episode.summary.decisions != len(episode.records):
         raise ValueError("DAgger episode summary decision count changed")
     if episode.summary.disagreements != sum(
@@ -1139,6 +1224,10 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
         teacher.expansion_budget,
         teacher.heuristic_identity,
     )
+    expected_teacher = _teacher_evidence_contract(
+        episode.identity, teacher.expansion_budget,
+    )
+    reach_curriculum = is_reach_cell_identity(episode.identity)
     if any((
         record.example.teacher.identity,
         record.example.teacher.search_depth,
@@ -1146,6 +1235,13 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
         record.example.teacher.heuristic_identity,
     ) != teacher_identity for record in episode.records):
         raise ValueError("DAgger episode teacher provenance changed")
+    if teacher_identity != expected_teacher or any(
+        record.example.teacher.actual_expansions != 0
+        if reach_curriculum
+        else not 1 <= record.example.teacher.actual_expansions <= teacher.expansion_budget
+        for record in episode.records
+    ):
+        raise ValueError("DAgger episode teacher provenance is invalid")
     output = Path(output)
     if output.exists() or output.is_symlink():
         raise FileExistsError(f"DAgger episode output already exists: {output}")
@@ -1155,7 +1251,7 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
     rows = b"".join(_canonical_bytes(asdict(record)) for record in episode.records)
     rows_hash = hashlib.sha256(rows).hexdigest()
     manifest = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "tactical-v3-dagger-episode",
         "identity": {
             "scenario_id": episode.identity.scenario_id,
@@ -1166,6 +1262,7 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
         },
         "actor": {
             "algorithm": "structured_imitation",
+            "semantic_identity": semantic_identity_wire(episode.actor_identity),
             "model_state_sha256": episode.actor_model_state_sha256,
             "corpus_sha256": episode.actor_corpus_sha256,
             "best_epoch": episode.actor_best_epoch,
@@ -1173,7 +1270,7 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
                 episode.actor_best_validation_policy_nll,
         },
         "teacher": {
-            "identity": "bounded-search-v1",
+            "identity": teacher.identity,
             "search_depth": teacher.search_depth,
             "expansion_budget": teacher.expansion_budget,
             "heuristic_identity": teacher.heuristic_identity,
@@ -1199,21 +1296,64 @@ def write_dagger_episode(output: Path, episode: PilotDaggerEpisode) -> Path:
     return output
 
 
+def _validate_historical_teacher_diagnostics(meta, path, records) -> None:
+    """Authenticate teacher-v2 diagnostics without rewriting the archived schema.
+
+    Schema 2 in that historical branch meant diagnostic sidecars, not the later
+    embedded actor identity. Only the explicitly requested 4096/depth-8 replay
+    path accepts it; enclosing collection evidence must authenticate the actor.
+    """
+    meta = _exact_mapping(meta, frozenset({"path", "count", "sha256"}), "teacher diagnostics")
+    data = path.read_bytes()
+    if meta["path"] != "teacher-diagnostics.jsonl" or hashlib.sha256(data).hexdigest() != meta["sha256"]:
+        raise ValueError("teacher diagnostics path or digest changed")
+    lines = data.splitlines(keepends=True)
+    if type(meta["count"]) is not int or meta["count"] != len(records) or len(lines) != len(records):
+        raise ValueError("teacher diagnostics count changed")
+    for index, (line, record) in enumerate(zip(lines, records, strict=True)):
+        raw = json.loads(line)
+        if line != _canonical_bytes(raw):
+            raise ValueError("teacher diagnostics must be canonical JSONL")
+        raw = _exact_mapping(raw, frozenset({"record_index", "decision_id", "teacher_candidate_id",
+                                            "actual_expansions", "completed_search_depth"}), "teacher diagnostic")
+        if any(type(value) is not int for value in raw.values()) or (
+            raw["record_index"] != index
+            or raw["decision_id"] != record.example.decision.decision_id
+            or raw["teacher_candidate_id"] != record.teacher_candidate_id
+            or raw["actual_expansions"] != record.example.teacher.actual_expansions
+            or not 1 <= raw["completed_search_depth"] <= 8
+        ):
+            raise ValueError("teacher diagnostic disagrees with its authenticated record")
+
+
 def load_dagger_episode(
     output: Path,
     identity: TacticalV3SemanticIdentity,
     *,
     oracle_expansion_budget: int,
-    expected_schedule: PilotScheduleItem | None = None,
+    expected_schedule: PilotScheduleItem | ContinuationScheduleItem | None = None,
+    expected_actor_identity: TacticalV3SemanticIdentity | None = None,
+    allow_historical_teacher: bool = False,
 ) -> PilotDaggerEpisode:
     identity = _validate_identity(identity)
+    if expected_actor_identity is not None:
+        expected_actor_identity = _validate_identity(expected_actor_identity)
+        _validate_compatible_transfer_identity(
+            expected_actor_identity,
+            identity,
+            subject="expected DAgger actor",
+        )
     if type(oracle_expansion_budget) is not int or oracle_expansion_budget <= 0:
         raise ValueError("DAgger oracle expansion budget must be a positive int")
     output = Path(output)
     if not output.is_dir() or _is_reparse(output):
         raise ValueError("DAgger episode must be a plain directory")
     entries = {path.name: path for path in output.iterdir()}
-    if set(entries) != {"episode.json", "decisions.jsonl"} or any(
+    historical = allow_historical_teacher and oracle_expansion_budget == 4096
+    expected_files = {"episode.json", "decisions.jsonl"}
+    if historical:
+        expected_files.add("teacher-diagnostics.jsonl")
+    if set(entries) != expected_files or any(
         not path.is_file() or _is_reparse(path) for path in entries.values()
     ):
         raise ValueError("DAgger episode inventory is not exact")
@@ -1225,10 +1365,18 @@ def load_dagger_episode(
         raise ValueError("DAgger episode manifest is invalid JSON") from error
     if type(manifest) is not dict or manifest_bytes != _canonical_bytes(manifest):
         raise ValueError("DAgger episode manifest must be canonical JSON")
-    manifest = _exact_mapping(manifest, frozenset({
+    manifest_fields = {
         "schema_version", "kind", "identity", "actor", "teacher",
         "records", "summary",
-    }), "DAgger episode manifest")
+    }
+    if historical:
+        manifest_fields.add("teacher_diagnostics")
+    manifest = _exact_mapping(manifest, frozenset(manifest_fields), "DAgger episode manifest")
+    schema_version = manifest["schema_version"]
+    if type(schema_version) is not int or schema_version not in {1, 2}:
+        raise ValueError("DAgger episode schema version is unsupported")
+    if historical and schema_version != 2:
+        raise ValueError("historical deep teacher requires its diagnostics schema")
     identity_data = _exact_mapping(manifest["identity"], frozenset({
         "scenario_id", "contract_hash", "encoding_hash", "capacity_hash",
         "environment_kind",
@@ -1240,26 +1388,68 @@ def load_dagger_episode(
         "capacity_hash": identity.capacity_hash,
         "environment_kind": identity.environment_kind,
     }
-    actor = _exact_mapping(manifest["actor"], frozenset({
+    actor_fields = {
         "algorithm", "model_state_sha256", "corpus_sha256", "best_epoch",
         "best_validation_policy_nll",
-    }), "DAgger episode actor")
+    }
+    if schema_version == 2 and not historical:
+        actor_fields.add("semantic_identity")
+    actor = _exact_mapping(
+        manifest["actor"], frozenset(actor_fields), "DAgger episode actor",
+    )
+    if schema_version == 2 and not historical:
+        try:
+            actor_identity = parse_spaces(actor["semantic_identity"])
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "DAgger actor semantic identity is invalid"
+            ) from error
+        _validate_compatible_transfer_identity(
+            actor_identity,
+            identity,
+            subject="DAgger actor",
+        )
+    else:
+        # Schema 1 predates explicit transfer provenance and already allowed
+        # compatible cross-contract collection.  Preserve readability without
+        # inventing an actor identity it never recorded.
+        actor_identity = None
+    if (
+        expected_actor_identity is not None
+        and actor_identity is None
+    ):
+        raise ValueError(
+            "legacy DAgger episode cannot authenticate actor semantic identity"
+        )
+    if (
+        expected_actor_identity is not None
+        and actor_identity != expected_actor_identity
+    ):
+        raise ValueError(
+            "DAgger actor semantic identity does not match the expected actor"
+        )
     teacher = _exact_mapping(manifest["teacher"], frozenset({
         "identity", "search_depth", "expansion_budget", "heuristic_identity",
     }), "DAgger episode teacher")
+    (
+        expected_teacher_identity,
+        expected_teacher_depth,
+        expected_teacher_budget,
+        expected_teacher_heuristic,
+    ) = _teacher_evidence_contract(identity, oracle_expansion_budget,
+                                  allow_historical_teacher=allow_historical_teacher)
     records_meta = _exact_mapping(manifest["records"], frozenset({
         "path", "count", "sha256",
     }), "DAgger episode records")
     if (
-        manifest["schema_version"] != 1
-        or manifest["kind"] != "tactical-v3-dagger-episode"
+        manifest["kind"] != "tactical-v3-dagger-episode"
         or dict(identity_data) != expected_identity
         or actor["algorithm"] != "structured_imitation"
         or teacher != {
-            "identity": "bounded-search-v1",
-            "search_depth": 4,
-            "expansion_budget": oracle_expansion_budget,
-            "heuristic_identity": "material-plus-pursuit-v1",
+            "identity": expected_teacher_identity,
+            "search_depth": expected_teacher_depth,
+            "expansion_budget": expected_teacher_budget,
+            "heuristic_identity": expected_teacher_heuristic,
         }
         or records_meta["path"] != "decisions.jsonl"
     ):
@@ -1294,6 +1484,7 @@ def load_dagger_episode(
         example = _parse_pilot_row(
             data["example"], identity,
             dagger_oracle_expansion_budget=oracle_expansion_budget,
+            allow_historical_teacher=allow_historical_teacher,
         )
         learner_candidate_id = _int(
             data["learner_candidate_id"], f"DAgger record {index} learner candidate",
@@ -1351,6 +1542,11 @@ def load_dagger_episode(
     ):
         raise ValueError("DAgger episode records count changed")
 
+    if historical:
+        _validate_historical_teacher_diagnostics(
+            manifest["teacher_diagnostics"], entries["teacher-diagnostics.jsonl"], tuple(records),
+        )
+
     summary_data = _exact_mapping(manifest["summary"], frozenset({
         "schedule", "winner", "terminated", "truncated", "decisions",
         "disagreements", "teacher_interventions", "internal_fallback_count",
@@ -1401,7 +1597,7 @@ def load_dagger_episode(
         raise ValueError("DAgger episode summary is inconsistent")
     return PilotDaggerEpisode(
         identity, tuple(records), summary, str(actor["model_state_sha256"]),
-        str(actor["corpus_sha256"]), best_epoch, float(best_nll),
+        str(actor["corpus_sha256"]), best_epoch, float(best_nll), actor_identity,
     )
 
 
@@ -1508,6 +1704,7 @@ def load_selective_dagger_partition(
         if (
             type(game["labels"]) is not int
             or game["labels"] != len(episode.records)
+            or (episodes and episode.actor_identity != episodes[0].actor_identity)
             or episode.actor_model_state_sha256
             != manifest["actor_model_state_sha256"]
             or episode.actor_corpus_sha256 != manifest["actor_corpus_sha256"]
@@ -1551,7 +1748,8 @@ def build_dagger_training_set(
         if episode.identity != collection.identity:
             raise ValueError("DAgger iteration contains mixed semantic identities")
         if (
-            episode.actor_model_state_sha256 != actor.actor_model_state_sha256
+            episode.actor_identity != actor.actor_identity
+            or episode.actor_model_state_sha256 != actor.actor_model_state_sha256
             or episode.actor_corpus_sha256 != actor.actor_corpus_sha256
             or episode.actor_best_epoch != actor.actor_best_epoch
             or episode.actor_best_validation_policy_nll
@@ -1697,6 +1895,7 @@ def build_selective_dagger_training_set(
             raise ValueError("selective DAgger semantic identity changed")
         if (
             episode.actor_corpus_sha256 != expected_actor_corpus
+            or episode.actor_identity != actor.actor_identity
             or episode.actor_model_state_sha256 != actor.actor_model_state_sha256
             or episode.actor_best_epoch != actor.actor_best_epoch
             or episode.actor_best_validation_policy_nll
@@ -2180,6 +2379,7 @@ def _parse_pilot_row(
     *,
     dagger_oracle_expansion_budget: int | None = None,
     legacy_bounded_search: bool = False,
+    allow_historical_teacher: bool = False,
 ) -> StructuredExample:
     data = _exact_mapping(value, _ROW_FIELDS, "pilot example")
     if _int(data["example_schema_version"], "example.example_schema_version") != 1:
@@ -2205,12 +2405,24 @@ def _parse_pilot_row(
     )
     profile_id = _text(data["profile_id"], "example.profile_id")
     if dagger_oracle_expansion_budget is not None:
+        expected_teacher = _teacher_evidence_contract(
+            identity, dagger_oracle_expansion_budget,
+            allow_historical_teacher=allow_historical_teacher,
+        )
+        actual_teacher = (
+            teacher.identity,
+            teacher.search_depth,
+            teacher.expansion_budget,
+            teacher.heuristic_identity,
+        )
+        valid_expansions = (
+            teacher.actual_expansions == 0
+            if is_reach_cell_identity(identity)
+            else 1 <= teacher.actual_expansions <= dagger_oracle_expansion_budget
+        )
         valid_teacher = (
-            teacher.identity == "bounded-search-v1"
-            and teacher.search_depth == 4
-            and teacher.expansion_budget == dagger_oracle_expansion_budget
-            and 1 <= teacher.actual_expansions <= dagger_oracle_expansion_budget
-            and teacher.heuristic_identity == "material-plus-pursuit-v1"
+            actual_teacher == expected_teacher
+            and valid_expansions
             and teacher.confidence is None
         )
     elif legacy_bounded_search:
@@ -2297,6 +2509,7 @@ def _policy_target_metrics(
     model: TacticalV3Policy,
     examples: tuple[StructuredExample, ...],
     *,
+    identity: TacticalV3SemanticIdentity | None = None,
     batch_size: int = 32,
     deadline_monotonic: float | None = None,
     progress_callback=None,
@@ -2317,7 +2530,12 @@ def _policy_target_metrics(
                 raise TimeoutError("training deadline reached during policy metrics")
             rows = examples[offset:offset + batch_size]
             batch = _batch_to_device(
-                collate_examples(rows, model.config.horizon_turns), device,
+                collate_examples(
+                    rows,
+                    model.config.horizon_turns,
+                    identity=identity,
+                ),
+                device,
             )
             logits = model(batch).candidate_logits
             valid_logits = logits[batch.candidates.mask]
@@ -2340,12 +2558,17 @@ def _policy_target_metrics(
 def validation_metric_breakdown(
     model: TacticalV3Policy,
     examples: tuple[StructuredExample, ...],
+    *,
+    identity: TacticalV3SemanticIdentity | None = None,
 ) -> dict[str, dict[str, object]]:
     if not examples:
         raise ValueError("validation metric examples must not be empty")
 
     def metric_wire(rows: tuple[StructuredExample, ...]) -> dict[str, object]:
-        return {"examples": len(rows), **asdict(_policy_target_metrics(model, rows))}
+        return {
+            "examples": len(rows),
+            **asdict(_policy_target_metrics(model, rows, identity=identity)),
+        }
 
     result: dict[str, dict[str, object]] = {}
     for profile in PILOT_PROFILES:
@@ -2719,6 +2942,7 @@ def _train_pilot_dataset(
             initial_train = _policy_target_metrics(
                 initial_model,
                 train,
+                identity=identity,
                 deadline_monotonic=deadline,
                 progress_callback=lambda completed, total: progress(
                     "initial_train", completed, total,
@@ -2727,6 +2951,7 @@ def _train_pilot_dataset(
             initial_validation = _policy_target_metrics(
                 initial_model,
                 validation,
+                identity=identity,
                 deadline_monotonic=deadline,
                 progress_callback=lambda completed, total: progress(
                     "initial_validation", completed, total,
@@ -2813,6 +3038,7 @@ def _train_pilot_dataset(
             model_config,
             objective_config,
             trainer_config,
+            identity=identity,
             **training_arguments,
         )
         check_stop(completed_epoch=True)
@@ -2843,6 +3069,7 @@ def _train_pilot_dataset(
         restored_train = _policy_target_metrics(
             loaded.model,
             train,
+            identity=identity,
             deadline_monotonic=deadline,
             progress_callback=(
                 lambda completed, total: check_stop(completed_epoch=True)
@@ -2851,6 +3078,7 @@ def _train_pilot_dataset(
         restored_validation = _policy_target_metrics(
             loaded.model,
             validation,
+            identity=identity,
             deadline_monotonic=deadline,
             progress_callback=(
                 lambda completed, total: check_stop(completed_epoch=True)
@@ -2965,6 +3193,12 @@ def evaluate_pilot(
         point_mobility_diagnostic_schedule(),
     }:
         raise ValueError("pilot evaluation schedule must be the frozen evaluation schedule")
+    identity = _validate_identity(client.identity)
+    _validate_compatible_transfer_identity(
+        loaded.metadata.identity,
+        identity,
+        subject="pilot evaluation policy",
+    )
     inference_device = torch.device(device) if device is not None else None
     if inference_device is not None:
         loaded.model.to(inference_device)
@@ -2999,6 +3233,7 @@ def evaluate_pilot(
                 raise ValueError("pilot evaluation view drifted or has no candidates")
             batch = collate_decisions(
                 (view.decision,), loaded.model.config.horizon_turns,
+                identity=identity,
             )
             if inference_device is not None:
                 batch = _batch_to_device(batch, inference_device)
@@ -3106,7 +3341,9 @@ def run_pilot_diagnostics(
     loaded.model.to(device)
     try:
         validation = validation_metric_breakdown(
-            loaded.model, collection.validation,
+            loaded.model,
+            collection.validation,
+            identity=collection.identity,
         )
     finally:
         loaded.model.cpu()

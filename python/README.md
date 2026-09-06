@@ -163,6 +163,38 @@ The direct CLI equivalent accepts an explicit standalone target scenario:
 
 Collection follows the target scenario's positive start-profile weights. With alternating seats, each selected profile is used for a reciprocal seat pair before the scheduler advances, so changing the scenario mix changes what is collected without changing the model selector or opponent controls.
 
+### Beacon curriculum
+
+The existing Tactical v3 template list now includes **Reach Beacon 1v1**
+(`tactical-v3-reach-cell-v1`). Start with **Passive** as the opponent and
+alternating learner seats. The flat 4-by-4 scenario asks the learner to reach a
+seeded, initially unoccupied destination within eight rounds; killing the other
+unit is not a substitute for reaching the beacon. The target is fixed for the
+episode and carried in the existing move-candidate target reference, so model
+tensor shapes and encoding/capacity hashes remain compatible.
+
+The optional `tactical_v3.objective` configuration specifies `kind: reach_cell`,
+`target_policy: seeded_farthest_reachable_unoccupied_v1`, and `radius: 0`.
+Omitting it preserves the existing annihilation objective and legacy contract
+hashes. Change board size, round limits, roster, or start distribution through
+the existing template workflow; no new model-selection controls are needed.
+
+For teacher-guided continuation, use a compatible source model with the existing
+`train-structured` command and the saved reach scenario. Its shortest-path
+teacher labels every unique visited learner decision with
+`curriculum_reach_cell`; the learner still chooses the actions during collection.
+Teacher depth and actual search expansions are zero because this objective uses
+pathfinding, not the annihilation search teacher. The existing `train-outcome`
+path also carries the objective through sampling, optimization, and checkpoint
+validation, allowing later scratch or initialized outcome-learning experiments.
+
+Judge a beacon pilot on held-out success rates **for each seat**, steps to reach
+the goal, and repeated movement, not just teacher NLL. Then test retention on the
+original closing scenarios before mixing beacon practice with approach/finish
+tasks. A published beacon candidate is not automatically a replacement for the
+best full-game model. Collection and epoch metrics use the existing TensorBoard
+trackers; the learner's headless games remain separate from the Arena viewer.
+
 ## Tactical v2 rosters
 
 `tactical-v2` is the default environment for a new tactical experiment: `train` resolves an omitted `--environment` to `tactical-v2`, not the legacy contract. `tactical-v1` remains supported as a frozen legacy contract; its templates, checkpoints, and encoding are compatible only with other tactical-v1 artifacts, never with tactical-v2. `doctor` and `benchmark` intentionally keep defaulting to `--environment tactical-v1` — they are environment diagnostics, not new-run launchers, so an existing invocation without an explicit flag keeps checking the contract it always has. Pass `--environment tactical-v2` explicitly to doctor-check or benchmark the new contract.

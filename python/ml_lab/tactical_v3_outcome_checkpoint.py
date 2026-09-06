@@ -381,11 +381,12 @@ def _metadata_from_wire(value: object) -> OutcomeCheckpointMetadata:
 def _fixture_outputs(
     model: TacticalV3Policy,
     decisions: tuple[TacticalV3Decision, ...],
+    identity: TacticalV3SemanticIdentity,
 ) -> tuple[tuple[tuple[float, ...], ...], tuple[CandidateIdentity, ...]]:
     if not decisions:
         raise ValueError("outcome inference fixture must contain decisions")
     model.eval()
-    batch = collate_decisions(decisions, model.config.horizon_turns)
+    batch = collate_decisions(decisions, model.config.horizon_turns, identity=identity)
     with torch.inference_mode():
         output = model(batch)
         selected = model.select(batch)
@@ -402,8 +403,9 @@ def _fixture_outputs(
 def _fixture_wire(
     model: TacticalV3Policy,
     decisions: tuple[TacticalV3Decision, ...],
+    identity: TacticalV3SemanticIdentity,
 ) -> dict[str, object]:
-    logits, selected = _fixture_outputs(model, decisions)
+    logits, selected = _fixture_outputs(model, decisions, identity)
     return {
         "decisions": [_plain(asdict(item), "fixture.decision") for item in decisions],
         "valid_candidate_logits": [list(row) for row in logits],
@@ -467,7 +469,9 @@ def save_outcome_checkpoint(
         "format_version": _FORMAT_VERSION,
         "metadata": _metadata_wire(metadata),
         "state_dict": state,
-        "inference_fixture": _fixture_wire(cpu_model, tuple(fixture_decisions)),
+        "inference_fixture": _fixture_wire(
+            cpu_model, tuple(fixture_decisions), metadata.identity,
+        ),
     })
 
 
@@ -515,7 +519,9 @@ def load_outcome_checkpoint(
             "loaded outcome model state hash does not match metadata"
         )
     fixture = _fixture_from_wire(raw["inference_fixture"], metadata.identity)
-    actual_logits, actual_selected = _fixture_outputs(model, fixture.decisions)
+    actual_logits, actual_selected = _fixture_outputs(
+        model, fixture.decisions, metadata.identity,
+    )
     if (
         actual_logits != fixture.valid_candidate_logits
         or actual_selected != fixture.selected_identities

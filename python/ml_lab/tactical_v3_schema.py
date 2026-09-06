@@ -53,9 +53,16 @@ _VIEW_FIELDS = frozenset({
 })
 _DECISION_FIELDS = frozenset({"decision_id", "seat", "observation", "candidates"})
 
-CANDIDATE_REFERENCE_FAMILIES: Mapping[str, Mapping[str, str | None]] = MappingProxyType({
+ReferenceFamily = str | tuple[str | None, ...] | None
+
+
+CANDIDATE_REFERENCE_FAMILIES: Mapping[str, Mapping[str, ReferenceFamily]] = MappingProxyType({
     "attack": MappingProxyType({"actor": "units", "target": "units", "template": None, "cell": None}),
-    "move": MappingProxyType({"actor": "units", "target": None, "template": None, "cell": "cells"}),
+    # A reach-cell curriculum uses the existing nullable target slot for its
+    # strategic goal while `cell` remains the immediate move destination.
+    # Legacy annihilation decisions continue to require a null move target;
+    # `_validate_semantics` enforces the objective-dependent half of that rule.
+    "move": MappingProxyType({"actor": "units", "target": ("cells", None), "template": None, "cell": "cells"}),
     "deploy": MappingProxyType({"actor": None, "target": None, "template": "templates", "cell": "cells"}),
     "end_turn": MappingProxyType({"actor": None, "target": None, "template": None, "cell": None}),
 })
@@ -274,7 +281,7 @@ def parse_spaces(payload: object) -> TacticalV3SemanticIdentity:
         raise ValueError("encoding_hash does not match encoding")
     if canonical_sha256(capacity) != capacity_hash:
         raise ValueError("capacity_hash does not match capacity")
-    return TacticalV3SemanticIdentity(
+    identity = TacticalV3SemanticIdentity(
         scenario_id=_string(data["scenario_id"], "scenario_id"),
         scenario_schema_version=_int32(data["scenario_schema_version"], "scenario_schema_version"),
         contract_version=_literal(data["contract_version"], frozenset({"tactical-v3"}), "contract_version"),
@@ -283,6 +290,8 @@ def parse_spaces(payload: object) -> TacticalV3SemanticIdentity:
         environment_kind=_literal(data["environment_kind"], frozenset({"tactical", "duel"}), "environment_kind"),
         match=match, encoding=encoding, capacity=capacity,
     )
+    _reach_cell_objective(identity)
+    return identity
 
 
 def _ref(value: object, field: str) -> TokenRef:
@@ -329,19 +338,66 @@ def _reference_length(ref: TokenRef, observation: TacticalV3Observation, candida
     return {"cells": len(observation.cells), "units": len(observation.units), "templates": len(observation.templates), "capability_definitions": len(observation.capability_definitions), "capability_allocations": len(observation.capability_allocations), "rules": len(observation.rules), "memory_records": len(observation.memory), "relations": len(observation.relations), "candidates": candidates}[ref.table]
 
 
-def _require_reference(ref: TokenRef | None, expected: str | tuple[str, ...] | None, observation: TacticalV3Observation, candidates: int, field: str) -> None:
+def _require_reference(ref: TokenRef | None, expected: ReferenceFamily, observation: TacticalV3Observation, candidates: int, field: str) -> None:
     if expected is None:
         if ref is not None:
             raise ValueError(f"{field} must be null")
         return
+    optional = type(expected) is tuple and None in expected
+    if ref is None and optional:
+        return
     if ref is None:
         raise ValueError(f"{field} is required")
-    accepted = (expected,) if type(expected) is str else expected
+    accepted = (expected,) if type(expected) is str else tuple(
+        family for family in expected if family is not None
+    )
     if ref.table not in accepted:
         raise ValueError(f"{field} references incompatible table {ref.table}")
     length = _reference_length(ref, observation, candidates)
     if ref.row < 0 or ref.row >= length:
         raise ValueError(f"{ref.table}[{ref.row}] of {length}")
+
+
+def _reach_cell_objective(
+    identity: TacticalV3SemanticIdentity,
+) -> tuple[str, int] | None:
+    """Return the strict reach objective, or None for legacy annihilation.
+
+    The engine deliberately omits the default annihilation objective from the
+    match contract so existing contract hashes remain byte-for-byte stable.
+    A present objective is therefore a versioned, non-default match semantic.
+    """
+
+    raw = identity.match.get("objective")
+    if raw is None:
+        return None
+    objective = _exact_mapping(
+        raw,
+        frozenset({"kind", "target_policy", "radius"}),
+        "match.objective",
+    )
+    kind = _literal(
+        objective["kind"], frozenset({"reach_cell"}), "match.objective.kind"
+    )
+    target_policy = _literal(
+        objective["target_policy"],
+        frozenset({"seeded_farthest_reachable_unoccupied_v1"}),
+        "match.objective.target_policy",
+    )
+    radius = _int32(objective["radius"], "match.objective.radius")
+    if radius != 0:
+        raise ValueError("match.objective.radius must be 0")
+    if kind != "reach_cell":  # pragma: no cover - narrowed by `_literal`.
+        raise AssertionError
+    return target_policy, radius
+
+
+def is_reach_cell_identity(identity: TacticalV3SemanticIdentity) -> bool:
+    """Whether an authenticated tactical-v3 identity is a reach curriculum."""
+
+    if type(identity) is not TacticalV3SemanticIdentity:
+        raise TypeError("identity must be TacticalV3SemanticIdentity")
+    return _reach_cell_objective(identity) is not None
 
 
 def _validate_semantics(decision: TacticalV3Decision, terminated: bool, truncated: bool, identity: TacticalV3SemanticIdentity) -> None:
@@ -372,6 +428,8 @@ def _validate_semantics(decision: TacticalV3Decision, terminated: bool, truncate
         source, target = relation_families[relation.kind]
         _require_reference(relation.source, source, observation, len(candidates), f"{relation.kind}.source")
         _require_reference(relation.target, target, observation, len(candidates), f"{relation.kind}.target")
+    reach_objective = _reach_cell_objective(identity)
+    reach_target: TokenRef | None = None
     for candidate in candidates:
         if candidate.decision_id != decision.decision_id:
             raise ValueError("candidate decision_id does not match decision_id")
@@ -379,6 +437,33 @@ def _validate_semantics(decision: TacticalV3Decision, terminated: bool, truncate
             _require_reference(getattr(candidate, field), family, observation, len(candidates), f"{candidate.kind}.{field}")
         for field, family in PROJECTED_REFERENCE_FAMILIES[candidate.kind].items():
             _require_reference(getattr(candidate.projection, field), family, observation, len(candidates), f"{candidate.kind}.projection.{field}")
+        if candidate.kind == "move":
+            if reach_objective is None:
+                if candidate.target is not None:
+                    raise ValueError("annihilation move.target must be null")
+            else:
+                if candidate.target is None:
+                    raise ValueError("reach_cell move.target is required")
+                if reach_target is None:
+                    reach_target = candidate.target
+                elif candidate.target != reach_target:
+                    raise ValueError(
+                        "reach_cell move.target must be consistent within a decision"
+                    )
+                destination = candidate.projection.destination_cell
+                if destination is None:
+                    raise ValueError(
+                        "reach_cell move projection destination is required"
+                    )
+                # The first reach curriculum intentionally supports radius zero
+                # only.  Comparing the authenticated cell references directly
+                # avoids duplicating the engine's hex-coordinate semantics here.
+                if destination.row == candidate.target.row and not (
+                    candidate.projection.is_terminal
+                ):
+                    raise ValueError(
+                        "reach_cell completing move projection must be terminal"
+                    )
 
 
 def parse_decision(payload: object, identity: TacticalV3SemanticIdentity) -> TacticalV3Decision:

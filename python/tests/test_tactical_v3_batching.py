@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, fields, is_dataclass, replace
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 import torch
@@ -20,6 +21,7 @@ from ml_lab.tactical_v3_batching import (
     TokenTableBatch,
     collate_decisions,
     collate_examples,
+    validate_ragged_batch,
 )
 from ml_lab.tactical_v3_client import TacticalV3GymClient
 from ml_lab.tactical_v3_corpus import StructuredExample, StructuredTarget, TeacherEvidence, load_corpus
@@ -181,6 +183,139 @@ def _example_for_decision(decision: TacticalV3Decision) -> StructuredExample:
         1,
         decision.seat,
     )
+
+
+def _batching_identity(*, reach_cell: bool) -> TacticalV3SemanticIdentity:
+    match: dict[str, object] = {}
+    if reach_cell:
+        match["objective"] = MappingProxyType({
+            "kind": "reach_cell",
+            "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+            "radius": 0,
+        })
+    return TacticalV3SemanticIdentity(
+        "test-local",
+        1,
+        "tactical-v3",
+        "a" * 64,
+        "b" * 64,
+        "c" * 64,
+        "duel",
+        MappingProxyType(match),
+        MappingProxyType({}),
+        MappingProxyType({}),
+    )
+
+
+def _move_decision(
+    *,
+    target: TokenRef | None,
+    destination: TokenRef = TokenRef("cells", 1),
+    terminal: bool = False,
+) -> TacticalV3Decision:
+    decision = _minimal_decision()
+    projection = ProjectedDelta(
+        TokenRef("cells", 0), destination, None, None,
+        1, 0, 0, 0, False, 0, 0, 0, terminal,
+    )
+    move = Candidate(
+        0, decision.decision_id, "move", TokenRef("units", 0),
+        target, None, destination, projection,
+    )
+    return replace(decision, candidates=(move,))
+
+
+def test_collate_decisions_encodes_optional_reach_target_in_existing_slot() -> None:
+    decision = _move_decision(
+        target=TokenRef("cells", 1),
+        terminal=True,
+    )
+    batch = collate_decisions(
+        (decision,),
+        horizons=(4,),
+        identity=_batching_identity(reach_cell=True),
+    )
+
+    assert batch.objective_kind == "reach_cell"
+    assert batch.candidates.reference_mask[0, 0, 1].item() is True
+    assert batch.candidates.reference_index[0, 0, 1].item() == 1
+
+
+def test_collate_move_target_semantics_are_bound_to_objective_identity() -> None:
+    reach = _move_decision(target=TokenRef("cells", 1), terminal=True)
+    legacy = _move_decision(target=None)
+
+    for identity in (None, _batching_identity(reach_cell=False)):
+        with pytest.raises(ValueError, match="annihilation move.target"):
+            collate_decisions((reach,), horizons=(4,), identity=identity)
+    with pytest.raises(ValueError, match="reach_cell move.target is required"):
+        collate_decisions(
+            (legacy,),
+            horizons=(4,),
+            identity=_batching_identity(reach_cell=True),
+        )
+
+
+def test_reach_collate_rejects_inconsistent_target_and_nonterminal_completion() -> None:
+    identity = _batching_identity(reach_cell=True)
+    first = _move_decision(
+        target=TokenRef("cells", 1),
+        destination=TokenRef("cells", 0),
+    )
+    second = replace(
+        first.candidates[0],
+        candidate_id=1,
+        target=TokenRef("cells", 0),
+    )
+    with pytest.raises(ValueError, match="move.target must be consistent"):
+        collate_decisions(
+            (replace(first, candidates=(*first.candidates, second)),),
+            horizons=(4,),
+            identity=identity,
+        )
+    with pytest.raises(ValueError, match="completing move projection must be terminal"):
+        collate_decisions(
+            (_move_decision(target=TokenRef("cells", 1)),),
+            horizons=(4,),
+            identity=identity,
+        )
+
+
+def test_collate_examples_cross_checks_explicit_identity() -> None:
+    identity = _batching_identity(reach_cell=True)
+    example = _example_for_decision(
+        _move_decision(target=TokenRef("cells", 1), terminal=True)
+    )
+    batch = collate_examples(
+        (example,), horizons=(4,), identity=identity
+    )
+    assert batch.objective_kind == "reach_cell"
+
+    with pytest.raises(ValueError, match="identity does not match batching identity"):
+        collate_examples(
+            (replace(example, contract_hash="d" * 64),),
+            horizons=(4,),
+            identity=identity,
+        )
+
+
+def test_ragged_validation_does_not_reinterpret_cross_objective_target_masks() -> None:
+    reach = collate_decisions(
+        (_move_decision(target=TokenRef("cells", 1), terminal=True),),
+        horizons=(4,),
+        identity=_batching_identity(reach_cell=True),
+    )
+    legacy = collate_decisions(
+        (_move_decision(target=None),),
+        horizons=(4,),
+    )
+    validate_ragged_batch(reach)
+    validate_ragged_batch(legacy)
+
+    with pytest.raises(ValueError, match="reference mask"):
+        validate_ragged_batch(replace(reach, objective_kind="annihilation"))
+    with pytest.raises(ValueError, match="reference mask"):
+        validate_ragged_batch(replace(legacy, objective_kind="reach_cell"))
 
 
 def _neighborhood_edge_set(batch: RaggedBatch) -> set[tuple[int, int, int]]:

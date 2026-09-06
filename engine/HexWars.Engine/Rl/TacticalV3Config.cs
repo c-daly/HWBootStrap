@@ -3,6 +3,37 @@ using System.Collections.Generic;
 
 namespace HexWars.Engine.Rl
 {
+    public sealed class TacticalV3ObjectiveConfig
+    {
+        public const string ReachCellKind = "reach_cell";
+        public const string SeededFarthestReachableUnoccupiedPolicy =
+            "seeded_farthest_reachable_unoccupied_v1";
+        public const string ReachCellTeacherHeuristicIdentity =
+            "reach-cell-shortest-path-v1";
+
+        public TacticalV3ObjectiveConfig(string kind, string targetPolicy, int radius)
+        {
+            if (kind != ReachCellKind)
+                throw new ArgumentException(
+                    "tactical-v3 objective kind must be 'reach_cell'", nameof(kind));
+            if (targetPolicy != SeededFarthestReachableUnoccupiedPolicy)
+                throw new ArgumentException(
+                    "tactical-v3 reach-cell target policy must be '" +
+                    SeededFarthestReachableUnoccupiedPolicy + "'", nameof(targetPolicy));
+            if (radius != 0)
+                throw new ArgumentOutOfRangeException(
+                    nameof(radius), "tactical-v3 reach-cell radius must be 0");
+
+            Kind = kind;
+            TargetPolicy = targetPolicy;
+            Radius = radius;
+        }
+
+        public string Kind { get; }
+        public string TargetPolicy { get; }
+        public int Radius { get; }
+    }
+
     public sealed class TacticalV3CapacityProfile
     {
         public TacticalV3CapacityProfile(
@@ -73,16 +104,19 @@ namespace HexWars.Engine.Rl
         public TacticalV3Config(
             TacticalV2Config match,
             TacticalV3CapacityProfile capacity,
-            TacticalV3RewardConfig reward)
+            TacticalV3RewardConfig reward,
+            TacticalV3ObjectiveConfig? objective = null)
         {
             Match = match ?? throw new ArgumentNullException(nameof(match));
             Capacity = capacity ?? throw new ArgumentNullException(nameof(capacity));
             Reward = reward ?? throw new ArgumentNullException(nameof(reward));
+            Objective = objective;
         }
 
         public TacticalV2Config Match { get; }
         public TacticalV3CapacityProfile Capacity { get; }
         public TacticalV3RewardConfig Reward { get; }
+        public TacticalV3ObjectiveConfig? Objective { get; }
 
         public IReadOnlyList<string> Validate()
         {

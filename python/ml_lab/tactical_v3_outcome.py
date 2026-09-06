@@ -573,9 +573,10 @@ def _sample_seed(episode_seed: int, learner_seat: int, index: int) -> int:
 
 def _greedy_sample(
     model: TacticalV3Policy, decision: TacticalV3Decision,
+    *, identity: TacticalV3SemanticIdentity | None = None,
 ) -> tuple[int, float, float]:
     batch = _batch_to_device(
-        collate_decisions((decision,), model.config.horizon_turns),
+        collate_decisions((decision,), model.config.horizon_turns, identity=identity),
         next(model.parameters()).device,
     )
     with torch.inference_mode():
@@ -596,9 +597,10 @@ def _categorical_sample(
     model: TacticalV3Policy,
     decision: TacticalV3Decision,
     seed: int,
+    *, identity: TacticalV3SemanticIdentity | None = None,
 ) -> tuple[int, float, float]:
     batch = _batch_to_device(
-        collate_decisions((decision,), model.config.horizon_turns),
+        collate_decisions((decision,), model.config.horizon_turns, identity=identity),
         next(model.parameters()).device,
     )
     with torch.inference_mode():
@@ -680,7 +682,9 @@ def collect_outcome_game(
         if view.seat != learner_seat:
             if structured_opponent is None:
                 raise ValueError("scripted opponent exposed an external decision")
-            selection = select_candidate(structured_opponent, view)
+            selection = select_candidate(
+                structured_opponent, view, target_identity=identity,
+            )
             view = client.duel_step(CandidateSelection(
                 selection.decision_id, selection.candidate_id,
             ))
@@ -690,10 +694,13 @@ def collect_outcome_game(
                 model,
                 decision,
                 _sample_seed(episode_seed, learner_seat, len(records)),
+                identity=identity,
             )
             mode: Literal["categorical", "greedy"] = "categorical"
         else:
-            candidate_id, log_probability, entropy = _greedy_sample(model, decision)
+            candidate_id, log_probability, entropy = _greedy_sample(
+                model, decision, identity=identity,
+            )
             mode = "greedy"
         successor = client.duel_step(CandidateSelection(
             decision.decision_id, candidate_id,
@@ -803,6 +810,9 @@ def optimize_outcome_rollout(
     """Consume every decision in one frozen-policy rollout exactly once."""
 
     decisions, rows, returns, outcomes, behavior_logs = _optimization_rows(games)
+    identity = games[0].game.identity
+    if any(result.game.identity != identity for result in games):
+        raise ValueError("outcome rollout contains more than one semantic identity")
     expected_actor = games[0].game.actor.artifact_sha256
     if outcome_model_state_sha256(model) != expected_actor:
         raise ValueError("outcome rollout actor hash does not match pre-update model")
@@ -820,6 +830,7 @@ def optimize_outcome_rollout(
         batch = _batch_to_device(
             collate_decisions(
                 decisions[offset:stop], model.config.horizon_turns,
+                identity=identity,
             ),
             device,
         )
@@ -870,6 +881,7 @@ def optimize_outcome_rollout(
             batch = _batch_to_device(
                 collate_decisions(
                     decisions[offset:stop], model.config.horizon_turns,
+                    identity=identity,
                 ),
                 device,
             )

@@ -62,7 +62,7 @@ for line in sys.stdin:
             "seed-41-duel-spaces.json").read_text(encoding="utf-8"))
         response = replies.get(request["cmd"], duel_spaces)
     elif request["cmd"] in {"reset", "duel_reset"}:
-        response = minimal_view_payload()
+        response = replies.get(request["cmd"], minimal_view_payload())
     elif request["cmd"] in {"step", "duel_step"}:
         response = minimal_view_payload()
         response["candidates"][0]["decision_id"] = 8
@@ -198,6 +198,110 @@ def test_duel_oracle_query_accepts_frozen_2048_preflight_candidate(
         "search_depth": 4, "expansion_budget": 2048,
         "heuristic_identity": "material-plus-pursuit-v1",
     }
+
+
+def _configure_reach_cell_identity(fake_server: _FakeServer) -> None:
+    from ml_lab.tactical_v3_schema import canonical_sha256
+    from tests.test_tactical_v3_schema import minimal_view_payload
+
+    spaces = json.loads(
+        (Path(__file__).parent / "fixtures" / "tactical_v3" /
+         "seed-41-duel-spaces.json").read_text(encoding="utf-8")
+    )
+    spaces["scenario_id"] = "tactical-v3-reach-cell-v1"
+    spaces["match"]["objective"] = {
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    }
+    spaces["contract_hash"] = canonical_sha256({
+        "encoding_hash": spaces["encoding_hash"],
+        "environment_kind": spaces["environment_kind"],
+        "match": spaces["match"],
+        "schema_version": 1,
+        "version": spaces["contract_version"],
+    })
+    view = minimal_view_payload()
+    view["candidates"][0]["target"] = {"table": "cells", "row": 0}
+    view["candidates"][0]["projection"]["is_terminal"] = True
+    fake_server.reply_with("duel_spaces", spaces)
+    fake_server.reply_with("duel_reset", view)
+
+
+def test_duel_oracle_query_accepts_reach_cell_teacher_without_fake_expansions(
+    fake_server: _FakeServer,
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+
+    _configure_reach_cell_identity(fake_server)
+    fake_server.reply_with("duel_oracle_query", {"selection": {
+        "decision_id": 7,
+        "candidate_id": 0,
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "actual_expansions": 0,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }})
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(
+            41, "external", "passive", 0, "conversion-1v1-far", 0,
+        )
+        selection = client.duel_oracle_query(
+            initial.decision.decision_id,
+            search_depth=0,
+            expansion_budget=512,
+            heuristic_identity="reach-cell-shortest-path-v1",
+        )
+
+    assert selection.actual_expansions == 0
+    assert fake_server.requests[-2] == {
+        "cmd": "duel_oracle_query",
+        "decision_id": 7,
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }
+
+
+@pytest.mark.parametrize(
+    "reach_objective, teacher",
+    (
+        (False, (0, 512, "reach-cell-shortest-path-v1")),
+        (True, (4, 512, "material-plus-pursuit-v1")),
+    ),
+)
+def test_duel_oracle_query_rejects_teacher_from_another_objective_before_rpc(
+    fake_server: _FakeServer,
+    reach_objective: bool,
+    teacher: tuple[int, int, str],
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+
+    if reach_objective:
+        _configure_reach_cell_identity(fake_server)
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(
+            41,
+            "external",
+            "passive" if reach_objective else "random",
+            0,
+            "conversion-1v1-far" if reach_objective else "standard-3v3",
+            0,
+        )
+        with pytest.raises(
+            ValueError,
+            match="teacher configuration does not match authenticated objective",
+        ):
+            client.duel_oracle_query(
+                initial.decision.decision_id,
+                search_depth=teacher[0],
+                expansion_budget=teacher[1],
+                heuristic_identity=teacher[2],
+            )
+
+    assert not any(
+        request["cmd"] == "duel_oracle_query" for request in fake_server.requests
+    )
 
 
 def test_duel_greedy_step_sends_exact_request_and_advances_with_greedy_provenance(

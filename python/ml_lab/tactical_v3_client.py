@@ -17,6 +17,7 @@ from hexwars_gym.env import no_window_creationflags
 from .tactical_v3_schema import (
     TacticalV3SemanticIdentity,
     TacticalV3View,
+    is_reach_cell_identity,
     parse_spaces,
     parse_view,
 )
@@ -329,10 +330,22 @@ class TacticalV3GymClient:
         expansion_budget = self._int32(expansion_budget, "expansion_budget")
         if type(heuristic_identity) is not str or not heuristic_identity:
             raise TypeError("heuristic_identity must be a non-empty string")
-        if search_depth != 4 or expansion_budget not in {512, 2048} or (
-            heuristic_identity != "material-plus-pursuit-v1"
-        ):
+        bounded_search = (
+            search_depth == 4
+            and expansion_budget in {512, 2048}
+            and heuristic_identity == "material-plus-pursuit-v1"
+        )
+        reach_cell = (
+            search_depth == 0
+            and expansion_budget in {512, 2048}
+            and heuristic_identity == "reach-cell-shortest-path-v1"
+        )
+        if not bounded_search and not reach_cell:
             raise ValueError("unsupported tactical-v3 teacher configuration")
+        if reach_cell != is_reach_cell_identity(self._identity):
+            raise ValueError(
+                "tactical-v3 teacher configuration does not match authenticated objective"
+            )
         current = self._view
         if current is None:
             raise RuntimeError(f"duel_reset must precede {command}")
@@ -380,7 +393,10 @@ class TacticalV3GymClient:
             selected_heuristic != heuristic_identity
         ):
             raise ValueError("teacher selection configuration does not match request")
-        if expansion_budget == 0:
+        if expansion_budget == 0 or (
+            search_depth == 0
+            and heuristic_identity == "reach-cell-shortest-path-v1"
+        ):
             valid_expansions = actual_expansions == 0
         else:
             valid_expansions = 1 <= actual_expansions <= expansion_budget
