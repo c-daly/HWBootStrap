@@ -132,9 +132,12 @@ namespace HexWars.Presentation
 
         void Hide() => Close(); // sub-screen takeover — semantically "step aside", the demo keeps playing
 
-        void Build()
+        void Build() => BuildForPlatform(SteamRuntime.IsSteamBuild);
+
+        // Keep both menus testable in a Steam-enabled editor without initialising the Steam client.
+        void BuildForPlatform(bool steamBuild)
         {
-            _steamBuild = SteamRuntime.IsSteamBuild;
+            _steamBuild = steamBuild;
             UiKit.EnsureEventSystem();
             _canvasGo = UiKit.Canvas("TitleCanvas", UiKit.OrderMenu, transform);
 

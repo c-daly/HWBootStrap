@@ -16,6 +16,6 @@ export DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
 
 "$sdk" build engine/HexWars.NetServer/HexWars.NetServer.csproj -c Release --nologo --verbosity minimal
 server=engine/HexWars.NetServer/bin/Release/net8.0/HexWars.NetServer.dll
-"$runtime" "$server" selftest
-"$runtime" "$server" selftest-durable
-"$runtime" "$server" selftest-durable-crash
+"$runtime" exec --roll-forward LatestPatch "$server" selftest
+"$runtime" exec --roll-forward LatestPatch "$server" selftest-durable
+"$runtime" exec --roll-forward LatestPatch "$server" selftest-durable-crash

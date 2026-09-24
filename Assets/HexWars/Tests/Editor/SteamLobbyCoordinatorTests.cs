@@ -1084,8 +1084,8 @@ namespace HexWars.Presentation.Tests
 
             Assert.That(_sut.Status.LobbyId, Is.EqualTo(lobbyId),
                 "a confirmed membership must have an owner, or the lobby is occupied for ever");
-            Assert.That(_sut.Status.Phase, Is.AnyOf(SteamLobbyPhase.WaitingForPlayer,
-                                                    SteamLobbyPhase.WaitingForReady));
+            Assert.That(_sut.Status.Phase, Is.EqualTo(SteamLobbyPhase.WaitingForPlayer)
+                .Or.EqualTo(SteamLobbyPhase.WaitingForReady));
             Assert.That(_steam.LeaveLobbyCalls, Is.Zero);
 
             // The replacement join is answered as far as this coordinator is concerned, so nothing

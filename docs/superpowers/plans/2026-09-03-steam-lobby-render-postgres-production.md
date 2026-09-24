@@ -1,7 +1,7 @@
 # Steam Lobby, Render, and Durable Match Hosting Implementation Plan
 
 **Date:** 2026-09-03  
-**Status:** Proposed  
+**Status:** Client/server, hosting and security implementations integrated locally; Steam/Render promotion pending
 **Target:** Closed Steam Playtest  
 **Production authority:** Revalidate the current `web-main` deployment lineage before implementation or deployment.
 
@@ -10,6 +10,19 @@
 **Architecture:** Steam remains authoritative for the transient waiting room: discovery, invitations, lobby membership, owner, ready state, and searchable lobby metadata. `HexWars.NetServer` verifies Steam identity and lobby membership through the Steamworks Web APIs, creates a durable match, runs the deterministic engine, and commits every accepted command to Postgres before broadcasting it. Live game state remains an in-memory projection of the durable start state plus command log. The first release intentionally uses one match-server instance; horizontal scaling is gated on externalized room routing and measured demand.
 
 **Tech stack:** Unity 6000.5, Steamworks client SDK behind a local adapter, ASP.NET Core/.NET 8, PostgreSQL, Npgsql, Docker, paid Render Web Service, Render Postgres, Steamworks Web API.
+
+## 2026-09-24 continuation
+
+**Added:** The remaining hosting and security branches, including their pending local fixes, are combined
+on `codex/steam-multiplayer-integration-20260924`. The
+[integration validation report](../reports/2026-09-24-multiplayer-integration-validation.md) distinguishes
+verified local behavior from live promotion work. The checklist below remains the original acceptance
+plan; unchecked owner/environment gates are not implied complete by the implementation.
+
+**Added:** [Local multiplayer validation](../../operations/local-multiplayer-validation.md) accepts
+development placeholders and requires no registered Steam App ID. The process verifier completes games
+after graceful and forced server termination, then checks both terminal reconnects. Actual Steam
+authentication and Render staging remain promotion gates.
 
 ## Authority references
 
