@@ -1,0 +1,9 @@
+{
+  "artifactCommit": "39c4aa2",
+  "observedErrors": 446,
+  "messages": {
+    "Can't add component because class 'SphereCollider' doesn't exist!": 141,
+    "Can't add component because class 'CapsuleCollider' doesn't exist!": 122,
+    "Can't add component because class 'MeshCollider' doesn't exist!": 183
+  }
+}
