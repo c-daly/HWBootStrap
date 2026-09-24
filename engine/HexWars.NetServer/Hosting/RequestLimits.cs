@@ -33,7 +33,12 @@ namespace HexWars.NetServer.Hosting
 
         public static readonly TimeSpan KeepAliveTimeout = TimeSpan.FromSeconds(120);
 
-        public static readonly TimeSpan BodyReadTimeout = TimeSpan.FromSeconds(5);
+        // A maximum-size upload at Kestrel's minimum rate, plus its initial grace period.
+        // This bounds total work without rejecting a progressing upload after only five seconds.
+        public const int MinimumBodyBytesPerSecond = 240;
+        public static readonly TimeSpan BodyReadGracePeriod = TimeSpan.FromSeconds(5);
+        public static readonly TimeSpan BodyReadTimeout = BodyReadGracePeriod
+            + TimeSpan.FromSeconds(Math.Ceiling((double)MaxRequestBodyBytes / MinimumBodyBytesPerSecond));
 
         /// <summary>Says the size was the problem and nothing else. A caller that sent a large body either
         /// has a bug or is probing, and neither is helped by a more specific sentence.</summary>
@@ -49,6 +54,8 @@ namespace HexWars.NetServer.Hosting
             kestrel.Limits.MaxConcurrentUpgradedConnections = MaxConcurrentUpgradedConnections;
             kestrel.Limits.RequestHeadersTimeout = RequestHeadersTimeout;
             kestrel.Limits.KeepAliveTimeout = KeepAliveTimeout;
+            kestrel.Limits.MinRequestBodyDataRate = new MinDataRate(
+                MinimumBodyBytesPerSecond, BodyReadGracePeriod);
 
             // The server header names the software and its version to everyone who asks, including the
             // people writing the scanner. It buys nothing.
@@ -64,9 +71,9 @@ namespace HexWars.NetServer.Hosting
         /// is the wrong answer and, worse, means the documented 16 KB ceiling was never actually a ceiling.
         ///
         /// A declared length is answered from the header, without a byte being pulled off the socket. An
-        /// undeclared one is measured within five seconds: the body is buffered and read one byte past
-        /// the cap, then rewound for the endpoint. The independent deadline also bounds slow bodies
-        /// on public GET routes. Requests without body framing, including normal upgrades, pay nothing.
+        /// undeclared POST body is measured within a window sufficient to send the maximum body at
+        /// the transport minimum rate, then rewound for the endpoint. Other methods have no body
+        /// consumers in this application, so their undeclared bodies are rejected without reading them.
         /// </summary>
         public static IApplicationBuilder UseHexWarsRequestLimits(this IApplicationBuilder app)
         {
@@ -95,7 +102,15 @@ namespace HexWars.NetServer.Hosting
                 }
                 else if (CarriesAnUndeclaredBody(context.Request))
                 {
-                    using var deadline = new CancellationTokenSource(BodyReadTimeout);
+                    if (!HttpMethods.IsPost(context.Request.Method))
+                    {
+                        context.Response.Headers.Connection = "close";
+                        await RefuseAsync(context, StatusCodes.Status400BadRequest, ApiErrors.InvalidRequestMessage)
+                            .ConfigureAwait(false);
+                        return;
+                    }
+                    TimeProvider time = context.RequestServices.GetRequiredService<TimeProvider>();
+                    using var deadline = new CancellationTokenSource(BodyReadTimeout, time);
                     using var read = CancellationTokenSource.CreateLinkedTokenSource(
                         deadline.Token, context.RequestAborted);
                     try

@@ -1220,8 +1220,12 @@ namespace HexWars.NetServer.Runtime
         /// then failing to take the gate would strand its sockets: the entry would be gone, so the retry
         /// would find nothing to close and the players would sit on a match nobody is hosting.
         /// </summary>
-        public async Task<IReadOnlyList<Guid>> EvictAsync(
-            IEnumerable<Guid> matchIds, int closeStatus, string reason, CancellationToken ct = default)
+        public Task<IReadOnlyList<Guid>> EvictAsync(
+            IEnumerable<Guid> matchIds, int closeStatus, string reason, CancellationToken ct = default) =>
+            EvictCoreAsync(matchIds, closeStatus, reason, EvictionGateWait, ct);
+
+        async Task<IReadOnlyList<Guid>> EvictCoreAsync(
+            IEnumerable<Guid> matchIds, int closeStatus, string reason, TimeSpan gateWait, CancellationToken ct)
         {
             ArgumentNullException.ThrowIfNull(matchIds);
 
@@ -1242,7 +1246,7 @@ namespace HexWars.NetServer.Runtime
 
                 LiveMatch match = entry.Value.Result;
 
-                if (!await match.Gate.WaitAsync(EvictionGateWait, ct).ConfigureAwait(false))
+                if (!await match.Gate.WaitAsync(gateWait, ct).ConfigureAwait(false))
                 {
                     using IDisposable? scope = MatchScope(matchId);
                     logger.LogWarning(
@@ -1295,7 +1299,8 @@ namespace HexWars.NetServer.Runtime
                 if (stored is null) continue;
                 if (stored.Status is not (MatchStatus.Expired or MatchStatus.Abandoned)) continue;
 
-                unevicted.AddRange(await EvictAsync(new[] { matchId }, closeStatus, reason, ct)
+                // Reconciliation must not spend its whole pass waiting on one busy gate.
+                unevicted.AddRange(await EvictCoreAsync(new[] { matchId }, closeStatus, reason, TimeSpan.Zero, ct)
                     .ConfigureAwait(false));
             }
 

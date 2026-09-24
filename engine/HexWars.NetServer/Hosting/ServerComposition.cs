@@ -319,13 +319,14 @@ namespace HexWars.NetServer.Hosting
                 app.UseForwardedHeaders(forwarded);
             }
 
-            // Before anything reads a body, and before the static-file handler: a body over the cap is
-            // refused from its declared length, so the bytes are never pulled off the wire at all.
-            app.UseHexWarsRequestLimits();
-
             // Endpoint-aware: this emits nothing at all unless the endpoint the request matched asked
             // for a named policy. Routing has already run by here, which is what lets it see that.
             app.UseCors();
+
+            // Named endpoint policies run before buffering request bodies. Static files have no
+            // endpoint policy, so a bundle download does not consume a matchmaking quota.
+            app.UseRateLimiter();
+            app.UseHexWarsRequestLimits();
 
             app.UseWebSockets();
             app.UseDefaultFiles();   // serve the WebGL client (index.html) from wwwroot/ when a deploy copies it in
@@ -335,11 +336,6 @@ namespace HexWars.NetServer.Hosting
             types.Mappings[".data"] = "application/octet-stream";
             types.Mappings[".wasm"] = "application/wasm";
             app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = types });
-
-            // After routing (WebApplication inserts that first) and before the endpoints, so the limiter
-            // can read the policy off the endpoint the request matched. Static files are already served
-            // above: a rate limit on the WebGL bundle would throttle a page load, not an abuser.
-            app.UseRateLimiter();
 
             // The operations surface, mapped for every deployment. A probe that only worked under one
             // lobby provider would be a probe that reports a healthy legacy host as a missing route.

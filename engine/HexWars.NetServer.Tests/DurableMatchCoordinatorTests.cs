@@ -644,6 +644,32 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ReconciliationSkipsABusyGateAndClosesOtherReapedMatchesImmediately()
+        {
+            await SeatBothPlayers();
+            CreateMatchResult other = await _store.CreateMatchForLobbyAsync(new CreateMatchRequest(
+                "109775240000000043", GameSetup.Default.ToWire(), "hexwars-engine/1", 2, "test-build",
+                new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
+            string credential = (await _credentials.IssueAsync(other.Match.MatchId, Seat0Steam, Ct)).Credential;
+            await _coordinator.AuthenticateAsync("other", other.Match.MatchId.ToString(), credential, Ct);
+            Guid[] ids = new[] { _matchId, other.Match.MatchId }.OrderBy(id => id).ToArray();
+            foreach (Guid id in ids)
+                await _store.TryCompleteMatchAsync(id, MatchStatus.Expired, null, Begin, Ct);
+            Assert.That(_coordinator.TryGetLiveMatch(ids[0], out LiveMatch? busy), Is.True);
+            await busy!.Gate.WaitAsync();
+            try
+            {
+                IReadOnlyList<Guid> left = await _coordinator.EvictReapedAsync(1001, "abandoned", Ct)
+                    .WaitAsync(TimeSpan.FromSeconds(1));
+                Assert.That(left, Is.EqualTo(new[] { ids[0] }));
+                Assert.That(_coordinator.TryGetLiveMatch(ids[1], out _), Is.False);
+            }
+            finally { busy.Gate.Release(); }
+            await _coordinator.EvictReapedAsync(1001, "abandoned", Ct);
+            Assert.That(_coordinator.LiveMatchCount, Is.Zero);
+        }
+
+        [Test]
         public async Task ADisconnectedMatchIsSweptOutOfMemoryButNotOutOfTheDatabase()
         {
             await StartTheMatch();
