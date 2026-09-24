@@ -458,6 +458,11 @@ namespace HexWars.Engine.Rl
                 }
                 if (objective.Radius != 0)
                     errors.Add("tactical-v3 reach-cell radius must be 0");
+                if (tacticalV3.Templates != null)
+                    foreach (TrainingUnitTemplateConfig template in tacticalV3.Templates)
+                        if (template != null && template.Movement == 0)
+                            errors.Add("tactical-v3 reach-cell template '" + template.Id +
+                                "' movement must be positive because every template can fill the learner roster");
             }
 
             TrainingTacticalV3CapacityConfig? capacity = tacticalV3.Capacity;

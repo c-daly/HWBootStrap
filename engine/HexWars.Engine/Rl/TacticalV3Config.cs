@@ -155,6 +155,11 @@ namespace HexWars.Engine.Rl
                 foreach (TacticalV2Template template in Match.Templates)
                 {
                     UnitStats stats = template.Template.Stats;
+                    // Starting armies sample the catalog with replacement. Even one immobile
+                    // template can therefore produce an entirely immobile learner roster.
+                    if (Objective != null && stats.Movement == 0)
+                        errors.Add("tactical-v3 reach-cell template '" + template.Id +
+                            "' movement must be positive because every template can fill the learner roster");
                     if (stats.Health < 1)
                     {
                         errors.Add("tactical-v3 template '" + template.Id + "' health must be at least 1");

@@ -30,6 +30,12 @@ namespace HexWars.Engine.Tests
         {
             JsonObject document = ValidTacticalV3Json();
             ((JsonObject)document["tactical_v3"]!)["objective"] = ValidReachObjective();
+            // The combat fixture contains immobile artillery. A reach catalog must support
+            // movement for every template because starting armies sample with replacement.
+            JsonArray templates = document["tactical_v3"]!["templates"]!.AsArray();
+            for (int i = templates.Count - 1; i >= 0; i--)
+                if (templates[i]!["stats"]!["movement"]!.GetValue<int>() == 0)
+                    templates.RemoveAt(i);
 
             TacticalV3Config config = LoadTemporary(document.ToJsonString()).BuildTacticalV3();
 
@@ -70,6 +76,15 @@ namespace HexWars.Engine.Tests
             }
 
             AssertRejected(document);
+        }
+
+        [Test]
+        public void ReachCellScenarioRejectsAMixedCatalogContainingImmobileArtillery()
+        {
+            JsonObject document = ValidTacticalV3Json();
+            document["tactical_v3"]!["objective"] = ValidReachObjective();
+            var failure = Assert.Throws<InvalidDataException>(() => LoadTemporary(document.ToJsonString()));
+            Assert.That(failure!.Message, Does.Contain("movement must be positive"));
         }
 
         [Test]

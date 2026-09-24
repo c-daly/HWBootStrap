@@ -183,11 +183,13 @@ namespace HexWars.Engine.Rl
                 "reach-cell target is not initialized");
             TacticalV3Candidate? selected = null;
             int selectedDistance = int.MaxValue;
+            bool hasMoves = false;
 
             for (int index = 0; index < _frame.Candidates.Count; index++)
             {
                 TacticalV3Candidate candidate = _frame.Candidates[index];
                 if (candidate.Kind != TacticalV3CandidateKind.Move) continue;
+                hasMoves = true;
                 if (!(_frame.CommandAt(index) is MoveUnit move))
                     throw new InvalidOperationException(
                         "reach-cell move candidate does not map to a move command");
@@ -199,6 +201,7 @@ namespace HexWars.Engine.Rl
                 int distance = distances.TryGetValue(target, out int reachableDistance)
                     ? reachableDistance
                     : int.MaxValue;
+                if (distance == int.MaxValue) continue;
                 if (selected == null || distance < selectedDistance ||
                     (distance == selectedDistance &&
                      candidate.CandidateId < selected.CandidateId))
@@ -210,6 +213,11 @@ namespace HexWars.Engine.Rl
 
             if (selected == null)
             {
+                // The fixed beacon can be blocked after reset. Do not emit an arbitrary move
+                // under shortest-path provenance or silently replace the frozen objective.
+                if (hasMoves)
+                    throw new InvalidOperationException(
+                        "reach-cell teacher cannot label this decision: the fixed target is unreachable from every legal move");
                 selected = _frame.Candidates
                     .Where(candidate => candidate.Kind == TacticalV3CandidateKind.EndTurn)
                     .OrderBy(candidate => candidate.CandidateId)

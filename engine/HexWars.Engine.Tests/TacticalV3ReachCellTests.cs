@@ -178,6 +178,67 @@ namespace HexWars.Engine.Tests
                 TacticalV3ObjectiveConfig.SeededFarthestReachableUnoccupiedPolicy,
                 radius: 0);
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void ReachCatalogRejectsAnyTemplateThatCanProduceAnImmobileRoster(bool mixedCatalog)
+        {
+            TacticalV3Config reach = LineReachConfig(false);
+            var immobile = new TacticalV2Template("immobile", new UnitTemplate("Immobile",
+                new UnitStats(5, 1, 0, 0, 1, 0, 0, 10, 10)));
+            reach.Match.Templates = mixedCatalog
+                ? new[] { reach.Match.Templates[0], immobile }
+                : new[] { immobile };
+
+            Assert.That(reach.Validate(), Has.Some.Contains("movement must be positive"));
+            Assert.Throws<ArgumentException>(() => new TacticalV3DuelEnv(reach));
+            var legacy = new TacticalV3Config(reach.Match, reach.Capacity, reach.Reward);
+            Assert.That(legacy.Validate(), Is.Empty, "annihilation still supports immobile templates");
+        }
+
+        [TestCase(PlayerId.Player0)]
+        [TestCase(PlayerId.Player1)]
+        public void OpponentOccupyingFrozenBeaconDoesNotProduceAnArbitraryTeacherLabel(PlayerId learnerSeat)
+        {
+            TacticalV3Config config = LineReachConfig(false);
+            var env = new TacticalV3DuelEnv(config);
+            TacticalV3View view = env.Reset(73, null, null, learnerSeat);
+            TacticalV3TokenRef targetRef = RequireMoveTarget(view);
+            HexCoord target = new TacticalV2Layout(config.Match).Cells[targetRef.Row];
+            PlayerId opponent = learnerSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0;
+
+            // Both seats are external so every change comes from a legal engine candidate.
+            // End the learner turn; the opponent starts adjacent to this line-board beacon.
+            for (int guard = 0; guard < 8; guard++)
+            {
+                if (view.Decision.Seat == opponent)
+                {
+                    TacticalV3Candidate? occupy = view.Decision.Candidates.FirstOrDefault(candidate =>
+                        candidate.Kind == TacticalV3CandidateKind.Move && candidate.Cell.HasValue &&
+                        new TacticalV2Layout(config.Match).Cells[candidate.Cell.Value.Row] == target);
+                    if (occupy != null)
+                    {
+                        view = env.Step(view.Decision.DecisionId, occupy.CandidateId);
+                        break;
+                    }
+                }
+                TacticalV3Candidate end = view.Decision.Candidates.Single(c => c.Kind == TacticalV3CandidateKind.EndTurn);
+                view = env.Step(view.Decision.DecisionId, end.CandidateId);
+            }
+            Assert.That(env.State.Player(opponent).UnitsOnBoard.Any(unit => unit.Cell == target), Is.True);
+            if (view.Decision.Seat != learnerSeat)
+            {
+                TacticalV3Candidate end = view.Decision.Candidates.Single(c => c.Kind == TacticalV3CandidateKind.EndTurn);
+                view = env.Step(view.Decision.DecisionId, end.CandidateId);
+            }
+            Assert.That(view.Decision.Candidates.Any(c => c.Kind == TacticalV3CandidateKind.Move), Is.True);
+            string before = env.ToReplay();
+            var failure = Assert.Throws<InvalidOperationException>(() =>
+                env.SelectTeacherCandidate(new BoundedSearchAgent(512, 4, true)));
+            Assert.That(failure!.Message, Does.Contain("fixed target is unreachable"));
+            Assert.That(env.ToReplay(), Is.EqualTo(before), "refusing a label must not alter the episode");
+            Assert.That(RequireMoveTarget(view), Is.EqualTo(targetRef));
+        }
+
         private static TacticalV3Config LineReachConfig(bool lethalRangedAttack)
         {
             var stats = new UnitStats(
