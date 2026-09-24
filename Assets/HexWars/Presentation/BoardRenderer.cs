@@ -27,7 +27,7 @@ namespace HexWars.Presentation
         readonly Dictionary<(TerrainType, PlayerId), Material> _controlMats = new Dictionary<(TerrainType, PlayerId), Material>();
         static Texture2D _matcap;
 
-        static Texture2D MetalMatcap()
+        internal static Texture2D MetalMatcap()
         {
             if (_matcap != null) return _matcap;
             const int N = 128;
@@ -182,7 +182,7 @@ namespace HexWars.Presentation
             var baseMat = MaterialFor(terrain);
             m = new Material(baseMat); // clone: same matcap shader + texture
             Color baseC = baseMat.HasProperty("_BaseColor") ? baseMat.GetColor("_BaseColor") : baseMat.color;
-            Color ownerC = owner == PlayerId.Player0 ? new Color(0.27f, 0.68f, 1f) : new Color(0.92f, 0.28f, 0.28f);
+            Color ownerC = owner == PlayerId.Player0 ? GraphitePieces.Mint : GraphitePieces.Amber;
             Color tint = Color.Lerp(baseC, ownerC, 0.6f);
             if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", tint);
             m.color = tint;
@@ -336,6 +336,7 @@ namespace HexWars.Presentation
                     var mm = new Material(matcapShader);
                     mm.SetColor("_BaseColor", Color.Lerp(c, Color.white, 0.1f)); // keep colors saturated/sharp
                     mm.SetTexture("_Matcap", matcap);
+                    mm.SetFloat("_Sheen", .035f);
                     return mm;
                 }
                 var m = new Material(lit); // fallback
@@ -355,14 +356,14 @@ namespace HexWars.Presentation
                 if (m.HasProperty("_Cull")) m.SetFloat("_Cull", 0f);
                 return m;
             }
-            _plains = Metal(new Color(1f, 0.82f, 0.10f));
-            _forest = Metal(new Color(0.30f, 0.62f, 0.27f));
-            _water  = Metal(new Color(0.24f, 0.58f, 0.85f));
-            _rough  = Metal(new Color(0.80f, 0.71f, 0.47f));
-            _p0     = Matte(new Color(0.27f, 0.68f, 1f));   // units stay matte for readability
-            _p1     = Matte(new Color(0.92f, 0.28f, 0.28f));
-            _p0Dim  = Matte(new Color(0.11f, 0.27f, 0.40f)); // dimmed = opponent's, or spent this turn
-            _p1Dim  = Matte(new Color(0.37f, 0.11f, 0.11f));
+            _plains = Metal(new Color(.19f, .25f, .28f));
+            _forest = Metal(new Color(.18f, .32f, .27f));
+            _water  = Metal(new Color(.16f, .28f, .38f));
+            _rough  = Metal(new Color(.36f, .31f, .26f));
+            _p0     = Matte(GraphitePieces.Mint);   // units stay matte for readability
+            _p1     = Matte(GraphitePieces.Amber);
+            _p0Dim  = Matte(GraphitePieces.Mint * .48f); // dimmed = opponent's, or spent this turn
+            _p1Dim  = Matte(GraphitePieces.Amber * .48f);
 
             var seam = new Color(0.05f, 0.05f, 0.06f); // near-black panel seam (visible, defines hexes)
             _black = new Material(unlit);

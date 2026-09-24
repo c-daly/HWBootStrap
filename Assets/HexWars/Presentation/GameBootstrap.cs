@@ -97,6 +97,8 @@ namespace HexWars.Presentation
 
         void Start()
         {
+            if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-graphite-workshop") >= 0)
+                gameObject.AddComponent<GraphitePreviewLaunch>();
             Presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
 
             bool isWebGl = false;
@@ -638,7 +640,7 @@ namespace HexWars.Presentation
             if (DemoMode || Networked || !IsLocalCommand(cmd)) return;
             var cache = SessionBarracksCache.ForLocalPlayer((int)cmd.Issuer);
             if (cmd is CreateUnit created)
-                cache.Add(new UnitTemplate(UnitTemplate.Sanitize(created.Name), created.Stats));
+                cache.Add(new UnitTemplate(UnitTemplate.Sanitize(created.Name), created.Stats, created.ArtId));
             else if (cmd is DeleteTemplate deleted)
                 cache.RemoveAt(deleted.TemplateIndex);
         }
@@ -692,7 +694,9 @@ namespace HexWars.Presentation
         {
             RenderSettings.ambientMode = AmbientMode.Flat;
             RenderSettings.ambientLight = new Color(0.40f, 0.43f, 0.52f);
-            RenderSettings.skybox = StarfieldSkybox();                 // dark starfield stays the visible background
+            RenderSettings.skybox = null;
+            if (Camera.main != null) { Camera.main.clearFlags = CameraClearFlags.SolidColor; Camera.main.backgroundColor = UiKit.Bg; } // graphite setting
+            //                 // dark starfield stays the visible background
             RenderSettings.defaultReflectionMode = UnityEngine.Rendering.DefaultReflectionMode.Custom;
             RenderSettings.customReflectionTexture = BrightReflection(); // ...but metal reflects an even bright env
             RenderSettings.reflectionIntensity = 1f;

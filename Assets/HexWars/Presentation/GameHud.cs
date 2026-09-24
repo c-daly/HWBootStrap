@@ -12,9 +12,9 @@ namespace HexWars.Presentation
     /// </summary>
     public sealed class GameHud : MonoBehaviour
     {
-        static readonly Color P0ToastBlue = new Color(0.10f, 0.30f, 0.45f, 0.94f);
-        static readonly Color P1ToastRed = new Color(0.42f, 0.16f, 0.16f, 0.94f);
-        static readonly Color EndTurnIdle = new Color(0.20f, 0.34f, 0.55f, 1f);
+        static readonly Color P0ToastBlue = new Color(.14f, .27f, .24f, .94f);
+        static readonly Color P1ToastRed = new Color(.32f, .22f, .17f, .94f);
+        static readonly Color EndTurnIdle = UiKit.AccentDim;
         static readonly Color EndTurnUrge = new Color(0.16f, 0.52f, 0.28f, 1f); // nothing left to do
 
         GameBootstrap _game;
@@ -57,6 +57,11 @@ namespace HexWars.Presentation
             brt.sizeDelta = new Vector2(0f, 46f);
             brt.anchoredPosition = Vector2.zero;
 
+            var mark = HexBrandMark.Add(bar.transform, 0f, 0f, 32f);
+            mark.rectTransform.anchorMin = mark.rectTransform.anchorMax = new Vector2(0f, .5f);
+            mark.rectTransform.pivot = new Vector2(0f, .5f);
+            mark.rectTransform.anchoredPosition = new Vector2(10f, 0f);
+
             var textGo = new GameObject("BannerText");
             textGo.transform.SetParent(bar.transform, false);
             _banner = textGo.AddComponent<Text>();
@@ -67,7 +72,7 @@ namespace HexWars.Presentation
             var trt = _banner.GetComponent<RectTransform>();
             trt.anchorMin = Vector2.zero;
             trt.anchorMax = Vector2.one;
-            trt.offsetMin = new Vector2(160f, 0f); // leave room for the End Turn button on the left
+            trt.offsetMin = new Vector2(202f, 0f); // leave room for the End Turn button on the left
             trt.offsetMax = new Vector2(-16f, 0f);
 
             var btn = new GameObject("EndTurnButton");
@@ -82,7 +87,7 @@ namespace HexWars.Presentation
             rt.anchorMax = new Vector2(0f, 0.5f);
             rt.pivot = new Vector2(0f, 0.5f);
             rt.sizeDelta = new Vector2(140f, 34f);
-            rt.anchoredPosition = new Vector2(8f, 0f); // left side — clear of the right-side log/speed controls
+            rt.anchoredPosition = new Vector2(52f, 0f); // left side — clear of the right-side log/speed controls
 
             var btnTextGo = new GameObject("Text");
             btnTextGo.transform.SetParent(btn.transform, false);
@@ -133,7 +138,7 @@ namespace HexWars.Presentation
             var p = s.Player(s.ActivePlayer);
             bool p0 = s.ActivePlayer == PlayerId.Player0;
             int who = p0 ? 1 : 2;
-            _banner.color = p0 ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
+            _banner.color = p0 ? GraphitePieces.Mint : GraphitePieces.Amber;
 
             // What can the active player still do? Drives the "you're not stuck, you're done" signal:
             // without it, a turn with no legal move/attack left just feels unresponsive.
@@ -200,7 +205,7 @@ namespace HexWars.Presentation
         {
             bool p0Won = s.Winner == PlayerId.Player0;
             _banner.color = s.Winner == null ? Color.white
-                          : p0Won ? new Color(0.4f, 0.8f, 1f) : new Color(1f, 0.45f, 0.45f);
+                          : p0Won ? GraphitePieces.Mint : GraphitePieces.Amber;
             string result = ResultText(s);
             _banner.text = $"GAME OVER   {result}     Round {s.Round}     " +
                            $"P1 {Stat(s, PlayerId.Player0)}   |   P2 {Stat(s, PlayerId.Player1)}";

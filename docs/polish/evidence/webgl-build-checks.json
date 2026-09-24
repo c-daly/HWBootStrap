@@ -1,0 +1,65 @@
+{
+  "date": "2026-09-24",
+  "unity": "6000.5.0f1",
+  "branch": "codex/player-polish-20260924",
+  "build": {
+    "result": "Succeeded",
+    "reported_size_bytes": "26080167",
+    "duration": "00:04:00.4819197",
+    "errors": "0"
+  },
+  "cache_key": "885e3a8b",
+  "artifacts": {
+    "Build/WebGL.data.unityweb": {
+      "bytes": 9309711,
+      "sha256": "885e3a8b4ba74def3faafe20acb43ca575397070bcc0fdde38d102b7dea393f7"
+    },
+    "Build/WebGL.framework.js.unityweb": {
+      "bytes": 80528,
+      "sha256": "71f6771a01a558dcee57d077fa142008af12b1a8d5284015b066b27674adcd2e"
+    },
+    "Build/WebGL.loader.js": {
+      "bytes": 48105,
+      "sha256": "302ab7e460acc3bca6dbf8a3fecb991a79434f3c6888254c66d668dcb5c88b0d"
+    },
+    "Build/WebGL.wasm.unityweb": {
+      "bytes": 16636656,
+      "sha256": "9771258248a21e5ee3fefa2a50d75882c0f4fea386aff77d479dcca7b3ecbf72"
+    },
+    "index.html": {
+      "bytes": 3538,
+      "sha256": "33130164ca8a80fc3312e18428f7f31c29ece5335e3fad93a9dd1e038d88232c"
+    },
+    "hexwars-mark.svg": {
+      "bytes": 235,
+      "sha256": "42b83016f25d5b92c37fdbeff8138860ccfc86b56084780e3825d03e0dc5085a"
+    },
+    "manifest.json": {
+      "bytes": 366,
+      "sha256": "bbf1567b69b12a533bb51305485a27f03e9d9b31bd98a1414fadd8d63dbff9c8"
+    }
+  },
+  "validation": {
+    "engine_tests": 1174,
+    "unity_editmode": 664,
+    "unity_playmode": 6,
+    "webgl_input_bridge": 1,
+    "server_tests": 953,
+    "server_initial_run": "Aborted after fixtures failed without Docker/PostgreSQL; full rerun passed with disposable PostgreSQL 16."
+  },
+  "scope": "Browser visual and local gameplay preview; no production deployment or new browser identity/match-service entry path.",
+  "browser_scenarios": [
+    "H logo on loader/title/collection/match header",
+    "Eight form names retained; material labels omitted",
+    "Manual Halo selection retained after health edit",
+    "WebGL name input and barracks creation",
+    "Halo deployed at 2-point cost with same mesh"
+  ],
+  "screenshots": {
+    "webgl-battlefield.png": "a9b4c3fb9f441ecbb2a1659870803236b10b45305f9078dd773a4915a98e7336",
+    "webgl-collection.png": "0799f91c8d42750c777995ff3d8a66334d1a34fd62691ff504e870241f196f0f",
+    "webgl-designer.png": "d9892747ddeec71bf77f7835394dc8a4665034f467c0d4c13db89e3fb0606463",
+    "webgl-loading.png": "7fb790651162e30a1b61c52512dd45e357a649438f62cf19c1442f5e99475bac",
+    "webgl-title.png": "5f3177521199f28f43c5ce22a2edb206a8893325ab251caeb23711d2a980bb5c"
+  }
+}

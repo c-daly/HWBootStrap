@@ -9,7 +9,7 @@ namespace HexWars.Engine
     /// <summary>Design and pay for a unit; it goes to the issuer's reserve (off-board). Name is
     /// sanitized at the engine boundary (UnitTemplate.Sanitize); an empty/omitted name is legal — the
     /// dominant-role fallback happens on the deployed Unit's DisplayName, not here.</summary>
-    public sealed record CreateUnit(PlayerId Issuer, UnitStats Stats, string Name = "") : Command(Issuer);
+    public sealed record CreateUnit(PlayerId Issuer, UnitStats Stats, string Name = "", string ArtId = "") : Command(Issuer);
 
     /// <summary>Atomically replace an existing custom barracks template without changing its slot.
     /// The engine validates the complete stat line and charges the configured design fee once.</summary>
@@ -17,7 +17,7 @@ namespace HexWars.Engine
         PlayerId Issuer,
         int TemplateIndex,
         UnitStats Stats,
-        string Name = "") : Command(Issuer);
+        string Name = "", string ArtId = "") : Command(Issuer);
 
     /// <summary>Delete a barracks template by index — a free administrative edit, not a game move: no
     /// points, no turn action (see GameEngine.Apply's auto-end-turn guard), and never enumerated by

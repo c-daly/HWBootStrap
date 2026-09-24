@@ -12,6 +12,7 @@ if (-not (Test-Path (Join-Path $src "Build"))) { throw "No build at $src - run H
 if (Test-Path (Join-Path $dst "Build")) { Remove-Item (Join-Path $dst "Build") -Recurse -Force }
 Copy-Item (Join-Path $src "Build") (Join-Path $dst "Build") -Recurse
 Copy-Item (Join-Path $src "index.html") $dst -Force
+Copy-Item (Join-Path $src "hexwars-mark.svg") $dst -Force
 if (Test-Path (Join-Path $src "StreamingAssets")) {
     Copy-Item (Join-Path $src "StreamingAssets\*") (Join-Path $dst "StreamingAssets\") -Recurse -Force
 }
@@ -45,9 +46,9 @@ if ($html -notmatch 'og:title') {
     <meta name="twitter:description" content="Design your army from raw points. Outbuild, outthink, dominate." />
     <meta name="twitter:image" content="https://hwbootstrap.onrender.com/preview.png" />
     <link rel="manifest" href="/manifest.json" />
-    <meta name="theme-color" content="#0A0E1C" />
+    <meta name="theme-color" content="#10171B" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="icon" type="image/svg+xml" href="/hexwars-mark.svg" />
 </head>
 "@
     $html = $html -replace '</head>', $headInject

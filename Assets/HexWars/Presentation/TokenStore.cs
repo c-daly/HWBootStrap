@@ -154,24 +154,26 @@ namespace HexWars.Presentation
             token.transform.SetParent(Root(), false);
             token.AddComponent<UnitView>();
             var box = token.AddComponent<BoxCollider>();
-            box.center = new Vector3(0f, 0.35f, 0f);
-            box.size = new Vector3(_board.HexSize * 1.3f, 0.9f, _board.HexSize * 1.3f);
+            box.center = new Vector3(0f, 0.65f, 0f);
+            box.size = new Vector3(_board.HexSize * 1.3f, 1.4f, _board.HexSize * 1.3f);
 
+            var art = GraphitePieces.Build(UnitArt.Resolve(unit.ArtId, unit.Stats), unit.Owner, token.transform);
+            art.transform.localScale = Vector3.one * _board.HexSize;
+            // Preserve the small team disk used by spent/fog treatment and tests.
             var disc = GameObject.CreatePrimitive(PrimitiveType.Cylinder);
             disc.name = "Disc";
             DestroyImmediate(disc.GetComponent<Collider>());
             disc.transform.SetParent(token.transform, false);
-            disc.transform.localPosition = new Vector3(0f, 0.18f, 0f);
-            disc.transform.localScale = new Vector3(radius, 0.16f, radius);
-            AddHull(disc, 1.16f, 1.05f);
+            disc.transform.localPosition = new Vector3(0f, .02f, 0f);
+            disc.transform.localScale = new Vector3(1.10f * _board.HexSize, .018f, 1.10f * _board.HexSize);
 
             var icon = GameObject.CreatePrimitive(PrimitiveType.Quad);
             icon.name = "RoleIcon";
             DestroyImmediate(icon.GetComponent<Collider>());
             icon.transform.SetParent(token.transform, false);
-            icon.transform.localPosition = new Vector3(0f, 0.345f, 0f);
+            icon.transform.localPosition = new Vector3(0f, .23f, -.43f);
             icon.transform.localRotation = Quaternion.Euler(90f, 0f, 0f);
-            icon.transform.localScale = Vector3.one * (radius * 0.9f);
+            icon.transform.localScale = Vector3.one * (_board.HexSize * .27f);
             var mr = icon.GetComponent<MeshRenderer>();
             mr.sharedMaterial = _board.IconMatFor(Roles.Dominant(unit.Stats));
             mr.shadowCastingMode = ShadowCastingMode.Off;
@@ -194,7 +196,7 @@ namespace HexWars.Presentation
 
             var bar = new GameObject("HpBar");
             bar.transform.SetParent(token.transform, false);
-            bar.transform.localPosition = new Vector3(0f, 0.62f, 0f);
+            bar.transform.localPosition = new Vector3(0f, 1.42f * _board.HexSize, 0f);
             bar.AddComponent<Billboard>();
 
             float hpBarW = _board.HexSize * 0.85f;
@@ -215,6 +217,8 @@ namespace HexWars.Presentation
             token.transform.localScale = Vector3.one; // a fast-forward can kill a squash/pop tween mid-scale
             token.GetComponent<UnitView>().Unit = unit; // engine states are immutable: re-point every sync
             token.transform.Find("Disc").GetComponent<MeshRenderer>().sharedMaterial = discMat;
+            foreach (var r in token.GetComponentsInChildren<MeshRenderer>())
+                if (r.name == "TeamRim") r.sharedMaterial = discMat;
             RefreshHpBar(token.transform.Find("HpBar"), unit.CurrentHp, unit.Stats.Health);
         }
 

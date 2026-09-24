@@ -1,10 +1,16 @@
+# Playable graphite update
+
+The graphite direction is now implemented in Unity. Start with the [WebGL build](webgl-preview.md)
+or [Windows preview](windows-preview.md) for the playable art picker and validation boundaries.
+The studies below document the earlier exploration.
+
 # HexWars player polish study
 
 **Branch:** `codex/player-polish-20260924`
 
 **Baseline:** `7048f42`, the multiplayer feature in PR #21
 
-**Status:** proposals and an interactive visual study; no Unity gameplay changes
+**Study status:** historical proposals and interactive references; the playable implementation is linked above.
 
 ## Latest: dark unit workshop
 

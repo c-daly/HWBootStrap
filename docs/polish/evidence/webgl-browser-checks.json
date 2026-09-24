@@ -1,0 +1,62 @@
+{
+  "date": "2026-09-24T23:37:18.143Z",
+  "url": "http://127.0.0.1:8196/",
+  "browser": "149.0.7827.53",
+  "viewport": {
+    "width": 1600,
+    "height": 900
+  },
+  "errors": [],
+  "warnings": [
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\nUnityEngine.Camera:Render_Injected(IntPtr)\nUnityEngine.Camera:Render()\nHexWars.Presentation.GraphitePieces:Thumbnail(Int32)\nHexWars.Presentation.GraphiteWorkshop:Portrait(Transform, Int32, Single, Single, Single)\nHexWars.Presentation.DesignPanel:Build()\nHexWars.Presentation.DesignPanel:Start()\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\nUnityEngine.Camera:Render_Injected(IntPtr)\nUnityEngine.Camera:Render()\nHexWars.Presentation.GraphitePieces:Thumbnail(Int32)\nHexWars.Presentation.GraphiteWorkshop:Portrait(Transform, Int32, Single, Single, Single)\nHexWars.Presentation.DesignPanel:Build()\nHexWars.Presentation.DesignPanel:Start()\n\n"
+  ],
+  "failed": [],
+  "responses": [
+    {
+      "url": "http://127.0.0.1:8196/",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/hexwars-mark.svg",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.loader.js?v=885e3a8b",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/hexwars-mark.svg",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.wasm.unityweb?v=885e3a8b",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.framework.js.unityweb?v=885e3a8b",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.data.unityweb?v=885e3a8b",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/hexwars-mark.svg",
+      "status": 200
+    },
+    {
+      "url": "blob:http://127.0.0.1:8196/ba878807-262f-4ffc-b01e-ccb3e0a35a32",
+      "status": 200
+    },
+    {
+      "url": "blob:http://127.0.0.1:8196/c792208d-a2d4-4c46-896a-630a05ae585b",
+      "status": 200
+    },
+    {
+      "url": "http://127.0.0.1:8196/hexwars-mark.svg",
+      "status": 200
+    }
+  ]
+}

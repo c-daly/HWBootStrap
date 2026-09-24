@@ -16,18 +16,18 @@ namespace HexWars.Presentation
     {
         static int _inputEscapeHandledFrame = -1;
         // ---- palette ----
-        public static readonly Color Bg            = Hex("0A0E1C");
-        public static readonly Color Surface       = Hex("161B2C");
-        public static readonly Color SurfaceBorder = Hex("2A3350");
-        public static readonly Color Accent        = Hex("45AEFF");
-        public static readonly Color AccentDim     = Hex("27476B");
-        public static readonly Color CtaGreen      = Hex("33845C");
+        public static readonly Color Bg            = Hex("10171B");
+        public static readonly Color Surface       = Hex("172126");
+        public static readonly Color SurfaceBorder = Hex("334149");
+        public static readonly Color Accent        = Hex("96DFC9");
+        public static readonly Color AccentDim     = Hex("2C4C46");
+        public static readonly Color CtaGreen      = Hex("35695A");
         public static readonly Color Danger        = Hex("B04040");
-        public static readonly Color TextMain      = Color.white;
-        public static readonly Color TextDim       = Hex("9AA3B8");
-        public static readonly Color TextFaint     = Hex("6C7488");
-        public static readonly Color InputBg       = Hex("EDF1F8");
-        public static readonly Color InputText     = Hex("10131C");
+        public static readonly Color TextMain      = Hex("E7EAE3");
+        public static readonly Color TextDim       = Hex("A0ADB2");
+        public static readonly Color TextFaint     = Hex("899AA3");
+        public static readonly Color InputBg       = Hex("26353D");
+        public static readonly Color InputText     = Hex("E7EAE3");
 
         // ---- type scale ----
         public const int SizeTitle = 26, SizeHeading = 20, SizeBody = 16, SizeCaption = 13;
@@ -167,7 +167,7 @@ namespace HexWars.Presentation
         {
             ButtonStyle.Cta => CtaGreen,
             ButtonStyle.Danger => Danger,
-            ButtonStyle.Secondary => new Color(0.13f, 0.16f, 0.24f, 1f),
+            ButtonStyle.Secondary => Hex("26353D"),
             _ => AccentDim,
         };
 
@@ -222,7 +222,7 @@ namespace HexWars.Presentation
             valueText.color = InputText;
             valueText.alignment = TextAnchor.MiddleLeft;
             valueText.supportRichText = false;
-            StretchWithInset(valueGo.GetComponent<RectTransform>(), 12f, 8f);
+            StretchWithInset(valueGo.GetComponent<RectTransform>(), 12f, Mathf.Min(8f, h * .15f));
 
             var placeholderGo = new GameObject("Placeholder");
             placeholderGo.transform.SetParent(go.transform, false);
@@ -235,7 +235,7 @@ namespace HexWars.Presentation
             placeholderText.supportRichText = false;
             placeholderText.text = placeholder ?? string.Empty;
             placeholderText.raycastTarget = false;
-            StretchWithInset(placeholderGo.GetComponent<RectTransform>(), 12f, 8f);
+            StretchWithInset(placeholderGo.GetComponent<RectTransform>(), 12f, Mathf.Min(8f, h * .15f));
 
             var field = go.AddComponent<InputField>();
             field.targetGraphic = image;
@@ -246,7 +246,7 @@ namespace HexWars.Presentation
             colors.selectedColor = InputBg;
             colors.disabledColor = new Color(InputBg.r, InputBg.g, InputBg.b, 0.55f);
             field.colors = colors;
-            image.color = InputBg;
+            image.color = Color.white; // ColorBlock supplies the tint once; avoid squaring a dark background.
             field.textComponent = valueText;
             field.placeholder = placeholderText;
             field.lineType = UnityEngine.UI.InputField.LineType.SingleLine;
@@ -279,7 +279,7 @@ namespace HexWars.Presentation
         public static void SetToggled(Button b, bool on)
         {
             var cb = b.colors;
-            var baseC = on ? new Color(0.27f, 0.50f, 0.82f, 1f) : new Color(0.13f, 0.16f, 0.24f, 1f);
+            var baseC = on ? Hex("38695D") : Hex("26353D");
             cb.normalColor = baseC;
             cb.highlightedColor = baseC * 1.18f;
             cb.pressedColor = baseC * 0.82f;

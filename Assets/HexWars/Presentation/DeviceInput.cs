@@ -15,6 +15,6 @@ namespace HexWars.Presentation
         public static Func<bool> FocusProbe = () => Application.isFocused;
 
         /// <summary>True when device input should be read this frame/poll.</summary>
-        public static bool Allowed => FocusProbe();
+        public static bool Allowed => FocusProbe() && !GraphiteWorkshop.IsOpen;
     }
 }

@@ -1,5 +1,10 @@
 # Dark direction: simple, sculpted units
 
+**Implementation update:** The user selected graphite. The Unity implementation and native Windows
+preview are described in [windows-preview.md](windows-preview.md). The remainder of this document
+records the preceding browser study and its original integration proposal; its prototype-only
+statements and porcelain preference are historical.
+
 **Review addition, 2026-09-24.** This follows the request for more unit exploration, simpler and
 more elegant forms, a dark theme, and selectable art during unit creation. It supersedes the
 earlier recommendation to make the warm Workshop palette the default. Keep the workshop idea;
