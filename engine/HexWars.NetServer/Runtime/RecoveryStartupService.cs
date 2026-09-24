@@ -1,3 +1,5 @@
+using HexWars.NetServer.Operations;
+
 namespace HexWars.NetServer.Runtime
 {
     /// <summary>
@@ -183,7 +185,7 @@ namespace HexWars.NetServer.Runtime
                 // down has still not verified anything, and readiness must say so rather than inherit an
                 // all-clear from a run that did not happen.
                 state.RecordFailure(failure);
-                logger.LogError(failure,
+                logger.LogRedacted(LogLevel.Error, failure,
                     "Startup recovery could not run; this host will report unready and try again");
 
                 return false;

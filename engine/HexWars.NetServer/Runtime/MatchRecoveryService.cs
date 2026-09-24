@@ -143,7 +143,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogError(failure,
+                logger.LogRedacted(LogLevel.Error, failure,
                     "Match {MatchId} is finished and could not be closed at startup", Short(live.MatchId));
                 return false;
             }

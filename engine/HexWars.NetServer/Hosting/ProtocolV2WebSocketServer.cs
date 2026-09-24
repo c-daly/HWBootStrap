@@ -120,8 +120,10 @@ namespace HexWars.NetServer.Hosting
                 return;
             }
 
-            string remoteIp =
-                context.Connection.RemoteIpAddress?.ToString() ?? SteamMatchEndpoints.UnknownCaller;
+            // The same bucketing every other per-caller control on this server uses. Counting raw
+            // addresses here would let an IPv6 client hold one socket per address inside its own prefix and
+            // spend the auth-failure budget once per address as well.
+            string remoteIp = CallerKey.From(context);
 
             // Also before the upgrade, and as a reservation rather than a count. An accepted socket costs a
             // receive buffer, a writer task and a registry entry before it has proved anything - and a
@@ -308,7 +310,7 @@ namespace HexWars.NetServer.Hosting
                 // The coordinator turns the failures it expects into a fail code of its own, so anything
                 // that reaches here is a bug. The player still gets an answer they can retry on, and it is
                 // not counted against them: this one is ours.
-                logger.LogError(failure, "A v2 handshake failed unexpectedly");
+                logger.LogRedacted(LogLevel.Error, failure, "A v2 handshake failed unexpectedly");
                 await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
                 return false;
             }

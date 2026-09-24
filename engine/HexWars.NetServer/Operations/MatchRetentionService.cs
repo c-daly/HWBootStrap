@@ -1,3 +1,4 @@
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
@@ -96,7 +97,7 @@ namespace HexWars.NetServer.Operations
             }
             catch (Exception failure)
             {
-                logger.LogError(failure, "The retention sweep failed and will be retried on the next cadence");
+                logger.LogRedacted(LogLevel.Error, failure, "The retention sweep failed and will be retried on the next cadence");
                 return RetentionResult.Nothing;
             }
 
@@ -109,6 +110,26 @@ namespace HexWars.NetServer.Operations
             // retention loop with it: the rows are already correct, the sockets are what is left, and a
             // socket that could not be closed is worth retrying rather than worth dying over.
             await EvictAsync(Due(result.AbandonedIds), ct).ConfigureAwait(false);
+
+            // And then the safety net, every sweep and not only when something failed. The pending set is
+            // bounded, so an id can fall out of it; the rows cannot. Asking the store which of the matches
+            // this host is holding have already been reaped catches anything the bookkeeping lost, and needs
+            // no bookkeeping of its own.
+            try
+            {
+                await evictor
+                    .EvictReapedAsync(AbandonedCloseStatus, AbandonedCloseReason, ct)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception failure)
+            {
+                logger.LogRedactedWarning(
+                    failure, "Could not re-check the live matches against their stored status");
+            }
 
             // Counts only. Never a match id, a Steam id, a command wire or credential material.
             if (!result.IsEmpty)
@@ -157,15 +178,29 @@ namespace HexWars.NetServer.Operations
                 ct.ThrowIfCancellationRequested();
                 single[0] = matchId;
 
+                // The deadline is passed INTO the eviction rather than wrapped around the await. A
+                // WaitAsync that times out stops this method waiting and leaves the eviction running, so a
+                // host with a wedged match accumulates one abandoned task per sweep, forever.
+                using var deadline = new CancellationTokenSource(EvictionTimeout, time);
+                using CancellationTokenSource attempt =
+                    CancellationTokenSource.CreateLinkedTokenSource(deadline.Token, ct);
+
                 try
                 {
                     IReadOnlyList<Guid> left = await evictor
-                        .EvictAsync(single, AbandonedCloseStatus, AbandonedCloseReason, ct)
-                        .WaitAsync(EvictionTimeout, time, ct)
+                        .EvictAsync(single, AbandonedCloseStatus, AbandonedCloseReason, attempt.Token)
                         .ConfigureAwait(false);
 
                     if (left.Count > 0) Remember(matchId);
                     else Forget(matchId);
+                }
+                catch (OperationCanceledException) when (deadline.IsCancellationRequested && !ct.IsCancellationRequested)
+                {
+                    logger.LogWarning(
+                        "An eviction did not finish within {Seconds}s and was cancelled; it will be tried "
+                        + "again next sweep",
+                        (int)EvictionTimeout.TotalSeconds);
+                    Remember(matchId);
                 }
                 catch (OperationCanceledException)
                 {
@@ -173,18 +208,11 @@ namespace HexWars.NetServer.Operations
                     Remember(matchId);
                     throw;
                 }
-                catch (TimeoutException)
-                {
-                    logger.LogWarning(
-                        "An eviction did not finish within {Seconds}s; it will be tried again next sweep",
-                        (int)EvictionTimeout.TotalSeconds);
-                    Remember(matchId);
-                }
                 catch (Exception failure)
                 {
                     // One match that would not close is not a reason to stop closing the others, and it is
                     // certainly not a reason to end the loop that applies the whole retention policy.
-                    logger.LogWarning(failure, "An abandoned match could not be evicted; retrying next sweep");
+                    logger.LogRedacted(LogLevel.Warning, failure, "An abandoned match could not be evicted; retrying next sweep");
                     Remember(matchId);
                 }
             }

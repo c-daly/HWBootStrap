@@ -268,7 +268,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure,
+                logger.LogRedacted(LogLevel.Warning, failure,
                     "Turned {Player} away: this match could not be loaded",
                     SteamLogRedaction.HashSteamId(validation.SteamId));
                 return Failed(AuthFailUnavailable);
@@ -321,7 +321,7 @@ namespace HexWars.NetServer.Runtime
                 {
                     // A liveness stamp that did not land costs this match a little of its reaper budget and
                     // nothing else. Refusing the connection over it would be strictly worse for the player.
-                    logger.LogWarning("Could not record that a player is here: {Failure}", Describe(failure));
+                    logger.LogRedactedWarning(failure, "Could not record that a player is here");
                 }
 
                 // THE gate, and the last thing that happens before this handshake changes anything. Every
@@ -417,7 +417,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning("A frame arrived for a match that could not be loaded: {Failure}", Describe(failure));
+                logger.LogRedactedWarning(failure, "A frame arrived for a match that could not be loaded");
                 sink.Send(connectionId, RejectTemporaryFailure);
                 return;
             }
@@ -499,7 +499,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "Could not store the barracks {Player} chose",
+                logger.LogRedacted(LogLevel.Warning, failure, "Could not store the barracks {Player} chose",
                     SteamLogRedaction.HashSteamId(steamId));
                 match.Stale = true;
                 sink.Send(connectionId, RejectTemporaryFailure);
@@ -535,7 +535,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning("The start state could not be written, so it was not dealt: {Failure}", Describe(failure));
+                logger.LogRedactedWarning(failure, "The start state could not be written, so it was not dealt");
                 match.Stale = true;
                 sink.Send(connectionId, RejectTemporaryFailure);
                 return;
@@ -620,7 +620,7 @@ namespace HexWars.NetServer.Runtime
                 // mid-write: all of them leave this process unable to tell a command that landed from one
                 // that did not, and TemporaryFailure invites the client to send it again, which is how one
                 // move becomes two. The journal is the only thing that knows, so it is asked.
-                logger.LogWarning(failure, "The command from {Player} may not have been journalled",
+                logger.LogRedacted(LogLevel.Warning, failure, "The command from {Player} may not have been journalled",
                     SteamLogRedaction.HashSteamId(steamId));
 
                 JournalCheck check =
@@ -749,7 +749,7 @@ namespace HexWars.NetServer.Runtime
                 }
                 catch (Exception failure) when (attempt == 1)
                 {
-                    logger.LogWarning(failure,
+                    logger.LogRedacted(LogLevel.Warning, failure,
                         "The winning command is journalled and the match would not close; trying once more");
                 }
                 catch (Exception again)
@@ -758,7 +758,7 @@ namespace HexWars.NetServer.Runtime
                     // would invite exactly the duplicate the append-first order exists to prevent. It is
                     // disconnected instead, and its reconnect is dealt the terminal state through the
                     // window.
-                    logger.LogError(again,
+                    logger.LogRedacted(LogLevel.Error, again,
                         "The winning command is journalled and the match could not be closed at all");
                     match.Stale = true;
                     sink.Close(connectionId, ResyncCloseStatus, ResyncCloseReason);
@@ -809,7 +809,7 @@ namespace HexWars.NetServer.Runtime
                 // advancing to Completed would be inventing an ending, and broadcasting an APPLY under it
                 // would hand the clients a result that may not be the recorded one. The sockets are sent
                 // back through the reconnect path, which reads the row.
-                logger.LogError("The status of a finished match could not be re-read: {Failure}", Describe(failure));
+                logger.LogRedactedError(failure, "The status of a finished match could not be re-read");
                 match.Stale = true;
                 CloseEveryConnection(match, ResyncCloseStatus, ResyncCloseReason);
                 return new CompletionOutcome(false, match.Status);
@@ -910,14 +910,14 @@ namespace HexWars.NetServer.Runtime
                 }
                 catch (Exception failure) when (attempt == 1)
                 {
-                    logger.LogWarning("A finished match would not close; trying once more: {Failure}", Describe(failure));
+                    logger.LogRedactedWarning(failure, "A finished match would not close; trying once more");
                 }
                 catch (Exception again)
                 {
                     // Not rethrown, cancellation included. The caller marks the projection stale and sends
                     // the sockets away to resync, which is a better answer than an exception unwinding
                     // through a gate holder that has already decided nothing may be broadcast.
-                    logger.LogError("A finished match could not be closed: {Failure}", Describe(again));
+                    logger.LogRedactedError(again, "A finished match could not be closed");
                     return false;
                 }
             }
@@ -958,7 +958,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogWarning("The journal could not be re-read after an ambiguous append: {Failure}", Describe(failure));
+                logger.LogRedactedWarning(failure, "The journal could not be re-read after an ambiguous append");
                 return JournalCheck.Unknown;
             }
         }
@@ -1118,6 +1118,39 @@ namespace HexWars.NetServer.Runtime
             }
 
             return (IReadOnlyList<Guid>?)unevicted ?? Array.Empty<Guid>();
+        }
+
+
+        /// <summary>
+        /// Closes every live match whose stored status says retention already reaped it.
+        ///
+        /// A cheap pass: one indexed read per match this host is actually holding in memory, which on a
+        /// single instance is the matches being played rather than every match that exists. It is the safety
+        /// net under the sweeper bookkeeping - an id that fell out of a bounded pending set is picked up
+        /// here on the next sweep, because the rows are the record and nothing has to be remembered.
+        ///
+        /// Completed matches are deliberately left alone. A game that really ended may still have seats
+        /// reading how it did, which is what the terminal reconnect window exists for.
+        /// </summary>
+        public async Task<IReadOnlyList<Guid>> EvictReapedAsync(
+            int closeStatus, string reason, CancellationToken ct)
+        {
+            var reaped = new List<Guid>();
+
+            foreach (Guid matchId in _matches.Keys.ToArray())
+            {
+                ct.ThrowIfCancellationRequested();
+
+                PersistedMatch? stored = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
+                if (stored is null) continue;
+                if (stored.Status is not (MatchStatus.Expired or MatchStatus.Abandoned)) continue;
+
+                reaped.Add(matchId);
+            }
+
+            if (reaped.Count == 0) return Array.Empty<Guid>();
+
+            return await EvictAsync(reaped, closeStatus, reason, ct).ConfigureAwait(false);
         }
 
         // ---- internals -------------------------------------------------------
@@ -1289,7 +1322,7 @@ namespace HexWars.NetServer.Runtime
             }
             catch (Exception failure)
             {
-                logger.LogError(failure,
+                logger.LogRedacted(LogLevel.Error, failure,
                     "This projection is stale and could not be rebuilt from the journal");
                 return new ReloadOutcome(false, false, false);
             }
@@ -1347,9 +1380,5 @@ namespace HexWars.NetServer.Runtime
         /// <summary>Match ids reach logs as their first eight hex characters, the same shortening the
         /// credential service uses, so one match can be followed across both.</summary>
         static string Short(Guid matchId) => LogScopes.ShortMatchId(matchId);
-
-        /// <summary>An exception as text a log may keep. Handing the object to the logger would hand the
-        /// sink whatever the failing code was quoting, and down here that is a connection string.</summary>
-        static string Describe(Exception failure) => SteamLogRedaction.Describe(failure);
     }
 }

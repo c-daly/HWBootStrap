@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Net;
 using System.Net.Sockets;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Hosting;
 using Microsoft.Extensions.Options;
 
 namespace HexWars.NetServer.Operations
@@ -44,10 +45,6 @@ namespace HexWars.NetServer.Operations
         /// per refused request would be the loudest thing in the log exactly when it is least useful.</summary>
         static readonly TimeSpan SaturationLogInterval = TimeSpan.FromMinutes(1);
 
-        /// <summary>IPv6 is handed out by the /64, not by the address. A client with a routed prefix can
-        /// otherwise walk through 18 quintillion addresses, one per match, and never meet this cap.</summary>
-        public const int IPv6PrefixBits = 64;
-
         readonly Dictionary<string, Bucket> _buckets = new(StringComparer.Ordinal);
         readonly object _gate = new();
 
@@ -73,34 +70,9 @@ namespace HexWars.NetServer.Operations
             }
         }
 
-        /// <summary>
-        /// The bucket an address falls in.
-        ///
-        /// Two normalisations, both of which close a way around the cap rather than being tidiness. An IPv4
-        /// address that arrived over IPv6 is written ::ffff:a.b.c.d and would otherwise be a second, free
-        /// bucket for the same client. And an IPv6 client is not one address: a routed /64 is the smallest
-        /// unit an ISP hands out, so that is the unit a per-address cap has to count.
-        /// </summary>
-        public static string BucketFor(IPAddress? address)
-        {
-            if (address is null) return SteamMatchEndpointsCallerUnknown;
-
-            if (address.IsIPv4MappedToIPv6) address = address.MapToIPv4();
-
-            if (address.AddressFamily != AddressFamily.InterNetworkV6)
-                return address.ToString();
-
-            byte[] bytes = address.GetAddressBytes();
-            for (var i = IPv6PrefixBits / 8; i < bytes.Length; i++) bytes[i] = 0;
-
-            return new IPAddress(bytes).ToString()
-                + "/" + IPv6PrefixBits.ToString(CultureInfo.InvariantCulture);
-        }
-
-        /// <summary>The key a connection with no address falls in. Named rather than empty so it reads in a
-        /// log, and spelled here so this class does not depend on the endpoints it serves.</summary>
-        internal const string SteamMatchEndpointsCallerUnknown = "unknown";
-
+        /// <summary>The bucket an address falls in. One rule for every per-caller control on this
+        /// server, so a client cannot rotate out of this cap while staying inside the others.</summary>
+        public static string BucketFor(IPAddress? address) => CallerKey.From(address);
         /// <summary>
         /// Takes one seat of this caller budget, or refuses.
         ///

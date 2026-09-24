@@ -47,8 +47,8 @@ namespace HexWars.NetServer.Endpoints
         const int MaxRequestedSetupLength = 256;
 
         /// <summary>The partition key when the connection has no remote address, which under a test server
-        /// or a misconfigured proxy is every request. Named rather than empty so it reads in a log.</summary>
-        public const string UnknownCaller = "unknown";
+        /// or a misconfigured proxy is every request.</summary>
+        public const string UnknownCaller = Hosting.CallerKey.Unknown;
 
         public static IEndpointRouteBuilder MapSteamMatchEndpoints(this IEndpointRouteBuilder app)
         {
@@ -104,36 +104,44 @@ namespace HexWars.NetServer.Endpoints
             string bucket = OpenMatchQuota.BucketFor(http.Connection.RemoteIpAddress);
             bool reserved = quota.TryReserve(bucket, out QuotaLease lease);
 
-            // The one request still worth serving over the cap is a retry for a lobby that ALREADY has a
-            // match, because that request writes nothing - it hands the caller back the match they were
-            // already given. Refusing it would lock a player out of the game they just started because their
-            // first response was lost. It costs one indexed read, and only for a caller already over the cap.
-            if (!reserved)
-            {
-                PersistedMatch? alreadyAllocated = await store
-                    .FindOpenMatchForLobbyAsync(request.SteamLobbyId!, ct).ConfigureAwait(false);
-
-                if (alreadyAllocated is null)
-                {
-                    lease.Release();
-                    logger.LogWarning(
-                        "Refused a match creation: this address already allocated {Cap} matches this window",
-                        options.MaxOpenMatchesPerIp);
-                    return ApiErrors.RateLimitedResult();
-                }
-            }
-
             // Nothing has been written yet, so a lease that never gets past here is handed straight back.
             // The one moment that is neither is the create call itself: an exception from it may or may not
             // have left a row, and the two mistakes are not equal, so an ambiguous commit is charged.
             CreationOutcome outcome = CreationOutcome.NothingWritten;
 
-            // Every line the rest of this call writes carries the lobby, including the ones written from the
-            // catch blocks, which is where an operator actually goes looking.
-            using IDisposable? lobbyScope = LogScopes.LobbyScope(logger, request.SteamLobbyId);
-
+            // The try starts IMMEDIATELY after the seat is taken, and everything else is inside it. Anything
+            // between the two - opening a logging scope, one indexed read - can throw, and a seat stranded
+            // by a throw is a seat nobody ever gets back.
             try
             {
+                // Every line the rest of this call writes carries the lobby, including the ones written from
+                // the catch blocks, which is where an operator actually goes looking.
+                using IDisposable? lobbyScope = LogScopes.LobbyScope(logger, request.SteamLobbyId);
+
+                // The one request still worth serving over the cap is a retry for a lobby that ALREADY has a
+                // match, because that request writes nothing - it hands the caller back the match they were
+                // already given. Refusing it would lock a player out of the game they just started because
+                // their first response was lost. It costs one indexed read, and only over the cap.
+                //
+                // The row is CARRIED rather than discarded. Proving an allocation exists and then calling
+                // create-or-get several awaits later is a race with its own ending: if the match went
+                // terminal in between, the store INSERTS a new one and this request is holding no seat for
+                // it - and committing a refused lease cannot take a row back.
+                PersistedMatch? provenAllocation = null;
+                if (!reserved)
+                {
+                    provenAllocation = await store
+                        .FindOpenMatchForLobbyAsync(request.SteamLobbyId!, ct).ConfigureAwait(false);
+
+                    if (provenAllocation is null)
+                    {
+                        logger.LogWarning(
+                            "Refused a match creation: this address already allocated {Cap} matches this window",
+                            options.MaxOpenMatchesPerIp);
+                        return ApiErrors.RateLimitedResult();
+                    }
+                }
+
                 SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
 
                 if (IsRefusedAccount(blockList, identity, logger, "a match creation"))
@@ -163,17 +171,54 @@ namespace HexWars.NetServer.Endpoints
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.SettingsChangedMessage);
                 }
 
-                outcome = CreationOutcome.Ambiguous;
-                CreateMatchResult result = await store.CreateMatchForLobbyAsync(
-                    new CreateMatchRequest(
-                        verified.LobbyId,
-                        verified.Setup.ToWire(),
-                        EngineContract.Version,
-                        options.ProtocolVersion,
-                        options.BuildId,
-                        verified.Players,
-                        time.GetUtcNow()),
-                    ct).ConfigureAwait(false);
+                var allocation = new CreateMatchRequest(
+                    verified.LobbyId,
+                    verified.Setup.ToWire(),
+                    EngineContract.Version,
+                    options.ProtocolVersion,
+                    options.BuildId,
+                    verified.Players,
+                    time.GetUtcNow());
+
+                CreateMatchResult result;
+
+                if (provenAllocation is null)
+                {
+                    outcome = CreationOutcome.Ambiguous;
+                    result = await store.CreateMatchForLobbyAsync(allocation, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    // This request holds no seat: it was let through only because a match already existed
+                    // for the lobby. So it may not INSERT one, and create-or-get would. The allocation is
+                    // re-read instead, and the answer decides which of two different requests this is.
+                    PersistedMatch? stillOpen = await store
+                        .FindOpenMatchForLobbyAsync(verified.LobbyId, ct).ConfigureAwait(false);
+
+                    if (stillOpen is not null)
+                    {
+                        // Still the retry it presented itself as. Nothing is written and nothing is charged.
+                        result = new CreateMatchResult(stillOpen, Created: false);
+                    }
+                    else
+                    {
+                        // The match it was retrying for has ended. This is now an allocation like any other
+                        // and needs a seat of its own before a row can be written for it.
+                        lease.Release();
+
+                        if (!quota.TryReserve(bucket, out lease))
+                        {
+                            logger.LogWarning(
+                                "Refused a match creation: the allocation it was retrying for has ended and "
+                                + "this address already allocated {Cap} matches this window",
+                                options.MaxOpenMatchesPerIp);
+                            return ApiErrors.RateLimitedResult();
+                        }
+
+                        outcome = CreationOutcome.Ambiguous;
+                        result = await store.CreateMatchForLobbyAsync(allocation, ct).ConfigureAwait(false);
+                    }
+                }
 
                 // Charged only for a match this call actually allocated. A create that found the lobby
                 // already had one wrote nothing, and the other seat asking for their credential is the normal
@@ -279,9 +324,8 @@ namespace HexWars.NetServer.Endpoints
                 // here failed while holding something: a transport error quotes the URL it could not reach,
                 // which for the Steam client is the publisher key and the ticket, and a connection failure
                 // quotes DATABASE_URL. Describe keeps the stack trace and takes the values out.
-                logger.LogError(
-                    "Match creation failed for lobby {LobbyId}: {Failure}",
-                    request.SteamLobbyId, SteamLogRedaction.Describe(storage));
+                logger.LogRedactedError(
+                    storage, "Match creation failed for lobby {LobbyId}", request.SteamLobbyId);
                 return ApiErrors.UnavailableResult();
             }
             finally
@@ -446,9 +490,7 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (Exception storage)
             {
-                logger.LogError(
-                    "Join failed for match {MatchId}: {Failure}",
-                    Short(matchId), SteamLogRedaction.Describe(storage));
+                logger.LogRedactedError(storage, "Join failed for match {MatchId}", Short(matchId));
                 return ApiErrors.UnavailableResult();
             }
         }
@@ -475,10 +517,11 @@ namespace HexWars.NetServer.Endpoints
             }
         }
 
-        /// <summary>The rate-limit and throttle partition: the connection address, or a fixed key when
-        /// there is none. Never anything from the request, which the caller controls.</summary>
-        public static string CallerKey(HttpContext http) =>
-            http.Connection.RemoteIpAddress?.ToString() ?? UnknownCaller;
+        /// <summary>The rate-limit and throttle partition. Never anything from the request, which the
+        /// caller controls, and always the same bucketing the other per-caller controls use - a limiter that
+        /// counted raw addresses while the quota counted prefixes would be a limiter an IPv6 client walks
+        /// straight past.</summary>
+        public static string CallerKey(HttpContext http) => Hosting.CallerKey.From(http);
 
         /// <summary>Whether a match that is over is close enough to its ending for a seat to rejoin it. Only
         /// a match that actually started - one that expired while waiting has no game to show anybody.</summary>

@@ -13,8 +13,13 @@ namespace HexWars.NetServer.Steam
     {
         const string Mask = "<redacted>";
 
+        // A named secret, in every shape a key/value pair is written in. The value alternates over a
+        // single-quoted run, a double-quoted run (both allowing backslash escapes, which is how a
+        // connection string carries a quote inside a password) and finally the bare form. The quoted
+        // alternatives have to come FIRST: matching the bare form against Password='a b;c' stops at the
+        // space and leaves the rest of the password sitting in the log.
         static readonly Regex SecretParameter = new(
-            @"\b(key|ticket|token|access_token|credential|password|pwd)\s*=\s*[^&;\s<>]*",
+            @"\b(key|ticket|token|access_token|credential|password|pwd)\s*=\s*(?:'(?:[^'\\]|\\.)*'|""(?:[^""\\]|\\.)*""|[^&;\s<>]*)",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         // A connection string in URI form carries its password in the userinfo section rather than in

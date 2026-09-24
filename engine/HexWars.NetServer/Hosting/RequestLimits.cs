@@ -1,4 +1,6 @@
 using HexWars.NetServer.Contracts;
+using Microsoft.AspNetCore.Http.Features;
+using Microsoft.Net.Http.Headers;
 using Microsoft.AspNetCore.Server.Kestrel.Core;
 
 namespace HexWars.NetServer.Hosting
@@ -72,9 +74,20 @@ namespace HexWars.NetServer.Hosting
             {
                 if (context.Request.ContentLength is long declared)
                 {
+                    // A length that is not one. Kestrel refuses this before the middleware runs, but this
+                    // is the code that states the rule, and a bound read from a negative number is no bound.
+                    if (declared < 0)
+                    {
+                        await RefuseAsync(
+                                context, StatusCodes.Status400BadRequest, ApiErrors.InvalidRequestMessage)
+                            .ConfigureAwait(false);
+                        return;
+                    }
+
                     if (declared > MaxRequestBodyBytes)
                     {
-                        await RefuseAsync(context).ConfigureAwait(false);
+                        await RefuseAsync(context, StatusCodes.Status413PayloadTooLarge, TooLargeMessage)
+                            .ConfigureAwait(false);
                         return;
                     }
                 }
@@ -82,7 +95,8 @@ namespace HexWars.NetServer.Hosting
                 {
                     if (await IsOverTheCapAsync(context.Request).ConfigureAwait(false))
                     {
-                        await RefuseAsync(context).ConfigureAwait(false);
+                        await RefuseAsync(context, StatusCodes.Status413PayloadTooLarge, TooLargeMessage)
+                            .ConfigureAwait(false);
                         return;
                     }
                 }
@@ -91,14 +105,24 @@ namespace HexWars.NetServer.Hosting
             });
         }
 
-        /// <summary>A request with no Content-Length that still intends to send something. GET, HEAD,
-        /// DELETE, OPTIONS and TRACE do not, and a websocket upgrade is a GET.</summary>
-        static bool CarriesAnUndeclaredBody(HttpRequest request) =>
-            !HttpMethods.IsGet(request.Method)
-            && !HttpMethods.IsHead(request.Method)
-            && !HttpMethods.IsOptions(request.Method)
-            && !HttpMethods.IsDelete(request.Method)
-            && !HttpMethods.IsTrace(request.Method);
+        /// <summary>
+        /// Whether this request is sending a body it did not measure.
+        ///
+        /// Read from the FRAMING, never from the method. HTTP permits a body on any method, so a rule that
+        /// assumed GET, DELETE, OPTIONS and TRACE carry none was really telling a client which four words to
+        /// put on the request line to walk past the cap. What decides is the framing: a Content-Length,
+        /// handled by the caller, or a Transfer-Encoding, with the server feature as the backstop.
+        ///
+        /// A websocket upgrade is a GET with neither and is untouched, and so is the legacy /ws route for
+        /// the same reason. An upgrade that DOES carry a body is measured like anything else, because at
+        /// that point it is not the handshake it is presenting itself as.
+        /// </summary>
+        static bool CarriesAnUndeclaredBody(HttpRequest request)
+        {
+            if (request.Headers.ContainsKey(HeaderNames.TransferEncoding)) return true;
+
+            return request.HttpContext.Features.Get<IHttpRequestBodyDetectionFeature>()?.CanHaveBody ?? false;
+        }
 
         /// <summary>
         /// Reads one byte past the cap and says whether it got there.
@@ -140,10 +164,10 @@ namespace HexWars.NetServer.Hosting
             return filled > MaxRequestBodyBytes;
         }
 
-        static Task RefuseAsync(HttpContext context)
+        static Task RefuseAsync(HttpContext context, int status, string message)
         {
-            context.Response.StatusCode = StatusCodes.Status413PayloadTooLarge;
-            return context.Response.WriteAsJsonAsync(new ApiError(ApiErrors.InvalidRequest, TooLargeMessage));
+            context.Response.StatusCode = status;
+            return context.Response.WriteAsJsonAsync(new ApiError(ApiErrors.InvalidRequest, message));
         }
     }
 }

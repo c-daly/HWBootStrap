@@ -186,6 +186,13 @@ namespace HexWars.NetServer.Tests
 
             public void BlockOn(Guid matchId) => _blockOn[matchId] = 0;
 
+            /// <summary>Ids this evictor answers to a store-status re-derivation, standing in for matches
+            /// whose rows are terminal while this host still holds them.</summary>
+            public List<Guid> Reaped { get; } = new();
+
+            /// <summary>The token the last eviction was handed, so a test can see a deadline reach it.</summary>
+            public CancellationToken LastToken { get; private set; }
+
             public void Unblock() => _blocked.TrySetResult();
 
             public void Clear()
@@ -204,6 +211,8 @@ namespace HexWars.NetServer.Tests
             public async Task<IReadOnlyList<Guid>> EvictAsync(
                 IEnumerable<Guid> matchIds, int closeStatus, string reason, CancellationToken ct)
             {
+                LastToken = ct;
+
                 foreach (Guid matchId in matchIds)
                 {
                     lock (_gate) _offered.Add(matchId);
@@ -222,6 +231,10 @@ namespace HexWars.NetServer.Tests
 
                 return Array.Empty<Guid>();
             }
+
+            public Task<IReadOnlyList<Guid>> EvictReapedAsync(
+                int closeStatus, string reason, CancellationToken ct) =>
+                EvictAsync(Reaped.ToArray(), closeStatus, reason, ct);
         }
 
         /// <summary>A store whose only job is to answer one retention call the way a test wants.</summary>
