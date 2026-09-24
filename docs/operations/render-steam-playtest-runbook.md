@@ -190,8 +190,9 @@ Dashboard.
 Before promoting a staging build to production:
 
 - [ ] Staging `GET /health/ready` is 200 with all four checks Healthy
-- [ ] `scripts/verify-multiplayer.sh` passed against staging
-- [ ] `verify-journals` passed against a restored copy of the staging database. NOT `selftest-durable`:
+- [ ] `scripts/verify-multiplayer.sh` passed locally against a disposable test database
+- [ ] Two packaged Steam clients completed a full game and reconnect against staging
+- [ ] `verify-journals --open-only` passed against a restored copy of the staging database. NOT `selftest-durable`:
       it drops the schema of whatever it is given, so it belongs on a throwaway database only
 - [ ] No new migration breaks the additive-only rule
 - [ ] The client build in the Playtest depot is listed in `MATCH_COMPATIBLE_CLIENT_BUILDS`, or that list is empty

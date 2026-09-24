@@ -1,5 +1,6 @@
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
+using HexWars.NetServer.Steam;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 
@@ -57,7 +58,7 @@ namespace HexWars.NetServer.Operations
             catch (Exception malformed)
             {
                 output.WriteLine("VERIFY-JOURNALS CONFIGURATION: that is not a database address");
-                output.WriteLine("  " + malformed.Message);
+                output.WriteLine("  " + SteamLogRedaction.Redact(malformed.Message));
                 return 2;
             }
 
@@ -89,7 +90,7 @@ namespace HexWars.NetServer.Operations
             catch (Exception unreachable)
             {
                 output.WriteLine("VERIFY-JOURNALS CONFIGURATION: the database could not be read");
-                output.WriteLine("  " + unreachable.Message);
+                output.WriteLine("  " + SteamLogRedaction.Redact(unreachable.Message));
                 return 2;
             }
 
@@ -113,10 +114,18 @@ namespace HexWars.NetServer.Operations
             catch (Exception unreadable)
             {
                 output.WriteLine("VERIFY-JOURNALS CONFIGURATION: the matches could not be listed");
-                output.WriteLine("  " + unreadable.Message);
+                output.WriteLine("  " + SteamLogRedaction.Redact(unreadable.Message));
                 return 2;
             }
 
+            output.WriteLine("VERIFY-JOURNALS SCOPE " + (openOnly ? "open matches" : "all retained matches"));
+            return await VerifyMatchesAsync(store, matches, output, ct).ConfigureAwait(false);
+        }
+
+        internal static async Task<int> VerifyMatchesAsync(
+            IMatchStore store, IReadOnlyList<(Guid MatchId, string Status)> matches,
+            TextWriter output, CancellationToken ct)
+        {
             var refused = 0;
 
             foreach ((Guid matchId, string status) in matches)
@@ -128,16 +137,17 @@ namespace HexWars.NetServer.Operations
                 }
                 catch (Exception unreadable)
                 {
-                    refused++;
-                    output.WriteLine(Line(matchId, status, 0, "UNREADABLE", unreadable.Message));
-                    continue;
+                    output.WriteLine(Line(matchId, status, 0, "UNREADABLE",
+                        SteamLogRedaction.Redact(unreadable.Message)));
+                    output.WriteLine("VERIFY-JOURNALS INCOMPLETE: a journal could not be read; retry verification");
+                    return 2;
                 }
 
                 if (journal is null)
                 {
-                    refused++;
                     output.WriteLine(Line(matchId, status, 0, "MISSING", "the journal is gone"));
-                    continue;
+                    output.WriteLine("VERIFY-JOURNALS INCOMPLETE: the match set changed; retry on a stable copy");
+                    return 2;
                 }
 
                 int commands = journal.Commands.Count;

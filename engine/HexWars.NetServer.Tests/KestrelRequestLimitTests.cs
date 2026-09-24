@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
+using System.Net.Sockets;
 using System.Text;
 using HexWars.NetServer.Hosting;
 using Microsoft.AspNetCore.Builder;
@@ -78,6 +79,24 @@ namespace HexWars.NetServer.Tests
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             request.Headers.TransferEncodingChunked = true;
             return request;
+        }
+
+        [TestCase("GET", "/healthz")]
+        [TestCase("POST", "/games")]
+        public async Task AnUnfinishedChunkedBodyHasAnIndependentDeadline(string method, string path)
+        {
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port);
+            await using NetworkStream stream = socket.GetStream();
+            // A large enough first chunk to avoid the transport's minimum-rate deadline. The
+            // application must stop waiting even though the client never sends the final chunk.
+            string request = $"{method} {path} HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n1000\r\n" + new string('x', 4096) + "\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(request));
+            using var deadline = new CancellationTokenSource(RequestLimits.BodyReadTimeout + TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(stream);
+            string? response = await reader.ReadLineAsync(deadline.Token);
+            Assert.That(response, Does.Contain("408"));
         }
 
         [Test]

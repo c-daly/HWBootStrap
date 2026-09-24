@@ -109,6 +109,9 @@ One summary line closes it out, and it is what an operator reads after the proce
 Shutdown: 3 live match(es), 5 socket(s) closed, 1 not drained, took 11840 ms
 ```
 
+If the drain is interrupted before it returns a count, the summary prints
+`unknown (drain interrupted) not drained`; it never reports an unobserved zero.
+
 `not drained` is the number that matters. Those are matches that may have had a command in flight this host
 never confirmed; their players will be re-dealt the whole log on reconnect and lose nothing, but a number
 that is routinely non-zero means commits are slow enough to be worth looking at.
@@ -189,7 +192,7 @@ computed inside it would be computed over the wrong window; subtract two reading
 
 ## 5. Verifying journals without touching them
 
-`dotnet HexWars.NetServer.dll verify-journals` answers the question readiness answers about the database
+`dotnet HexWars.NetServer.dll verify-journals --open-only` answers the question readiness answers about the database
 this host is attached to: can this build replay the matches in there. It runs no migrations, every
 statement it issues of its own runs inside an explicit `READ ONLY` transaction, and it replays through the
 same verifier the startup recovery pass uses.
@@ -200,7 +203,8 @@ rather than a discipline, run it as a read-only role - see
 [Procedure G](match-recovery-runbook.md).
 
 It reads `HEXWARS_VERIFY_DATABASE_URL`, falling back to `DATABASE_URL`. `--open-only` restricts it to
-matches still being played. It prints one line per match and a summary; exit 0 all replay, 1 some do not,
+waiting and active matches, matching startup readiness. Without that flag it audits all retained
+history; an old terminal match can fail replay without blocking host readiness. It prints one line per match and a summary; exit 0 all replay, 1 some do not,
 2 it could not look. The procedure that uses it is
 [Procedure G of the match recovery runbook](match-recovery-runbook.md).
 

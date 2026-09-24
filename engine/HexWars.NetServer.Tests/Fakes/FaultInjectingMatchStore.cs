@@ -47,6 +47,8 @@ namespace HexWars.NetServer.Tests.Fakes
         /// so it is where a test puts the time that a boundary can be crossed in.</summary>
         public Func<Task>? BeforeTouch { get; set; }
 
+        public Action<Guid, CancellationToken>? BeforeGetMatch { get; set; }
+
         /// <summary>Arms the next AppendCommandAsync to throw, once. Null disarms it.</summary>
         public void FailNextAppend(Exception? failure) => _nextAppendFailure = failure;
 
@@ -154,6 +156,7 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task<PersistedMatch?> GetMatchAsync(Guid matchId, CancellationToken ct)
         {
+            BeforeGetMatch?.Invoke(matchId, ct);
             Exception? failure = _nextGetMatchFailure;
             if (failure is null) return inner.GetMatchAsync(matchId, ct);
 

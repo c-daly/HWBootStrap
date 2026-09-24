@@ -3,6 +3,7 @@ using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Tests.Fixtures;
+using HexWars.NetServer.Tests.Fakes;
 using Microsoft.Extensions.Logging.Abstractions;
 using Npgsql;
 using NUnit.Framework;
@@ -150,6 +151,39 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(exit, Is.EqualTo(1), output);
             Assert.That(output, Does.Contain("UnsupportedEngineContract"));
+        }
+
+        [Test]
+        public async Task AReadOutageAfterListingIsIncompleteAndDoesNotAccuseTheJournal()
+        {
+            Guid id = await SeedAsync("109775240000000003", EngineContract.Version, false);
+            var store = new FaultInjectingMatchStore(Store());
+            store.FailNextJournalRead(new IOException("Lost postgres://operator:private-secret@database/test"));
+            var output = new StringWriter();
+            int exit = await JournalVerification.VerifyMatchesAsync(
+                store, new[] { (id, "active") }, output, CancellationToken.None);
+
+            Assert.That(exit, Is.EqualTo(2));
+            Assert.That(output.ToString(), Does.Contain("INCOMPLETE"));
+            Assert.That(output.ToString(), Does.Not.Contain(JournalVerification.FailPrefix));
+            Assert.That(output.ToString(), Does.Not.Contain("private-secret"));
+            Assert.That((await RunAsync()).Exit, Is.Zero, "the journal was intact throughout the outage");
+        }
+
+        [Test]
+        public async Task HistoricalContractMismatchDoesNotBlockOpenMatchReadiness()
+        {
+            await SeedAsync("109775240000000001", EngineContract.Version, false);
+            Guid historical = await SeedAsync("109775240000000002", "hexwars-engine/999", false);
+            await Store().TryCompleteMatchAsync(
+                historical, MatchStatus.Completed, 0, DateTimeOffset.UtcNow, CancellationToken.None);
+
+            var readiness = await RunAsync(openOnly: true);
+            var audit = await RunAsync(openOnly: false);
+            Assert.That(readiness.Exit, Is.Zero, readiness.Output);
+            Assert.That(readiness.Output, Does.Contain("SCOPE open matches"));
+            Assert.That(audit.Exit, Is.EqualTo(1), audit.Output);
+            Assert.That(audit.Output, Does.Contain("SCOPE all retained matches"));
         }
 
         [Test]

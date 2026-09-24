@@ -93,6 +93,8 @@ namespace HexWars.NetServer.Tests
         public async Task Shutdown_FinishesInsideTheBudgetWhenTheStoreHasStoppedAnswering()
         {
             SteamServerFactory fixture = Fixture();
+            var logging = new CapturingLoggerProvider();
+            fixture.Logging = logging;
             var faults = new FaultInjectingMatchStore(fixture.Store);
 
             WebApplicationFactory<Program> host = Track(fixture.WithWebHostBuilder(
@@ -126,6 +128,9 @@ namespace HexWars.NetServer.Tests
 
                 Assert.That(clock.Elapsed, Is.LessThan(Deadline),
                     "a wedged store must not carry shutdown past the platform kill deadline");
+                string summary = logging.Messages.Single(m => m.Contains("socket(s) closed"));
+                Assert.That(summary, Does.Not.Contain("0 not drained"), summary);
+                Assert.That(summary, Does.Contain("1 not drained").Or.Contain("unknown (drain interrupted)"));
 
                 faults.ReleaseHungAppends();
             }

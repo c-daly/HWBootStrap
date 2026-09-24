@@ -204,9 +204,9 @@ marked disposable for exactly that reason, and making a name disposable to get p
 destroy the journals the restore exists to preserve.
 
 Use `verify-journals` instead. It runs no migrations, and every statement it issues of its own runs inside
-an explicit `READ ONLY` transaction, which cannot be turned off from inside itself. It replays every journal
-through the same verifier the running host applies at startup, so a pass here means what a healthy
-`recovery` check means.
+an explicit `READ ONLY` transaction, which cannot be turned off from inside itself. It uses the same journal verifier as startup. Use `--open-only` for deployment readiness: startup
+checks waiting and active matches. Without that flag, verification is an audit of all retained history;
+a terminal match from an older engine contract can fail that audit without preventing startup.
 
 **What that does and does not promise.** It protects against this verb writing by accident: no migration, no
 repair, no statement of its own that could ever be a write. It is not a sandbox. Anything else holding the
@@ -229,11 +229,11 @@ Point `HEXWARS_VERIFY_DATABASE_URL` at that role and the promise stops depending
 2. Point the verb at it and run it from the deployed image:
 
    ```
-   HEXWARS_VERIFY_DATABASE_URL=postgres://user:pass@host:5432/restored dotnet HexWars.NetServer.dll verify-journals
+   HEXWARS_VERIFY_DATABASE_URL=postgres://user:pass@host:5432/restored dotnet HexWars.NetServer.dll verify-journals --open-only
    ```
 
-   Add `--open-only` to check just the matches still being played. From a checkout the same verb is
-   `dotnet run --project engine/HexWars.NetServer -- verify-journals`.
+   This is the promotion check. Omit `--open-only` for a separate historical replay audit. From a
+   checkout use `dotnet run --project engine/HexWars.NetServer -- verify-journals --open-only`.
 
 3. Read the output. One line per match, then a summary:
 
@@ -245,9 +245,9 @@ Point `HEXWARS_VERIFY_DATABASE_URL` at that role and the promise stops depending
 
 | Exit | Meaning | What to do |
 |---|---|---|
-| 0 | `VERIFY-JOURNALS PASS n/n`, every journal replays | Trust the restore |
-| 1 | `VERIFY-JOURNALS FAIL k/n`, k journals will not | Abandon those matches with procedure A after the restore |
-| 2 | It could not look: no address, no connection, or a schema behind this build | Fix that first; nothing was verified |
+| 0 | `VERIFY-JOURNALS PASS n/n`, every journal in the printed scope replays | The selected scope passed; retain separate backup-integrity checks |
+| 1 | `VERIFY-JOURNALS FAIL k/n`, k loaded journals cannot replay under this build | Investigate the named failures. Procedure A applies only to open matches; preserve terminal history and use its compatible build for historical replay |
+| 2 | Verification is incomplete: configuration, schema, connection/read failure, or a changing match set | Repair access or use a stable restored copy and retry. This is not evidence of corrupt journals; do not abandon matches from this result |
 
 Exit 2 on a schema mismatch is deliberate. A journal read against a schema this build does not recognise
 would report failures that are about the schema, and an operator acting on them would go looking at

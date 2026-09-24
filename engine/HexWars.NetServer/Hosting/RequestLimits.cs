@@ -33,6 +33,8 @@ namespace HexWars.NetServer.Hosting
 
         public static readonly TimeSpan KeepAliveTimeout = TimeSpan.FromSeconds(120);
 
+        public static readonly TimeSpan BodyReadTimeout = TimeSpan.FromSeconds(5);
+
         /// <summary>Says the size was the problem and nothing else. A caller that sent a large body either
         /// has a bug or is probing, and neither is helped by a more specific sentence.</summary>
         public const string TooLargeMessage = "That request was too large.";
@@ -62,9 +64,9 @@ namespace HexWars.NetServer.Hosting
         /// is the wrong answer and, worse, means the documented 16 KB ceiling was never actually a ceiling.
         ///
         /// A declared length is answered from the header, without a byte being pulled off the socket. An
-        /// undeclared one is measured: the body is buffered and read one byte past the cap, which is bounded
-        /// work whatever the client intends to send, and rewound so the endpoint still sees it. Only requests
-        /// that can carry a body are touched, so a websocket upgrade and a static file GET pay nothing.
+        /// undeclared one is measured within five seconds: the body is buffered and read one byte past
+        /// the cap, then rewound for the endpoint. The independent deadline also bounds slow bodies
+        /// on public GET routes. Requests without body framing, including normal upgrades, pay nothing.
         /// </summary>
         public static IApplicationBuilder UseHexWarsRequestLimits(this IApplicationBuilder app)
         {
@@ -93,9 +95,29 @@ namespace HexWars.NetServer.Hosting
                 }
                 else if (CarriesAnUndeclaredBody(context.Request))
                 {
-                    if (await IsOverTheCapAsync(context.Request).ConfigureAwait(false))
+                    using var deadline = new CancellationTokenSource(BodyReadTimeout);
+                    using var read = CancellationTokenSource.CreateLinkedTokenSource(
+                        deadline.Token, context.RequestAborted);
+                    try
                     {
-                        await RefuseAsync(context, StatusCodes.Status413PayloadTooLarge, TooLargeMessage)
+                        if (await IsOverTheCapAsync(context.Request, read.Token).ConfigureAwait(false))
+                        {
+                            await RefuseAsync(context, StatusCodes.Status413PayloadTooLarge, TooLargeMessage)
+                                .ConfigureAwait(false);
+                            return;
+                        }
+                    }
+                    catch (OperationCanceledException) when (
+                        deadline.IsCancellationRequested && !context.RequestAborted.IsCancellationRequested)
+                    {
+                        context.Response.Headers.Connection = "close";
+                        await RefuseAsync(context, StatusCodes.Status408RequestTimeout, "The request timed out.")
+                            .ConfigureAwait(false);
+                        return;
+                    }
+                    catch (Microsoft.AspNetCore.Http.BadHttpRequestException failure)
+                    {
+                        await RefuseAsync(context, failure.StatusCode, ApiErrors.InvalidRequestMessage)
                             .ConfigureAwait(false);
                         return;
                     }
@@ -130,7 +152,7 @@ namespace HexWars.NetServer.Hosting
         /// Buffering first is what lets the endpoint read the same body afterwards. The buffer is bounded by
         /// the cap plus one, so a client streaming megabytes is measured in kilobytes and then refused.
         /// </summary>
-        static async Task<bool> IsOverTheCapAsync(HttpRequest request)
+        static async Task<bool> IsOverTheCapAsync(HttpRequest request, CancellationToken ct)
         {
             request.EnableBuffering();
 
@@ -144,7 +166,7 @@ namespace HexWars.NetServer.Hosting
                     int read = await request.Body
                         .ReadAsync(
                             probe.AsMemory(filled, probe.Length - filled),
-                            request.HttpContext.RequestAborted)
+                            ct)
                         .ConfigureAwait(false);
 
                     if (read == 0) break;
@@ -152,7 +174,8 @@ namespace HexWars.NetServer.Hosting
                     filled += read;
                 }
             }
-            catch (Microsoft.AspNetCore.Http.BadHttpRequestException)
+            catch (Microsoft.AspNetCore.Http.BadHttpRequestException failure)
+                when (failure.StatusCode == StatusCodes.Status413PayloadTooLarge)
             {
                 // Kestrel enforces the same ceiling and reaches it first, one byte earlier than this probe
                 // does. Its own answer is a 413 with an exception page rather than the error body every

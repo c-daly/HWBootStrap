@@ -132,20 +132,20 @@ namespace HexWars.NetServer.Operations
 
             long started = _time.GetTimestamp();
             int matches = _coordinator?.LiveMatchCount ?? 0;
-            var skipped = 0;
+            string skipped = "0";
 
             if (_coordinator is not null)
             {
                 DurableMatchCoordinator.DrainSummary drain = default;
 
-                await StepAsync(
+                bool finished = await StepAsync(
                     Remaining(started, DrainWindow),
                     async () => drain = await _coordinator.DrainAsync(Remaining(started, DrainWindow))
                         .ConfigureAwait(false),
                     "draining in-flight commits",
                     cancellationToken).ConfigureAwait(false);
 
-                skipped = drain.Skipped;
+                skipped = finished ? drain.Skipped.ToString() : "unknown (drain interrupted)";
 
                 await StepAsync(
                     Remaining(started, NotifyWindow),
@@ -198,17 +198,18 @@ namespace HexWars.NetServer.Operations
         /// Abandoned rather than cancelled: WaitAsync stops waiting, it does not stop the work, and there
         /// is nothing useful to do about a store call that will never return. The process is about to end.
         /// </summary>
-        async Task StepAsync(TimeSpan limit, Func<Task> step, string what, CancellationToken cancellation)
+        async Task<bool> StepAsync(TimeSpan limit, Func<Task> step, string what, CancellationToken cancellation)
         {
             if (limit <= TimeSpan.Zero)
             {
                 _logger.LogWarning("Shutdown: no budget left for {Step}", what);
-                return;
+                return false;
             }
 
             try
             {
                 await step().WaitAsync(limit, cancellation).ConfigureAwait(false);
+                return true;
             }
             catch (TimeoutException)
             {
@@ -222,6 +223,8 @@ namespace HexWars.NetServer.Operations
             {
                 _logger.LogRedactedWarning(failure, "Shutdown: {Step} failed", what);
             }
+
+            return false;
         }
     }
 }

@@ -42,6 +42,8 @@ namespace HexWars.NetServer.Operations
         /// <summary>How long one eviction is given before the sweep moves on to the next match.</summary>
         internal static readonly TimeSpan EvictionTimeout = TimeSpan.FromSeconds(5);
 
+        internal static readonly TimeSpan ReconciliationTimeout = TimeSpan.FromSeconds(5);
+
         /// <summary>Matches waiting to be evicted at once, at most.</summary>
         internal const int MaxPendingEvictions = 256;
 
@@ -115,11 +117,19 @@ namespace HexWars.NetServer.Operations
             // bounded, so an id can fall out of it; the rows cannot. Asking the store which of the matches
             // this host is holding have already been reaped catches anything the bookkeeping lost, and needs
             // no bookkeeping of its own.
+            using var reconciliationDeadline = new CancellationTokenSource(ReconciliationTimeout, time);
+            using var reconciliation = CancellationTokenSource.CreateLinkedTokenSource(
+                reconciliationDeadline.Token, ct);
             try
             {
                 await evictor
-                    .EvictReapedAsync(AbandonedCloseStatus, AbandonedCloseReason, ct)
+                    .EvictReapedAsync(AbandonedCloseStatus, AbandonedCloseReason, reconciliation.Token)
                     .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (
+                reconciliationDeadline.IsCancellationRequested && !ct.IsCancellationRequested)
+            {
+                logger.LogWarning("Retention status reconciliation exceeded its deadline; continuing next sweep");
             }
             catch (OperationCanceledException)
             {

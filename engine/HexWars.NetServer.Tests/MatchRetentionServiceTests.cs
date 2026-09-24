@@ -116,6 +116,23 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ReconciliationHasADeadlineAndDoesNotEndTheNextSweep()
+        {
+            _evictor.Reaped.Add(Id(19));
+            _evictor.BlockOn(Id(19));
+            Task<RetentionResult> sweep = _service.SweepOnceAsync(CancellationToken.None);
+            await WaitUntil(() => _evictor.Offered.Contains(Id(19)));
+            _clock.Advance(MatchRetentionService.ReconciliationTimeout);
+            await sweep.WaitAsync(TimeSpan.FromSeconds(3));
+
+            Assert.That(_evictor.LastToken.IsCancellationRequested, Is.True);
+            _evictor.Clear();
+            await _service.SweepOnceAsync(CancellationToken.None);
+            Assert.That(_evictor.Evicted, Does.Contain(Id(19)));
+            Assert.That(_service.Sweeps, Is.EqualTo(2));
+        }
+
+        [Test]
         public async Task AStoreThatRefusesTheSweep_LeavesTheLoopRunning()
         {
             _store.Fail(new InvalidOperationException("the database went away"));

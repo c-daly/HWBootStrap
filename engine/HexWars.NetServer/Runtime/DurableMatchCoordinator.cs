@@ -65,6 +65,8 @@ namespace HexWars.NetServer.Runtime
         /// the host cannot be held up by one of them.</summary>
         public static readonly TimeSpan EvictionGateWait = TimeSpan.FromSeconds(5);
 
+        Guid _lastReconciled;
+
         /// <summary>The frame has no seat behind it: the connection never authenticated, or its match has
         /// been released.</summary>
         public const string RejectNoSeat = "REJECT NoSeat";
@@ -1267,8 +1269,8 @@ namespace HexWars.NetServer.Runtime
         /// <summary>
         /// Closes every live match whose stored status says retention already reaped it.
         ///
-        /// A cheap pass: one indexed read per match this host is actually holding in memory, which on a
-        /// single instance is the matches being played rather than every match that exists. It is the safety
+        /// One indexed read per cached match, bounded by the retention service deadline. The cursor
+        /// resumes after the previous attempt so slow reads do not starve later matches. It is the safety
         /// net under the sweeper bookkeeping - an id that fell out of a bounded pending set is picked up
         /// here on the next sweep, because the rows are the record and nothing has to be remembered.
         ///
@@ -1278,22 +1280,26 @@ namespace HexWars.NetServer.Runtime
         public async Task<IReadOnlyList<Guid>> EvictReapedAsync(
             int closeStatus, string reason, CancellationToken ct)
         {
-            var reaped = new List<Guid>();
+            var unevicted = new List<Guid>();
+            // Rotate after each attempt so a slow first read cannot starve all later matches.
+            Guid cursor = _lastReconciled;
+            Guid[] ids = _matches.Keys.OrderBy(id => id).ToArray();
 
-            foreach (Guid matchId in _matches.Keys.ToArray())
+            foreach (Guid matchId in ids.Where(id => id.CompareTo(cursor) > 0)
+                .Concat(ids.Where(id => id.CompareTo(cursor) <= 0)))
             {
                 ct.ThrowIfCancellationRequested();
+                _lastReconciled = matchId;
 
                 PersistedMatch? stored = await store.GetMatchAsync(matchId, ct).ConfigureAwait(false);
                 if (stored is null) continue;
                 if (stored.Status is not (MatchStatus.Expired or MatchStatus.Abandoned)) continue;
 
-                reaped.Add(matchId);
+                unevicted.AddRange(await EvictAsync(new[] { matchId }, closeStatus, reason, ct)
+                    .ConfigureAwait(false));
             }
 
-            if (reaped.Count == 0) return Array.Empty<Guid>();
-
-            return await EvictAsync(reaped, closeStatus, reason, ct).ConfigureAwait(false);
+            return unevicted;
         }
 
         // ---- internals -------------------------------------------------------

@@ -604,6 +604,37 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public async Task ReconciliationContinuesPastAnInterruptedReadOnTheNextSweep()
+        {
+            await SeatBothPlayers();
+            CreateMatchResult other = await _store.CreateMatchForLobbyAsync(new CreateMatchRequest(
+                "109775240000000043", GameSetup.Default.ToWire(), "hexwars-engine/1", 2, "test-build",
+                new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
+            string credential = (await _credentials.IssueAsync(other.Match.MatchId, Seat0Steam, Ct)).Credential;
+            await _coordinator.AuthenticateAsync("other", other.Match.MatchId.ToString(), credential, Ct);
+            foreach (Guid id in new[] { _matchId, other.Match.MatchId })
+                await _store.TryCompleteMatchAsync(id, MatchStatus.Expired, null, Begin, Ct);
+
+            using var deadline = new CancellationTokenSource();
+            Guid interrupted = Guid.Empty;
+            _faults.BeforeGetMatch = (id, ct) =>
+            {
+                interrupted = id;
+                deadline.Cancel();
+                ct.ThrowIfCancellationRequested();
+            };
+            Assert.ThrowsAsync<OperationCanceledException>(async () =>
+                await _coordinator.EvictReapedAsync(1001, "abandoned", deadline.Token));
+
+            var reads = new List<Guid>();
+            _faults.BeforeGetMatch = (id, _) => reads.Add(id);
+            await _coordinator.EvictReapedAsync(1001, "abandoned", Ct);
+            Assert.That(reads[0], Is.Not.EqualTo(interrupted), "the same first read must not starve other matches");
+            Assert.That(reads, Is.EquivalentTo(new[] { _matchId, other.Match.MatchId }));
+            Assert.That(_coordinator.LiveMatchCount, Is.Zero);
+        }
+
+        [Test]
         public async Task EvictingAMatchThisHostIsNotPlaying_IsQuietlyNothing()
         {
             IReadOnlyList<Guid> unevicted =
