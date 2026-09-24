@@ -388,6 +388,107 @@ namespace HexWars.NetServer.Tests
             }
         }
 
+        /// <summary>
+        /// The barrier read at the TOP of the match gate, which is the only one a queued handshake meets.
+        ///
+        /// The two tests above pause a handshake at a database call, and both of those calls happen after
+        /// the gate has been taken and after the first barrier has already been read. Nothing a store
+        /// double can do reaches a handshake that is still WAITING for the gate - the one that was queued
+        /// behind a command when the host was told to stop - so this test holds it there through a hook
+        /// the coordinator exposes to this assembly alone, and shuts the host down while it waits.
+        ///
+        /// What must not happen when it is finally let through is everything that read prevents: a reload
+        /// that re-deals START to sockets which are about to be closed, a heal that writes a completion
+        /// into a drain, a supersede that ends the earlier socket of the same seat with a 1000 instead of
+        /// a 1012, and a registration the drain snapshot has already been taken without.
+        /// </summary>
+        [Test]
+        public async Task Shutdown_RefusesAHandshakeThatWasWaitingAtTheGate()
+        {
+            SteamServerFactory fixture = Fixture();
+            using HttpClient warm = fixture.CreateClient();
+
+            (DurableFlowClient zero, DurableFlowClient one) = await StartAsync(fixture);
+            await using (zero)
+            await using (one)
+            {
+                var coordinator = fixture.Services.GetRequiredService<DurableMatchCoordinator>();
+                var registry = fixture.Services.GetRequiredService<V2ConnectionRegistry>();
+                var metrics = fixture.Services.GetRequiredService<MatchMetrics>();
+
+                string[] seated = coordinator.ConnectionsOf(zero.MatchId).OrderBy(c => c).ToArray();
+                long authFailuresBefore = metrics.Snapshot().AuthFailures;
+
+                // Something else moved this journal on and this projection did not hear about it, which is
+                // the state a rebuild exists for. It matters here because a rebuild that finds the journal
+                // ahead re-deals START to every seat still attached - so if the barrier is read only at the
+                // end of the gate, a handshake that is refused anyway will have dealt two sockets a frame
+                // on its way out, moments before shutdown closes them.
+                AppendResult moved = await fixture.Store.AppendCommandAsync(
+                    zero.MatchId, 1, CommandWire.Write(Opening), FakeSteamWebApiClient.OwnerSteamId,
+                    DateTimeOffset.UtcNow, CancellationToken.None);
+                Assert.That(moved.Status, Is.EqualTo(AppendStatus.Appended));
+
+                Assert.That(coordinator.TryGetLiveMatch(zero.MatchId, out LiveMatch? projection), Is.True);
+                projection!.Stale = true;
+
+                var reached = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                coordinator.OnGateEnteredForTest = async _ =>
+                {
+                    reached.TrySetResult();
+                    await release.Task.ConfigureAwait(false);
+                };
+
+                // The same account seat 0 is already sitting on, so a handshake that got through here
+                // would supersede the socket zero is holding.
+                DurableFlowClient late = await DurableFlowClient.JoinAsync(
+                    fixture, zero.MatchId, FakeSteamWebApiClient.OwnerTicket);
+
+                // Measured AFTER the join, because issuing the credential is one of the writes this store
+                // counts and it has already happened. TouchAsync is deliberately not one of them, so what
+                // is left to move this number is exactly the work behind the barrier: a heal, a start, an
+                // append.
+                int writesBefore = fixture.Store.WriteCount;
+
+                await using (late)
+                {
+                    await late.OpenAsync();
+                    await late.SendAuthAsync();
+                    await reached.Task.WaitAsync(TimeSpan.FromSeconds(10));
+
+                    coordinator.BeginShutdown();
+                    registry.BeginShutdown();
+                    release.TrySetResult();
+
+                    Assert.That((int)(await late.ExpectCloseAsync())!,
+                        Is.EqualTo(GracefulShutdownService.RestartCloseStatus),
+                        "a handshake that was queued on the gate is told to come back, not that it failed");
+
+                    Assert.That(coordinator.ConnectionsOf(zero.MatchId).OrderBy(c => c).ToArray(),
+                        Is.EqualTo(seated),
+                        "the same sockets, so nothing was registered and nothing was superseded");
+                    Assert.That(zero.IsOpen, Is.True,
+                        "the earlier socket of this seat keeps its place, and its own 1012 later");
+
+                    Assert.That(fixture.Store.WriteCount, Is.EqualTo(writesBefore),
+                        "no reload, no heal, no start and no append: the barrier is read before all of them");
+                    Assert.That(metrics.Snapshot().AuthFailures, Is.EqualTo(authFailuresBefore),
+                        "nothing about this caller was wrong, so it is not an auth failure");
+
+                    Assert.That(projection.Stale, Is.True, "nothing rebuilt it, so it is still stale");
+
+                    // No SEAT, no re-dealt START and no APPLY on either socket that was already seated.
+                    await zero.ExpectNothingAsync(TimeSpan.FromMilliseconds(500));
+                    await one.ExpectNothingAsync(TimeSpan.FromMilliseconds(500));
+
+                    late.Drop();
+                }
+
+                coordinator.OnGateEnteredForTest = null;
+            }
+        }
+
         [Test]
         public async Task Shutdown_RefusesAHandshakeAtTheFinalBarrier()
         {

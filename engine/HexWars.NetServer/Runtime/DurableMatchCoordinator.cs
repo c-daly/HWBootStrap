@@ -198,6 +198,17 @@ namespace HexWars.NetServer.Runtime
         /// </summary>
         internal Func<Guid, Task>? BeforeGateForTest { get; set; }
 
+        /// <summary>
+        /// Runs under the match gate, before AuthenticateAsync reads the shutdown barrier. Null in
+        /// production, where nothing sets it.
+        ///
+        /// A seam for the other race a test cannot win from outside: a handshake that was QUEUED on the
+        /// gate when this host was told to stop. Everything a store double can pause on happens either
+        /// before the gate is taken or after that first barrier read, so without a hook here the read at
+        /// the top of the gate is covered by inspection rather than by a test.
+        /// </summary>
+        internal Func<Guid, Task>? OnGateEnteredForTest { get; set; }
+
         // ---- diagnostics -----------------------------------------------------
 
         /// <summary>Matches held in memory right now.</summary>
@@ -302,6 +313,9 @@ namespace HexWars.NetServer.Runtime
 
             try
             {
+                if (OnGateEnteredForTest is not null)
+                    await OnGateEnteredForTest(matchId).ConfigureAwait(false);
+
                 // FIRST, before anything is reloaded, healed, dealt or broadcast. A handshake that was
                 // queued on this gate when the host was told to stop has done none of that yet, and every
                 // one of those steps is a write or a frame: a reload re-deals START to sockets that are

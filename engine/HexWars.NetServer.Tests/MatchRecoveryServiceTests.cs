@@ -274,12 +274,96 @@ namespace HexWars.NetServer.Tests
                 "it never got as far as reading a journal");
         }
 
+        /// <summary>
+        /// The journal read that failed, tagged as the pass it happened in.
+        ///
+        /// The negative above proves the shared loader does not claim this tag; on its own that is equally
+        /// consistent with nothing ever claiming it, which would be a counter an operator reads as a
+        /// healthy zero while the startup pass is failing.
+        /// </summary>
+        [Test]
+        public async Task TheStartupPass_TagsTheJournalItCouldNotRead()
+        {
+            var store = new InMemoryMatchStore();
+            await SeedAnOpenMatchAsync(store);
+
+            var faults = new FaultInjectingMatchStore(store);
+            faults.FailNextJournalRead(new InvalidOperationException("the database is not there"));
+
+            var metrics = new MatchMetrics();
+            var recovery = new MatchRecoveryService(
+                faults, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await recovery.VerifyOpenMatchesAsync(Ct));
+
+            IReadOnlyDictionary<string, long> byOp = metrics.Snapshot().DatabaseFailuresByOp;
+
+            Assert.That(byOp.Keys, Is.EquivalentTo(new[] { MatchMetrics.DbOp.RecoveryLoad }),
+                "the list was read, so this is the journal and nothing else");
+            Assert.That(byOp[MatchMetrics.DbOp.RecoveryLoad], Is.EqualTo(1));
+        }
+
+        /// <summary>
+        /// The healing write that failed, tagged apart from the journal that could not be read.
+        ///
+        /// They are different findings. A journal this pass cannot read is an outage that stops the pass
+        /// dead; a completion it cannot write is one match left open over an intact journal, which the next
+        /// handshake will try again. An operator who cannot tell them apart cannot tell whether the host
+        /// learned anything at all.
+        /// </summary>
+        [Test]
+        public async Task TheStartupPass_TagsTheHealingWriteItCouldNotMake()
+        {
+            var store = new InMemoryMatchStore();
+            (Guid matchId, MatchRecord _) = await SeedAFinishedButOpenMatchAsync(store);
+
+            var metrics = new MatchMetrics();
+            var recovery = new MatchRecoveryService(
+                store, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            // Armed after the seeding, and one-shot: the completion this pass tries to write is the next
+            // write this store sees.
+            store.InjectedWriteFailure = new InvalidOperationException("the database is not there");
+
+            RecoveryReport report = await recovery.VerifyOpenMatchesAsync(Ct);
+
+            Assert.That(report.Verified, Is.EqualTo(1), "the journal was readable; only the write failed");
+            Assert.That(report.Healed, Is.Zero);
+            Assert.That(report.Failed, Is.Empty, "a write that failed is not a journal that cannot be replayed");
+            Assert.That((await store.GetMatchAsync(matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+
+            IReadOnlyDictionary<string, long> byOp = metrics.Snapshot().DatabaseFailuresByOp;
+
+            Assert.That(byOp.Keys, Is.EquivalentTo(new[] { MatchMetrics.DbOp.RecoveryHeal }),
+                "the list and the journal both answered, so only the heal is on the record");
+            Assert.That(byOp[MatchMetrics.DbOp.RecoveryHeal], Is.EqualTo(1));
+        }
+
         MatchRecoveryService NewRecovery(IMatchStore store) => new(
             store,
             Options.Create(new MatchHostingOptions()),
             _clock,
             new MatchMetrics(),
             NullLogger<MatchRecoveryService>.Instance);
+
+        /// <summary>An active match with nothing played on it, written through the store the same way the
+        /// coordinator writes one.</summary>
+        static async Task<Guid> SeedAnOpenMatchAsync(InMemoryMatchStore store)
+        {
+            CreateMatchResult created = await store.CreateMatchForLobbyAsync(new CreateMatchRequest(
+                LobbyId, GameSetup.Default.ToWire(), EngineContract.Version, ProtocolContract.Version,
+                "test-build", new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
+
+            Assert.That(
+                await store.TryStartMatchAsync(
+                    created.Match.MatchId, ReplayFile.Write(FreshStart(), Array.Empty<Command>()), Begin, Ct),
+                Is.True);
+
+            return created.Match.MatchId;
+        }
 
         /// <summary>An active match whose journal replays to a finished game, written through the store the
         /// same way the coordinator writes one.</summary>

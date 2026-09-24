@@ -35,9 +35,11 @@ namespace HexWars.NetServer.Tests
 
         PostgresMatchStore Store() => new(_database.DataSource, NullLogger<PostgresMatchStore>.Instance);
 
-        async Task<Guid> SeedAsync(string lobbyId, string engineVersion, bool corruptCommand)
+        async Task<Guid> SeedAsync(
+            string lobbyId, string engineVersion, bool corruptCommand, NpgsqlDataSource? into = null)
         {
-            PostgresMatchStore store = Store();
+            NpgsqlDataSource source = into ?? _database.DataSource;
+            var store = new PostgresMatchStore(source, NullLogger<PostgresMatchStore>.Instance);
 
             CreateMatchResult created = await store.CreateMatchForLobbyAsync(
                 new CreateMatchRequest(
@@ -68,7 +70,7 @@ namespace HexWars.NetServer.Tests
                 DateTimeOffset.UtcNow, CancellationToken.None);
 
             await using NpgsqlConnection connection =
-                await _database.DataSource.OpenConnectionAsync(CancellationToken.None);
+                await source.OpenConnectionAsync(CancellationToken.None);
             await using NpgsqlCommand corrupt = connection.CreateCommand();
             corrupt.CommandText =
                 "UPDATE match_commands SET command_wire = 'NOT A COMMAND' WHERE match_id = @id";
@@ -224,6 +226,59 @@ namespace HexWars.NetServer.Tests
             Assert.That(exit, Is.Zero, output);
             Assert.That(output, Does.Contain(open.ToString()));
             Assert.That(output, Does.Not.Contain(broken.ToString()));
+        }
+
+        /// <summary>The name this test needs: no delimited "test" token anywhere in it, so
+        /// <see cref="DisposableDatabaseGuard"/> refuses it the way it refuses a production database.</summary>
+        const string NotDisposableDatabase = "hexwars_verify";
+
+        /// <summary>
+        /// Program.Main, against a database that could not be handed to anything which drops schemas.
+        ///
+        /// The test below runs the same boundary against hexwars_test, and that name IS disposable: a guard
+        /// reintroduced in front of this verb would pass it and the operator procedure would still be
+        /// broken, silently. So this one builds a sibling database on the same server, named the way real
+        /// data is named, and verifies THAT.
+        /// </summary>
+        [Test]
+        public async Task ThroughTheCommandBoundary_ItVerifiesADatabaseNoGuardWouldCallDisposable()
+        {
+            await using PostgresTestDatabase.SiblingDatabase real =
+                await _database.CreateSiblingAsync(NotDisposableDatabase);
+
+            Assert.That(
+                Fixtures.DisposableDatabaseGuard.IsDisposable(real.DatabaseUrl, _ => null, out string reason),
+                Is.False,
+                "this test is only worth anything against a database a guard would refuse: " + reason);
+
+            await real.ApplyMigrationsAsync();
+            await SeedAsync("109775240000000001", EngineContract.Version, false, real.DataSource);
+
+            string? verify = Environment.GetEnvironmentVariable(JournalVerification.DatabaseVariable);
+            string? database = Environment.GetEnvironmentVariable("DATABASE_URL");
+            TextWriter console = Console.Out;
+            var written = new StringWriter();
+            int exit;
+
+            try
+            {
+                Environment.SetEnvironmentVariable(JournalVerification.DatabaseVariable, real.DatabaseUrl);
+                Environment.SetEnvironmentVariable("DATABASE_URL", null);
+
+                // Main writes to Console.Out rather than to a writer it was handed, so the console is where
+                // the operator's answer has to be read from.
+                Console.SetOut(written);
+                exit = await Program.Main(new[] { "verify-journals" });
+            }
+            finally
+            {
+                Console.SetOut(console);
+                Environment.SetEnvironmentVariable(JournalVerification.DatabaseVariable, verify);
+                Environment.SetEnvironmentVariable("DATABASE_URL", database);
+            }
+
+            Assert.That(exit, Is.Zero, written.ToString());
+            Assert.That(written.ToString(), Does.Contain(JournalVerification.PassPrefix + " 1/1"));
         }
 
         [Test]

@@ -238,6 +238,10 @@ namespace HexWars.NetServer.Tests.Fixtures
             }
         }
 
+        /// <summary>Whether this socket is still open from the client side. What tells a seat that was
+        /// left alone apart from one that was superseded: both are silent, and only one is still there.</summary>
+        public bool IsOpen => _socket is { State: WebSocketState.Open };
+
         /// <summary>A dead socket: no close handshake, exactly like a client whose process went away.</summary>
         public void Drop()
         {
