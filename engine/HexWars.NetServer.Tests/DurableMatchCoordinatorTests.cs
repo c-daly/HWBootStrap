@@ -570,6 +570,48 @@ namespace HexWars.NetServer.Tests
             Assert.That(_coordinator.ConnectionCount, Is.EqualTo(0));
         }
 
+
+        [Test]
+        public async Task AMatchThatIsBusy_IsNamedForTheNextEvictionRatherThanStranded()
+        {
+            await StartTheMatch();
+            Assert.That(_coordinator.TryGetLiveMatch(_matchId, out LiveMatch? match), Is.True);
+
+            // A commit in flight holds this gate. An eviction that waited on it forever would let one wedged
+            // match stall the retention sweep behind it, and one that dropped the match first and then gave
+            // up would leave these two players connected to a game nobody is hosting.
+            await match!.Gate.WaitAsync();
+            try
+            {
+                IReadOnlyList<Guid> unevicted =
+                    await _coordinator.EvictAsync(new[] { _matchId }, 1001, "abandoned");
+
+                Assert.That(unevicted, Is.EquivalentTo(new[] { _matchId }));
+                Assert.That(_sink.Closed, Is.Empty, "nothing was closed, so nothing was half-evicted");
+                Assert.That(_coordinator.TryGetLiveMatch(_matchId, out _), Is.True,
+                    "and the match is still here for the next pass to try again");
+            }
+            finally
+            {
+                match.Gate.Release();
+            }
+
+            IReadOnlyList<Guid> retried =
+                await _coordinator.EvictAsync(new[] { _matchId }, 1001, "abandoned");
+
+            Assert.That(retried, Is.Empty);
+            Assert.That(_coordinator.LiveMatchCount, Is.EqualTo(0));
+        }
+
+        [Test]
+        public async Task EvictingAMatchThisHostIsNotPlaying_IsQuietlyNothing()
+        {
+            IReadOnlyList<Guid> unevicted =
+                await _coordinator.EvictAsync(new[] { Guid.NewGuid() }, 1001, "abandoned");
+
+            Assert.That(unevicted, Is.Empty, "a match nobody is hosting needs no retry");
+        }
+
         [Test]
         public async Task ADisconnectedMatchIsSweptOutOfMemoryButNotOutOfTheDatabase()
         {

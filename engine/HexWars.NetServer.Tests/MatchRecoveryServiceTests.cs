@@ -1021,6 +1021,10 @@ namespace HexWars.NetServer.Tests
                 byte[] credentialHash, Guid matchId, string steamId, DateTimeOffset expiresAt,
                 DateTimeOffset now, CancellationToken ct, TimeSpan? allowTerminalWithin = null) =>
                 throw new NotSupportedException();
+
+            public Task<RetentionResult> ApplyRetentionAsync(
+                RetentionPolicy policy, DateTimeOffset now, CancellationToken ct) =>
+                throw new NotSupportedException();
         }
     }
 }

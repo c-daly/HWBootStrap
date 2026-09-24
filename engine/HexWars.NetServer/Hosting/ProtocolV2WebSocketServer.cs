@@ -148,8 +148,10 @@ namespace HexWars.NetServer.Hosting
                 return;
             }
 
-            string remoteIp =
-                context.Connection.RemoteIpAddress?.ToString() ?? SteamMatchEndpoints.UnknownCaller;
+            // The same bucketing every other per-caller control on this server uses. Counting raw
+            // addresses here would let an IPv6 client hold one socket per address inside its own prefix and
+            // spend the auth-failure budget once per address as well.
+            string remoteIp = CallerKey.From(context);
 
             // Also before the upgrade, and as a reservation rather than a count. An accepted socket costs a
             // receive buffer, a writer task and a registry entry before it has proved anything - and a
@@ -207,6 +209,13 @@ namespace HexWars.NetServer.Hosting
                 if (!await AuthenticateAsync(context, connection, coordinator, options, time, logger)
                         .ConfigureAwait(false))
                     return;
+
+                // Only after the handshake, because only then is there a match to name. Every line the pump
+                // writes for the rest of this socket carries it, which is what makes a log searchable by game
+                // rather than by guesswork about which frame belonged to whom.
+                using IDisposable? scope = connection.MatchId is Guid seated
+                    ? LogScopes.MatchScope(logger, seated)
+                    : null;
 
                 await PumpAsync(context, connection, coordinator, time, logger).ConfigureAwait(false);
             }
@@ -367,7 +376,7 @@ namespace HexWars.NetServer.Hosting
                 // The coordinator turns the failures it expects into a fail code of its own, so anything
                 // that reaches here is a bug. The player still gets an answer they can retry on, and it is
                 // not counted against them: this one is ours.
-                logger.LogError(failure, "A v2 handshake failed unexpectedly");
+                logger.LogRedactedError(failure, "A v2 handshake failed unexpectedly");
                 await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable,
                     metrics, MatchMetrics.AuthStage.Internal).ConfigureAwait(false);
                 return false;

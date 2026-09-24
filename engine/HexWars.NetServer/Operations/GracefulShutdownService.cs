@@ -220,7 +220,7 @@ namespace HexWars.NetServer.Operations
             }
             catch (Exception failure)
             {
-                _logger.LogWarning(failure, "Shutdown: {Step} failed", what);
+                _logger.LogRedactedWarning(failure, "Shutdown: {Step} failed", what);
             }
         }
     }

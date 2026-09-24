@@ -1,3 +1,4 @@
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Runtime;
@@ -151,7 +152,7 @@ namespace HexWars.NetServer.Hosting
             {
                 // A heartbeat that died silently would leave every socket on this host looking healthy
                 // forever, which is worse than the failure itself.
-                logger.LogError(failure, "The connection heartbeat stopped");
+                logger.LogRedacted(LogLevel.Error, failure, "The connection heartbeat stopped");
             }
         }
 
@@ -324,7 +325,7 @@ namespace HexWars.NetServer.Hosting
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "A credential re-check pass stopped early");
+                logger.LogRedacted(LogLevel.Warning, failure, "A credential re-check pass stopped early");
             }
         }
 
@@ -359,7 +360,7 @@ namespace HexWars.NetServer.Hosting
                 // A client that threw before it managed to return a task.
                 deadline.Dispose();
                 _outstanding.Release();
-                logger.LogWarning(failure, "A live credential could not be re-checked");
+                logger.LogRedacted(LogLevel.Warning, failure, "A live credential could not be re-checked");
                 return;
             }
 
@@ -399,7 +400,7 @@ namespace HexWars.NetServer.Hosting
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "A live credential could not be re-checked");
+                logger.LogRedacted(LogLevel.Warning, failure, "A live credential could not be re-checked");
             }
             finally
             {

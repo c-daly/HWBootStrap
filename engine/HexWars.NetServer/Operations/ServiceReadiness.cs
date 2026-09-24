@@ -130,7 +130,7 @@ namespace HexWars.NetServer.Operations
             {
                 // A fixed description: the exception carries the address it could not reach, and this
                 // string is served to whoever can call the probe.
-                return HealthCheckResult.Unhealthy("the database did not answer", failure);
+                return HealthCheckResult.Unhealthy("the database did not answer", SafeLogging.RedactedException(failure));
             }
         }
     }
@@ -166,7 +166,7 @@ namespace HexWars.NetServer.Operations
             }
             catch (Exception failure)
             {
-                return HealthCheckResult.Unhealthy("the schema could not be read", failure);
+                return HealthCheckResult.Unhealthy("the schema could not be read", SafeLogging.RedactedException(failure));
             }
         }
     }
@@ -190,7 +190,7 @@ namespace HexWars.NetServer.Operations
         {
             if (state.Error is Exception error)
                 return Task.FromResult(HealthCheckResult.Unhealthy(
-                    "the startup recovery pass could not run", error));
+                    "the startup recovery pass could not run", SafeLogging.RedactedException(error)));
 
             RecoveryReport? report = state.Report;
             if (!state.Completed || report is null)

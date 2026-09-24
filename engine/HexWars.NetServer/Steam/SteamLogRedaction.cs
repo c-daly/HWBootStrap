@@ -13,9 +13,21 @@ namespace HexWars.NetServer.Steam
     {
         const string Mask = "<redacted>";
 
+        // A named secret, in every shape a key/value pair is written in. The value alternates over a
+        // single-quoted run, a double-quoted run (both allowing backslash escapes, which is how a
+        // connection string carries a quote inside a password) and finally the bare form. The quoted
+        // alternatives have to come FIRST: matching the bare form against Password='a b;c' stops at the
+        // space and leaves the rest of the password sitting in the log.
         static readonly Regex SecretParameter = new(
-            @"\b(key|ticket|token|access_token|credential)=[^&\s<>]*",
+            @"\b(key|ticket|token|access_token|credential|password|pwd)\s*=\s*(?:'(?:[^'\\]|\\.)*'|""(?:[^""\\]|\\.)*""|[^&;\s<>]*)",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled);
+
+        // A connection string in URI form carries its password in the userinfo section rather than in
+        // a named parameter, so the rule above cannot see it. Npgsql and the platform both quote the
+        // target they failed to reach, and that target is DATABASE_URL.
+        static readonly Regex UriCredentials = new(
+            @"(?<scheme>[A-Za-z][A-Za-z0-9+.-]*://)[^\s/@:]+:[^\s/@]*@",
+            RegexOptions.CultureInvariant | RegexOptions.Compiled);
 
         // Belt and braces: even an unrecognised parameter name cannot survive, because the whole query
         // string goes. Stopping at whitespace keeps the surrounding sentence readable.
@@ -27,8 +39,22 @@ namespace HexWars.NetServer.Steam
             if (string.IsNullOrEmpty(text)) return string.Empty;
 
             var masked = SecretParameter.Replace(text, m => m.Groups[1].Value + "=" + Mask);
+            masked = UriCredentials.Replace(masked, m => m.Groups["scheme"].Value + Mask + "@");
             return QueryString.Replace(masked, "?" + Mask);
         }
+
+        /// <summary>
+        /// An exception as a log line, with everything it might be quoting taken out of it.
+        ///
+        /// It exists because passing an exception object to a logger hands the sink the whole thing -
+        /// message, inner messages and all - and the exceptions that reach the outer catch of an endpoint are
+        /// precisely the ones raised by code that was holding a secret when it failed. A transport error
+        /// quotes the URL it could not reach, which for the Steam client is the publisher key and the ticket;
+        /// a connection failure quotes its target, which is DATABASE_URL. The stack trace survives, because
+        /// it names methods rather than values and is the part actually worth reading.
+        /// </summary>
+        public static string Describe(Exception? failure) =>
+            failure is null ? string.Empty : Redact(failure.ToString());
 
         /// <summary>
         /// The secret behind the log pseudonyms. Steam account ids sit in a small, enumerable namespace,

@@ -104,9 +104,11 @@ Auto-deploy is off on both services. Every release is deliberate.
 2. **Wait for readiness.** Staging `GET /health/ready` must be 200 with all four checks Healthy. A
    `Degraded` recovery check means staging is carrying a match this build refuses; see the
    [match recovery runbook](match-recovery-runbook.md) before going further.
-3. **Run the multiplayer verification.** `scripts/verify-multiplayer.sh` (to be added) drives two clients
-   through a whole match against staging. It is the check that this build can play a game, which readiness
-   cannot tell you.
+3. **Run the multiplayer verification.** First run `scripts/verify-multiplayer.sh` against a disposable
+   local database, as described in [local multiplayer validation](local-multiplayer-validation.md).
+   It completes games through real process restarts with a scripted Steam API. Then run two real Steam
+   clients against staging through a full game and reconnect. The local script does not target staging
+   or prove real Steam authentication; readiness alone does not establish either result.
 4. **Deploy production by hand.** Trigger a manual deploy of `hexwars-match`.
 5. **Watch the handover.** Render sends SIGTERM to the old instance. It flips readiness to false, drains
    in-flight commits for up to 10 s, sends every seated socket `SERVER RESTART`, then closes them with
