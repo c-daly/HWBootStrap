@@ -3,6 +3,7 @@ using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
+using HexWars.NetServer.Hosting;
 using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
@@ -52,8 +53,10 @@ namespace HexWars.NetServer.Endpoints
 
         public static IEndpointRouteBuilder MapSteamMatchEndpoints(this IEndpointRouteBuilder app)
         {
-            app.MapPost(CreateRoute, CreateAsync).RequireRateLimiting(CreateRateLimitPolicy);
-            app.MapPost(JoinRoute, JoinAsync).RequireRateLimiting(JoinRateLimitPolicy);
+            app.MapPost(CreateRoute, CreateAsync).WithHexWarsRequestBody()
+                .RequireRateLimiting(CreateRateLimitPolicy);
+            app.MapPost(JoinRoute, JoinAsync).WithHexWarsRequestBody()
+                .RequireRateLimiting(JoinRateLimitPolicy);
             return app;
         }
 

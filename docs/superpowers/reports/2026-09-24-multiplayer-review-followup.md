@@ -4,7 +4,7 @@ This follow-up addresses all six findings in PR #21 on top of `7048f42`.
 
 | Finding | Result |
 | --- | --- |
-| Slow chunked bodies occupy public connections | Undeclared bodies on methods without consumers are rejected before reading. POST upload buffering runs after the endpoint rate limiter and has a 74-second maximum: the 16 KiB cap at Kestrel's 240 bytes/second minimum plus its five-second grace period. Real Kestrel TCP tests cover immediate GET rejection, unfinished POST expiry and a progressing upload that completes after five seconds. |
+| Slow chunked bodies occupy public connections | Undeclared bodies on routes without explicitly marked consumers are rejected before reading, including POSTs to GET-only, unknown and bodyless endpoints. Matchmaking upload buffering runs after the endpoint rate limiter and has a 74-second maximum: the 16 KiB cap at Kestrel's 240 bytes/second minimum plus its five-second grace period. Real Kestrel TCP tests cover immediate GET rejection, unfinished POST expiry and a maximum-size upload at 240 bytes/second plus completion just before the independent deadline. |
 | A database outage resembles a corrupt journal | Failed reads and journals disappearing after enumeration return exit 2 with `INCOMPLETE`, never a corrupt-journal summary. Exception details are redacted. |
 | Terminal history blocks promotion | Output states its scope. Runbooks use `verify-journals --open-only` for readiness and keep a separate audit of retained historical matches. |
 | An interrupted drain reports zero | The shutdown summary reports an unknown interrupted result unless a completed drain supplied a count. |
@@ -25,3 +25,18 @@ The subsequent full run exposed a concurrent shutdown race: the second host stop
 
 
 The first controlled-clock upload test advanced Kestrel's pre-existing timer before the request-body timer was installed. The test now records the startup timer count and waits for the additional request deadline before advancing time; the corrected real-socket suite passed all eight cases. That initial test failure is also retained.
+
+
+## PR #22 comment follow-up
+
+The next review correctly found that checking the HTTP method alone still buffered POSTs to GET-only routes. Body buffering now requires explicit `WithHexWarsRequestBody` metadata on the matched endpoint. Only the create/join matchmaking handlers opt in; rejected methods, unknown routes and bodyless POST handlers are refused immediately with the connection closed. Named rate limits still run before buffering.
+
+The original six-second test did not prove the upload boundary. It now completes the full 16 KiB body at 73.5 seconds on the controlled application clock, while the existing incomplete-body case expires at 74 seconds. A separate real-clock, real-Kestrel socket test sends all 16 KiB in 240-byte-per-second chunks over 68 seconds and verifies the entire body reaches the handler.
+
+The first real-clock test incorrectly treated Kestrel's five-second grace period as time excluded from the average. Kestrel correctly closed that below-minimum-rate upload; the failed receipt is preserved. The corrected test sends at the minimum rate from the beginning, matching Kestrel's actual rate calculation without changing the production minimum data rate or upload deadline.
+
+The maximum-size tests also reproduced a production boundary defect: Kestrel counts chunk framing against its transport limit, so exactly 16 KiB of payload received a 413. Explicit body consumers now have a separate bounded wire allowance of 96 KiB plus the five-byte terminator, enough for one-byte chunks. The decoded-content probe remains capped at 16 KiB plus one byte. Tests accept exact-size bodies with one-byte and 240-byte chunks and reject oversized chunk extensions. The first follow-up assertions also exposed a test-only response assumption (the echo response was itself chunked); the fixture now returns explicit byte content so the complete echoed payload can be checked directly. These failure receipts remain retained alongside the corrected focused run.
+
+Current comment-follow-up validation: **969 server tests passed, zero failed or skipped**, including all 16 real-Kestrel cases and the complete PostgreSQL suite. The focused subset of 15 cases passed separately before the full run. Receipts for this round are retained under `Library/Pr22Comments-20260924/`; the complete raw TRX is also retained under `/tmp/hexwars-pr22-comments-20260924/`.
+
+The final .NET 8.0.31 Release process verifier also passed all three modes on the comment-follow-up code: legacy WebSocket play/reconnect, graceful restart, and forced termination with a complete 12-command game and both terminal reconnects. The owned disposable database was stopped afterward.
