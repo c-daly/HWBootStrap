@@ -41,6 +41,11 @@ The build uses gzip with Unity's decompression fallback, so ordinary static serv
 The first browser validation found these types had been stripped, despite a successful build;
 the original build and browser log remain in `Library/GraphiteValidation/` for comparison.
 
+Portraits are requested only by visible UI, with at most one uncached render per frame. Buttons
+share 128×128 GPU textures; a 512×512 portrait is generated only when its form is inspected in the
+collection. RawImage displays the render texture directly, without a CPU pixel readback. This
+addresses the startup work identified in PR #23's review.
+
 Manual appearance travels through command, catalog, deployment and replay data. Existing automatic
 designs retain their legacy formats; explicit choices require matching client/server engine
 versions. See [appearance compatibility](windows-preview.md#appearance-data-and-compatibility).
@@ -52,7 +57,8 @@ versions. See [appearance compatibility](windows-preview.md#appearance-data-and-
   The H mark was checked on the loader, title, collection and match header.
 - Through the actual browser UI, a manual Halo choice survived a health edit, text entry,
   saving to barracks and deployment. Deployment spent two points and rendered Halo on the board.
-- Engine: 1,174 tests passed. Unity EditMode: 664 passed. Unity PlayMode: 6 passed.
+- Engine: 1,174 tests passed. Unity EditMode: 664 passed. Unity PlayMode: 7 passed, including
+  hidden-panel deferral and separate button/hero GPU texture sizes after the portrait change.
   WebGL input bridge: 1 passed. Server regressions: 953 passed with disposable PostgreSQL 16.
 - The initial server run had no Docker/database and was aborted; its failure log is retained.
   The final database-backed run passed in full. Earlier browser collider errors are also retained.

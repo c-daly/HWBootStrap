@@ -4,31 +4,31 @@
   "branch": "codex/player-polish-20260924",
   "build": {
     "result": "Succeeded",
-    "reported_size_bytes": "26080167",
-    "duration": "00:04:00.4819197",
+    "reported_size_bytes": "26081697",
+    "duration": "00:04:05.4821044",
     "errors": "0"
   },
-  "cache_key": "885e3a8b",
+  "cache_key": "ff3139db",
   "artifacts": {
     "Build/WebGL.data.unityweb": {
-      "bytes": 9309711,
-      "sha256": "885e3a8b4ba74def3faafe20acb43ca575397070bcc0fdde38d102b7dea393f7"
+      "bytes": 9310090,
+      "sha256": "ff3139db6757648b9c1d4d189f6abadcff207467b460f44d752fe756add4f98a"
     },
     "Build/WebGL.framework.js.unityweb": {
       "bytes": 80528,
-      "sha256": "71f6771a01a558dcee57d077fa142008af12b1a8d5284015b066b27674adcd2e"
+      "sha256": "396e3ceba66e49be7ea631c2827aec021c1cd5166fbd6ffbe96d18be3c96a665"
     },
     "Build/WebGL.loader.js": {
       "bytes": 48105,
-      "sha256": "302ab7e460acc3bca6dbf8a3fecb991a79434f3c6888254c66d668dcb5c88b0d"
+      "sha256": "7d6d36463acaacdf588b75974e28b59edf75ff2ca6b7fb7e4eb9e9d2fde97436"
     },
     "Build/WebGL.wasm.unityweb": {
-      "bytes": 16636656,
-      "sha256": "9771258248a21e5ee3fefa2a50d75882c0f4fea386aff77d479dcca7b3ecbf72"
+      "bytes": 16637807,
+      "sha256": "58b3e3fc9d85ca0ae74210ca8ce69214e93f94b6c39e09f25c82fd7c03f6bc26"
     },
     "index.html": {
       "bytes": 3538,
-      "sha256": "33130164ca8a80fc3312e18428f7f31c29ece5335e3fad93a9dd1e038d88232c"
+      "sha256": "ee57400b053aee0378d6a8650fa601174910d1a9d91da605f74003578bd081d3"
     },
     "hexwars-mark.svg": {
       "bytes": 235,
@@ -42,7 +42,7 @@
   "validation": {
     "engine_tests": 1174,
     "unity_editmode": 664,
-    "unity_playmode": 6,
+    "unity_playmode": 7,
     "webgl_input_bridge": 1,
     "server_tests": 953,
     "server_initial_run": "Aborted after fixtures failed without Docker/PostgreSQL; full rerun passed with disposable PostgreSQL 16."
@@ -56,10 +56,17 @@
     "Halo deployed at 2-point cost with same mesh"
   ],
   "screenshots": {
-    "webgl-battlefield.png": "a9b4c3fb9f441ecbb2a1659870803236b10b45305f9078dd773a4915a98e7336",
-    "webgl-collection.png": "0799f91c8d42750c777995ff3d8a66334d1a34fd62691ff504e870241f196f0f",
-    "webgl-designer.png": "d9892747ddeec71bf77f7835394dc8a4665034f467c0d4c13db89e3fb0606463",
+    "webgl-battlefield.png": "b7dbb743db8231cc4b419ace9fb84f3f151edf53e89a242dd052997bfbffe8fb",
+    "webgl-collection-halo.png": "7b14850e8e6268cf542a421c1e9093f4eb828607e912342f1e02c195335ea9c6",
+    "webgl-collection.png": "0c8216f58274723d26d9afab99279070b1e625a788698aa4240a643d15f987f7",
+    "webgl-designer.png": "110f6486f144d948e58c8e73b3ecf864a2e434712d9328d90e51bb27783f9b6b",
     "webgl-loading.png": "7fb790651162e30a1b61c52512dd45e357a649438f62cf19c1442f5e99475bac",
-    "webgl-title.png": "5f3177521199f28f43c5ce22a2edb206a8893325ab251caeb23711d2a980bb5c"
+    "webgl-title.png": "2cd14ae95ac0c5e5ad6a880e0d9cb82fd4b200cd43344109a832efab14787552"
+  },
+  "review_followup": {
+    "pr": 23,
+    "finding": "Hidden designer generated eight 512px portraits synchronously at startup.",
+    "resolution": "Visible UI requests GPU render textures lazily, at most one uncached render per frame; 128px button textures and 512px collection portraits. No CPU pixel readback.",
+    "test": "HiddenPortraitsWaitForVisibilityAndUseSizedGpuTextures passed; full PlayMode suite 7/7."
   }
 }

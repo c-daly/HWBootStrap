@@ -5,11 +5,39 @@ using HexWars.Engine;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
+using UnityEngine.UI;
+using UnityEngine.Rendering;
 
 namespace HexWars.Presentation.PlayModeTests
 {
     public class GraphiteDesignerSmokeTests
     {
+        [UnityTest]
+        public IEnumerator HiddenPortraitsWaitForVisibilityAndUseSizedGpuTextures()
+        {
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null)
+                Assert.Ignore("Portrait rendering requires a graphics device.");
+            var panel = new GameObject("Hidden portrait panel");
+            panel.SetActive(false);
+            var button = GraphiteWorkshop.Portrait(panel.transform, 6, 0, 0, 43);
+            var hero = GraphiteWorkshop.Portrait(panel.transform, 6, 0, 0, 365);
+            try
+            {
+                yield return null;
+                yield return null;
+                Assert.That(button.texture, Is.Null, "Hidden buttons must not trigger portrait rendering.");
+                Assert.That(hero.texture, Is.Null);
+                panel.SetActive(true);
+                for (int frame = 0; frame < 20 && (button.texture == null || hero.texture == null); frame++)
+                    yield return null;
+                Assert.That(button.texture, Is.TypeOf<RenderTexture>(), "UI must use GPU textures without a readback.");
+                Assert.That(hero.texture, Is.TypeOf<RenderTexture>());
+                Assert.That(button.texture.width, Is.EqualTo(128));
+                Assert.That(hero.texture.width, Is.EqualTo(512));
+            }
+            finally { Object.Destroy(panel); }
+        }
+
         [UnityTest]
         public IEnumerator ManualChoiceSurvivesStatEditCreationAndBoardRendering()
         {

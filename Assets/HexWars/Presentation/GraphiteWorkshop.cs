@@ -57,12 +57,13 @@ namespace HexWars.Presentation
         internal static RawImage Portrait(Transform parent,int index,float x,float y,float size)
         {
             var go=new GameObject("Portrait "+UnitArt.Names[index]);go.transform.SetParent(parent,false);
-            var image=go.AddComponent<RawImage>();image.raycastTarget=false;image.texture=GraphitePieces.Thumbnail(index);
+            var image=go.AddComponent<RawImage>();image.raycastTarget=false;
+            go.AddComponent<UnitPortrait>().SetArt(index, size > 128);
             UiKit.SetRect(image.rectTransform,x,y,size,size);return image;
         }
         void Select(int i)
         {
-            _hero.texture=GraphitePieces.Thumbnail(i);_name.text=UnitArt.Names[i];_description.text=Descriptions[i];
+            _hero.GetComponent<UnitPortrait>().SetArt(i, true);_name.text=UnitArt.Names[i];_description.text=Descriptions[i];
             for(int j=0;j<8;j++) UiKit.SetToggled(_choices[j],i==j);
         }
         void OnDestroy(){IsOpen=false;if(_canvas!=null)Destroy(_canvas);}

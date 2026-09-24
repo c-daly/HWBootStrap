@@ -9,7 +9,8 @@ namespace HexWars.Presentation
     public static class GraphitePieces
     {
         static readonly Mesh[] Bodies = new Mesh[8];
-        static readonly Texture2D[] Thumbnails = new Texture2D[8];
+        static readonly RenderTexture[,] Portraits = new RenderTexture[2, 8];
+        static int _lastPortraitFrame = -1;
         static Mesh _foot, _rim, _brokenRim;
         static Material _graphite, _base, _mint, _amber;
 
@@ -147,11 +148,22 @@ namespace HexWars.Presentation
         { var m=new Mesh();m.SetVertices(v);m.SetTriangles(t,0);m.RecalculateNormals();m.RecalculateBounds();return m; }
         static void Dispose(Object o) { if(Application.isPlaying) Object.Destroy(o); else Object.DestroyImmediate(o); }
 
-        /// <summary>Render the same mesh/material as the board; no separate art that can drift.</summary>
-        public static Texture2D Thumbnail(int index)
+        /// <summary>Visible UI requests portraits lazily; at most one uncached portrait renders per frame.</summary>
+        public static bool TryGetPortrait(int index, bool detailed, out Texture portrait)
         {
-            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null) return null; // headless hosts have no portraits
-            if(Thumbnails[index]!=null) return Thumbnails[index];
+            int tier = detailed ? 1 : 0;
+            portrait = Portraits[tier, index];
+            if (portrait != null) return true;
+            if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null || _lastPortraitFrame == Time.frameCount)
+                return false;
+            _lastPortraitFrame = Time.frameCount;
+            portrait = Portraits[tier, index] = RenderPortrait(index, detailed ? 512 : 128);
+            return true;
+        }
+
+        // Keep the rendered image on the GPU: RawImage can use it directly without ReadPixels.
+        static RenderTexture RenderPortrait(int index, int size)
+        {
             var root = Build(UnitArt.Ids[index], PlayerId.Player0, null);
             root.transform.position = new Vector3(10000,10000,10000);
             foreach(var t in root.GetComponentsInChildren<Transform>()) t.gameObject.layer=31;
@@ -163,14 +175,24 @@ namespace HexWars.Presentation
             var center=root.transform.position+Vector3.up*.59f;
             go.transform.position=center+new Vector3(2.5f,2.3f,-4);
             go.transform.LookAt(center);
-            var rt=RenderTexture.GetTemporary(512,512,24,RenderTextureFormat.ARGB32);
+            var rt = new RenderTexture(size, size, 24, RenderTextureFormat.ARGB32)
+            { name = UnitArt.Names[index] + " portrait " + size };
             var previous=RenderTexture.active;
-            camera.targetTexture=rt;camera.Render();RenderTexture.active=rt;
-            var texture=new Texture2D(512,512,TextureFormat.RGBA32,false) { name=UnitArt.Names[index]+" portrait" };
-            texture.ReadPixels(new Rect(0,0,512,512),0,0);texture.Apply();
-            RenderTexture.active=previous;camera.targetTexture=null;RenderTexture.ReleaseTemporary(rt);
-            root.SetActive(false); // Destroy is deferred: the next portrait must not see this piece.
-            Dispose(root);Dispose(go);return Thumbnails[index]=texture;
+            try
+            {
+                camera.targetTexture = rt;
+                camera.Render();
+                return rt;
+            }
+            catch { Dispose(rt); throw; }
+            finally
+            {
+                RenderTexture.active = previous;
+                camera.targetTexture = null;
+                root.SetActive(false);
+                Dispose(root);
+                Dispose(go);
+            }
         }
     }
 }
