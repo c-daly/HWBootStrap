@@ -19,7 +19,72 @@ namespace HexWars.Engine.Tests
         {
             TrainingScenario scenario = LoadTemporary(ValidTacticalV3Json().ToJsonString());
 
-            Assert.That(scenario.BuildTacticalV3().Validate(), Is.Empty);
+            TacticalV3Config config = scenario.BuildTacticalV3();
+            Assert.That(config.Validate(), Is.Empty);
+            Assert.That(config.Objective, Is.Null,
+                "schema-v1 scenarios without objective remain legacy annihilation");
+        }
+
+        [Test]
+        public void ReachCellObjective_IsOptionalStrictAndBuildsExactRuntimeConfig()
+        {
+            JsonObject document = ValidTacticalV3Json();
+            ((JsonObject)document["tactical_v3"]!)["objective"] = ValidReachObjective();
+            // The combat fixture contains immobile artillery. A reach catalog must support
+            // movement for every template because starting armies sample with replacement.
+            JsonArray templates = document["tactical_v3"]!["templates"]!.AsArray();
+            for (int i = templates.Count - 1; i >= 0; i--)
+                if (templates[i]!["stats"]!["movement"]!.GetValue<int>() == 0)
+                    templates.RemoveAt(i);
+
+            TacticalV3Config config = LoadTemporary(document.ToJsonString()).BuildTacticalV3();
+
+            Assert.Multiple(() =>
+            {
+                Assert.That(config.Objective, Is.Not.Null);
+                Assert.That(config.Objective!.Kind, Is.EqualTo("reach_cell"));
+                Assert.That(config.Objective.TargetPolicy,
+                    Is.EqualTo("seeded_farthest_reachable_unoccupied_v1"));
+                Assert.That(config.Objective.Radius, Is.Zero);
+                Assert.That(config.Match.Game.WinConditions, Is.EqualTo(WinBy.Annihilation));
+                Assert.That(config.Validate(), Is.Empty);
+            });
+        }
+
+        [TestCase("missing_kind")]
+        [TestCase("missing_policy")]
+        [TestCase("missing_radius")]
+        [TestCase("wrong_kind")]
+        [TestCase("wrong_policy")]
+        [TestCase("nonzero_radius")]
+        [TestCase("unknown_field")]
+        public void ReachCellObjective_RejectsMalformedWireValues(string mutation)
+        {
+            JsonObject document = ValidTacticalV3Json();
+            JsonObject objective = ValidReachObjective();
+            ((JsonObject)document["tactical_v3"]!)["objective"] = objective;
+            switch (mutation)
+            {
+                case "missing_kind": objective.Remove("kind"); break;
+                case "missing_policy": objective.Remove("target_policy"); break;
+                case "missing_radius": objective.Remove("radius"); break;
+                case "wrong_kind": objective["kind"] = "capture_flag"; break;
+                case "wrong_policy": objective["target_policy"] = "random"; break;
+                case "nonzero_radius": objective["radius"] = 1; break;
+                case "unknown_field": objective["future"] = true; break;
+                default: throw new AssertionException("unknown mutation " + mutation);
+            }
+
+            AssertRejected(document);
+        }
+
+        [Test]
+        public void ReachCellScenarioRejectsAMixedCatalogContainingImmobileArtillery()
+        {
+            JsonObject document = ValidTacticalV3Json();
+            document["tactical_v3"]!["objective"] = ValidReachObjective();
+            var failure = Assert.Throws<InvalidDataException>(() => LoadTemporary(document.ToJsonString()));
+            Assert.That(failure!.Message, Does.Contain("movement must be positive"));
         }
 
         [Test]
@@ -179,6 +244,7 @@ namespace HexWars.Engine.Tests
         [TestCase("template")]
         [TestCase("profile")]
         [TestCase("distribution")]
+        [TestCase("objective")]
         public void TacticalV3Scenario_RejectsUnknownFieldsAtEveryOwnedNestingLevel(string level)
         {
             JsonObject scenario = ValidTacticalV3Json();
@@ -192,6 +258,10 @@ namespace HexWars.Engine.Tests
                 case "template": ((JsonObject)((JsonArray)tacticalV3["templates"]!)[0]!)["future_template"] = true; break;
                 case "profile": ((JsonObject)((JsonArray)tacticalV3["start_profiles"]!)[0]!)["future_profile"] = true; break;
                 case "distribution": ((JsonObject)((JsonArray)tacticalV3["start_distribution"]!)[0]!)["future_distribution"] = true; break;
+                case "objective":
+                    tacticalV3["objective"] = ValidReachObjective();
+                    ((JsonObject)tacticalV3["objective"]!)["future_objective"] = true;
+                    break;
                 default: throw new AssertionException("unknown level " + level);
             }
 
@@ -505,6 +575,13 @@ namespace HexWars.Engine.Tests
                 }
                 """)!;
         }
+
+        private static JsonObject ValidReachObjective() => new JsonObject
+        {
+            ["kind"] = "reach_cell",
+            ["target_policy"] = "seeded_farthest_reachable_unoccupied_v1",
+            ["radius"] = 0,
+        };
 
         private static int[] CapacityValues(TacticalV3CapacityProfile capacity) => new[]
         {

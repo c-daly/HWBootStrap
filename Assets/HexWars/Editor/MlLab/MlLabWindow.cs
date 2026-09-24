@@ -1122,6 +1122,13 @@ namespace HexWars.Presentation.EditorTools.MlLab
                                 MaxRelations = scenario.TacticalV3.Capacity.MaxRelations,
                                 MaxCandidates = scenario.TacticalV3.Capacity.MaxCandidates,
                             },
+                        Objective = scenario.TacticalV3.Objective == null ? null
+                            : new TrainingTacticalV3ObjectiveConfig
+                            {
+                                Kind = scenario.TacticalV3.Objective.Kind,
+                                TargetPolicy = scenario.TacticalV3.Objective.TargetPolicy,
+                                Radius = scenario.TacticalV3.Objective.Radius,
+                            },
                         StartProfiles = (scenario.TacticalV3.StartProfiles ??
                                 new List<MlTrainingTacticalV2StartProfile>())
                             .Select(item => new TacticalV2StartProfile(item.Id,

@@ -1221,6 +1221,187 @@
           }
         ]
       }
+    },
+    {
+      "schema_version": 1,
+      "id": "tactical-v3-reach-cell-v1",
+      "name": "Reach Beacon 1v1",
+      "environment": "tactical-v3",
+      "board": {
+        "width": 4,
+        "height": 4,
+        "max_elevation": 1,
+        "zone_depth": 1,
+        "flat_chance": 1.0,
+        "plains_weight": 1,
+        "forest_weight": 0,
+        "rough_weight": 0,
+        "water_weight": 0
+      },
+      "rules": {
+        "actions_per_turn": 0,
+        "round_cap": 8,
+        "starting_points": 0,
+        "fog_of_war": false,
+        "biomes_enabled": false,
+        "bounty_rate": 0.5,
+        "deploy_cost_multiplier": 1.0,
+        "generator_cost": 2,
+        "generator_output": 1,
+        "generator_health": 3
+      },
+      "episode": {
+        "max_steps": 64
+      },
+      "reward": {
+        "terminal_win": 1.0,
+        "terminal_non_win": -1.0,
+        "material_adjustment_bound": 0.2,
+        "time_pressure_bound": 0.05,
+        "points_weight": 0.5
+      },
+      "tactical_v3": {
+        "starting_unit_count": 3,
+        "max_controllable_units": 3,
+        "placement_policy": "profiled-seeded-v1",
+        "objective": {
+          "kind": "reach_cell",
+          "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+          "radius": 0
+        },
+        "capacity": {
+          "max_cells": 512,
+          "max_units": 64,
+          "max_templates": 32,
+          "max_capability_definitions": 128,
+          "max_capability_allocations": 2048,
+          "max_rules": 128,
+          "max_memory_records": 64,
+          "max_relations": 65536,
+          "max_candidates": 32768
+        },
+        "templates": [
+          {
+            "id": "closer-v1",
+            "name": "Closer",
+            "stats": {
+              "health": 3,
+              "damage": 3,
+              "defense": 0,
+              "movement": 1,
+              "vertical_movement": 0,
+              "range": 1,
+              "range_arc": 1,
+              "vision": 4,
+              "vision_arc": 1
+            }
+          }
+        ],
+        "start_profiles": [
+          {
+            "id": "standard-3v3",
+            "learner_units": 3,
+            "opponent_units": 3,
+            "separation": "legacy-mirrored"
+          },
+          {
+            "id": "conversion-3v1-near",
+            "learner_units": 3,
+            "opponent_units": 1,
+            "separation": "near"
+          },
+          {
+            "id": "conversion-3v1-medium",
+            "learner_units": 3,
+            "opponent_units": 1,
+            "separation": "medium"
+          },
+          {
+            "id": "conversion-3v1-far",
+            "learner_units": 3,
+            "opponent_units": 1,
+            "separation": "far"
+          },
+          {
+            "id": "conversion-2v1-near",
+            "learner_units": 2,
+            "opponent_units": 1,
+            "separation": "near"
+          },
+          {
+            "id": "conversion-2v1-medium",
+            "learner_units": 2,
+            "opponent_units": 1,
+            "separation": "medium"
+          },
+          {
+            "id": "conversion-2v1-far",
+            "learner_units": 2,
+            "opponent_units": 1,
+            "separation": "far"
+          },
+          {
+            "id": "conversion-1v1-near",
+            "learner_units": 1,
+            "opponent_units": 1,
+            "separation": "near"
+          },
+          {
+            "id": "conversion-1v1-medium",
+            "learner_units": 1,
+            "opponent_units": 1,
+            "separation": "medium"
+          },
+          {
+            "id": "conversion-1v1-far",
+            "learner_units": 1,
+            "opponent_units": 1,
+            "separation": "far"
+          }
+        ],
+        "start_distribution": [
+          {
+            "profile_id": "standard-3v3",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-3v1-near",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-3v1-medium",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-3v1-far",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-2v1-near",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-2v1-medium",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-2v1-far",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-1v1-near",
+            "basis_points": 10000
+          },
+          {
+            "profile_id": "conversion-1v1-medium",
+            "basis_points": 0
+          },
+          {
+            "profile_id": "conversion-1v1-far",
+            "basis_points": 0
+          }
+        ]
+      }
     }
   ]
 }

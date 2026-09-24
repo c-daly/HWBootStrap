@@ -169,6 +169,19 @@ namespace HexWars.Engine.Rl
 
     public sealed class TacticalV3CandidateProjector : ICandidateProjector
     {
+        private readonly Func<GameState, PlayerId, Command, bool>? _episodeTerminal;
+
+        public TacticalV3CandidateProjector()
+        {
+        }
+
+        internal TacticalV3CandidateProjector(
+            Func<GameState, PlayerId, Command, bool> episodeTerminal)
+        {
+            _episodeTerminal = episodeTerminal ??
+                throw new ArgumentNullException(nameof(episodeTerminal));
+        }
+
         public TacticalV3ProjectedDelta Project(
             GameState state, PlayerId seat, Command command, TacticalV3Observation observation)
         {
@@ -235,7 +248,8 @@ namespace HexWars.Engine.Rl
                 horizontalMovementSpent, verticalMovementSpent,
                 targetHpDelta, damage, isLethal, bountyDelta,
                 after.Player(seat).Points - state.Player(seat).Points,
-                after.Round - state.Round, after.IsGameOver);
+                after.Round - state.Round,
+                after.IsGameOver || (_episodeTerminal?.Invoke(after, seat, command) ?? false));
         }
 
         private static (int Horizontal, int Vertical) MovementSpend(GameState state, int unitId) =>
@@ -261,11 +275,12 @@ namespace HexWars.Engine.Rl
         private readonly ISeatObservationSource _observations;
         private readonly ICandidateProjector _projector;
         private readonly TacticalV3CapacityProfile _capacity;
+        private readonly Func<GameState, PlayerId, HexCoord?>? _moveTarget;
 
         public TacticalV3LegalCandidateSource(
             ISeatObservationSource observations,
             TacticalV3CapacityProfile capacity)
-            : this(observations, new TacticalV3CandidateProjector(), capacity)
+            : this(observations, new TacticalV3CandidateProjector(), capacity, null)
         {
         }
 
@@ -273,10 +288,33 @@ namespace HexWars.Engine.Rl
             ISeatObservationSource observations,
             ICandidateProjector projector,
             TacticalV3CapacityProfile capacity)
+            : this(observations, projector, capacity, null)
+        {
+        }
+
+        internal TacticalV3LegalCandidateSource(
+            ISeatObservationSource observations,
+            TacticalV3CapacityProfile capacity,
+            Func<GameState, PlayerId, HexCoord?> moveTarget,
+            Func<GameState, PlayerId, Command, bool> episodeTerminal)
+            : this(
+                observations,
+                new TacticalV3CandidateProjector(episodeTerminal),
+                capacity,
+                moveTarget)
+        {
+        }
+
+        private TacticalV3LegalCandidateSource(
+            ISeatObservationSource observations,
+            ICandidateProjector projector,
+            TacticalV3CapacityProfile capacity,
+            Func<GameState, PlayerId, HexCoord?>? moveTarget)
         {
             _observations = observations ?? throw new ArgumentNullException(nameof(observations));
             _projector = projector ?? throw new ArgumentNullException(nameof(projector));
             _capacity = capacity ?? throw new ArgumentNullException(nameof(capacity));
+            _moveTarget = moveTarget;
         }
 
         public TacticalV3DecisionFrame CreateFrame(
@@ -292,6 +330,10 @@ namespace HexWars.Engine.Rl
 
             TacticalV3Observation observation = _observations.Observe(state, seat, memory);
             CandidateReferences references = CandidateReferences.For(state, seat, observation);
+            HexCoord? targetCell = _moveTarget?.Invoke(state, seat);
+            TacticalV3TokenRef? moveTarget = targetCell.HasValue
+                ? references.Cell(targetCell.Value)
+                : (TacticalV3TokenRef?)null;
             List<Command> commands = new List<Command>(LegalMoves.For(state));
             foreach (Command command in commands)
                 RequireSupported(command);
@@ -307,7 +349,7 @@ namespace HexWars.Engine.Rl
             {
                 Command command = commands[index];
                 candidates.Add(ToCandidate(
-                    index, decisionId, command, references,
+                    index, decisionId, command, references, moveTarget,
                     _projector.Project(state, seat, command, observation)));
             }
 
@@ -320,6 +362,7 @@ namespace HexWars.Engine.Rl
             long decisionId,
             Command command,
             CandidateReferences references,
+            TacticalV3TokenRef? moveTarget,
             TacticalV3ProjectedDelta projection)
         {
             if (command is AttackUnit attack)
@@ -330,7 +373,8 @@ namespace HexWars.Engine.Rl
             if (command is MoveUnit move)
                 return new TacticalV3Candidate(
                     candidateId, decisionId, TacticalV3CandidateKind.Move,
-                    references.Unit(move.UnitId), null, null, references.Cell(move.Dest), projection);
+                    references.Unit(move.UnitId), moveTarget, null,
+                    references.Cell(move.Dest), projection);
             if (command is DeployUnit deploy)
                 return new TacticalV3Candidate(
                     candidateId, decisionId, TacticalV3CandidateKind.Deploy,

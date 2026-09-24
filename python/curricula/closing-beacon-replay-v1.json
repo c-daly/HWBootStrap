@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "source_run": "closing-mirror-teacher-v2-seed232-model",
+  "primary_task": "combat",
+  "trainer": {
+    "seed": 236, "batch_size": 256, "learning_rate": 0.0003,
+    "max_epochs": 50, "patience_epochs": 5,
+    "gradient_clip_norm": 1.0, "device": "cuda"
+  },
+  "micro_batch_size": 32,
+  "tasks": [
+    {
+      "name": "combat", "weight": 3,
+      "collections": ["closing-mirror-teacher-v2-seed232"], "opponent": "greedy",
+      "screen": {
+        "seed_start": 92000000, "pairs": 2,
+        "profiles": ["standard-3v3", "conversion-3v1-near", "conversion-3v1-medium", "conversion-3v1-far", "conversion-2v1-near", "conversion-2v1-medium", "conversion-2v1-far", "conversion-1v1-near", "conversion-1v1-medium", "conversion-1v1-far"]
+      },
+      "confirmation": {
+        "seed_start": 94000000, "pairs": 10,
+        "profiles": ["standard-3v3", "conversion-3v1-near", "conversion-3v1-medium", "conversion-3v1-far", "conversion-2v1-near", "conversion-2v1-medium", "conversion-2v1-far", "conversion-1v1-near", "conversion-1v1-medium", "conversion-1v1-far"]
+      }
+    },
+    {
+      "name": "beacon", "weight": 1,
+      "collections": ["reach-cell-passive-seed234-pilot-v1", "reach-cell-passive-seed235-round2-v1"], "opponent": "passive",
+      "screen": {"seed_start": 91000000, "pairs": 20, "profiles": ["conversion-1v1-near"]},
+      "confirmation": {"seed_start": 95000000, "pairs": 100, "profiles": ["conversion-1v1-near"]}
+    }
+  ]
+}

@@ -306,12 +306,20 @@ def _string(value: object, field: str) -> str:
     return value
 
 
-def _fixture_logits_and_actions(model: TacticalV3Policy, examples: tuple[StructuredExample, ...]) -> tuple[tuple[tuple[float, ...], ...], tuple[CandidateIdentity, ...]]:
+def _fixture_logits_and_actions(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+    identity: TacticalV3SemanticIdentity,
+) -> tuple[tuple[tuple[float, ...], ...], tuple[CandidateIdentity, ...]]:
     if not examples:
         raise ValueError("inference fixture must contain examples")
     model.eval()
     with torch.no_grad():
-        batch = collate_examples(examples, model.config.horizon_turns)
+        batch = collate_examples(
+            examples,
+            model.config.horizon_turns,
+            identity=identity,
+        )
         output = model(batch)
     logits: list[tuple[float, ...]] = []
     actions: list[CandidateIdentity] = []
@@ -328,8 +336,12 @@ def _fixture_logits_and_actions(model: TacticalV3Policy, examples: tuple[Structu
     return tuple(logits), tuple(actions)
 
 
-def _fixture_wire(model: TacticalV3Policy, examples: tuple[StructuredExample, ...]) -> dict[str, object]:
-    logits, actions = _fixture_logits_and_actions(model, examples)
+def _fixture_wire(
+    model: TacticalV3Policy,
+    examples: tuple[StructuredExample, ...],
+    identity: TacticalV3SemanticIdentity,
+) -> dict[str, object]:
+    logits, actions = _fixture_logits_and_actions(model, examples, identity)
     return {
         "examples": [_example_wire(example) for example in examples],
         "valid_candidate_logits": [list(row) for row in logits],
@@ -465,7 +477,11 @@ def save_structured_checkpoint(path: Path, model: TacticalV3Policy, metadata: St
         "format_version": _FORMAT_VERSION,
         "metadata": _metadata_wire(metadata),
         "state_dict": state,
-        "inference_fixture": _fixture_wire(cpu_model, tuple(fixture_examples)),
+        "inference_fixture": _fixture_wire(
+            cpu_model,
+            tuple(fixture_examples),
+            metadata.identity,
+        ),
     }
     return _write_checkpoint(Path(path), payload)
 
@@ -499,7 +515,11 @@ def load_structured_checkpoint(path: Path, expected_encoding_hash: str, expected
     model.load_state_dict(state, strict=True)
     model.eval()
     fixture = _fixture_from_wire(raw["inference_fixture"], metadata.identity)
-    actual_logits, actual_actions = _fixture_logits_and_actions(model, fixture.examples)
+    actual_logits, actual_actions = _fixture_logits_and_actions(
+        model,
+        fixture.examples,
+        metadata.identity,
+    )
     if actual_logits != fixture.valid_candidate_logits or actual_actions != fixture.selected_identities:
         raise ValueError("checkpoint inference fixture does not replay exactly")
     return LoadedStructuredPolicy(model, metadata, fixture)
@@ -670,7 +690,7 @@ def _resume_metadata_wire(
         raise TypeError("training state must be TrainingCheckpointState")
     if type(identity) is not TacticalV3SemanticIdentity:
         raise TypeError("training resume identity must be tactical-v3 identity")
-    return {
+    metadata = {
         "identity": semantic_identity_wire(identity),
         "model_config": _dataclass_wire(state.model_config),
         "objective_config": _dataclass_wire(state.objective_config),
@@ -682,6 +702,11 @@ def _resume_metadata_wire(
             "resume source_model_state_sha256",
         ),
     }
+    if state.curriculum_sha256 is not None:
+        metadata["curriculum_sha256"] = _sha256(
+            state.curriculum_sha256, "resume curriculum_sha256",
+        )
+    return metadata
 
 
 def _resume_payload(
@@ -753,7 +778,7 @@ def _resume_payload(
     }
     state_value["state_sha256"] = _checkpoint_tree_sha256(state_value)
     payload = {
-        "format_version": 1,
+        "format_version": 2 if state.curriculum_sha256 is not None else 1,
         "metadata": _resume_metadata_wire(
             state,
             identity=identity,
@@ -795,6 +820,7 @@ def save_training_resume_checkpoint(
             expected_identity=identity,
             expected_corpus_sha256=corpus_sha256,
             expected_source_model_state_sha256=source_model_state_sha256,
+            expected_curriculum_sha256=state.curriculum_sha256,
         )
         os.replace(staged, path)
         _sync_directory(path.parent)
@@ -877,14 +903,27 @@ def load_training_resume_checkpoint(
     expected_identity: TacticalV3SemanticIdentity,
     expected_corpus_sha256: str,
     expected_source_model_state_sha256: str,
+    expected_curriculum_sha256: str | None = None,
 ) -> TrainingCheckpointState:
     """Authenticate a weights-only exact-resume checkpoint."""
 
     raw = torch.load(Path(path), map_location="cpu", weights_only=True)
     if not isinstance(raw, Mapping) or set(raw) != _RESUME_TOP_LEVEL_FIELDS:
         raise ValueError("training resume checkpoint inventory is invalid")
-    if _int(raw["format_version"], "resume format_version") != 1:
+    version = _int(raw["format_version"], "resume format_version")
+    if version not in (1, 2):
         raise ValueError("training resume checkpoint format is unsupported")
+    metadata = raw["metadata"]
+    curriculum_sha256 = None
+    if version == 2:
+        metadata = dict(_plain_mapping(
+            metadata, _RESUME_METADATA_FIELDS | {"curriculum_sha256"}, "resume metadata",
+        ))
+        curriculum_sha256 = _sha256(metadata.pop("curriculum_sha256"), "resume curriculum_sha256")
+    if expected_curriculum_sha256 is not None:
+        _sha256(expected_curriculum_sha256, "expected resume curriculum_sha256")
+    if curriculum_sha256 != expected_curriculum_sha256:
+        raise ValueError("training resume curriculum changed")
     (
         identity,
         model_config,
@@ -893,7 +932,7 @@ def load_training_resume_checkpoint(
         micro_batch_size,
         corpus_sha256,
         source_model_state_sha256,
-    ) = _resume_configs(raw["metadata"])
+    ) = _resume_configs(metadata)
     if identity != expected_identity:
         raise ValueError("training resume identity changed")
     if corpus_sha256 != _sha256(
@@ -1048,6 +1087,7 @@ def load_training_resume_checkpoint(
             for value in cuda_values
         ),
         uses_external_batch_provider=uses_provider,
+        curriculum_sha256=curriculum_sha256,
     )
 
 

@@ -142,13 +142,25 @@ def load_structured_controller(
 def select_candidate(
     controller: StructuredController,
     view: TacticalV3View,
+    *,
+    target_identity: TacticalV3SemanticIdentity | None = None,
 ) -> CandidateIdentity:
     """Return the exact decision/candidate identity selected from this view's legal rows."""
     if type(controller) is not StructuredController:
         raise ValueError("controller must be StructuredController")
     if type(view) is not TacticalV3View:
         raise ValueError("view must be TacticalV3View")
-    batch = collate_decisions((view.decision,), controller.policy.config.horizon_turns)
+    identity = controller.identity if target_identity is None else target_identity
+    if type(identity) is not TacticalV3SemanticIdentity:
+        raise ValueError("target identity must be TacticalV3SemanticIdentity")
+    for field in ("contract_version", "environment_kind", "encoding_hash", "capacity_hash"):
+        if getattr(identity, field) != getattr(controller.identity, field):
+            raise ValueError(f"structured controller target {field} is incompatible")
+    batch = collate_decisions(
+        (view.decision,),
+        controller.policy.config.horizon_turns,
+        identity=identity,
+    )
     with torch.inference_mode():
         selected, = controller.policy.select(batch)
     return selected

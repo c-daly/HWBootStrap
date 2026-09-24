@@ -225,6 +225,7 @@ def test_builtin_library_has_expected_ordered_templates() -> None:
         "tactical-v3-standard",
         "tactical-v3-full-roster",
         "tactical-v3-close-static-v1",
+        "tactical-v3-reach-cell-v1",
     ]
 
 
@@ -259,6 +260,7 @@ def test_builtin_library_presets_have_exact_horizons_and_geometry() -> None:
         ("tactical-v3-standard", 13, 9, 3, 100, 808),
         ("tactical-v3-full-roster", 13, 9, 3, 100, 808),
         ("tactical-v3-close-static-v1", 4, 4, 1, 8, 64),
+        ("tactical-v3-reach-cell-v1", 4, 4, 1, 8, 64),
     ]
 
 
@@ -436,6 +438,43 @@ def test_tactical_v3_close_static_horizon_is_the_shortest_schema_valid_budget() 
     document["episode"]["max_steps"] -= 1
 
     with pytest.raises(ValueError, match=r"minimum required is 64"):
+        validate_scenario_document(document)
+
+
+def test_tactical_v3_accepts_optional_reach_cell_objective_without_changing_legacy() -> None:
+    legacy = tactical_v3_document("tactical-v3-close-static-v1")
+    assert "objective" not in legacy["tactical_v3"]
+    validate_scenario_document(legacy)
+
+    reach = copy.deepcopy(legacy)
+    reach["tactical_v3"]["objective"] = {
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    }
+    validate_scenario_document(reach)
+
+
+@pytest.mark.parametrize(
+    "field,value,match",
+    (
+        ("kind", "capture_flag", "objective.kind must be 'reach_cell'"),
+        ("target_policy", "random", "objective.target_policy must be"),
+        ("radius", 1, "objective.radius must be 0"),
+    ),
+)
+def test_tactical_v3_rejects_unsupported_reach_objective(
+    field: str, value: object, match: str,
+) -> None:
+    document = tactical_v3_document("tactical-v3-close-static-v1")
+    document["tactical_v3"]["objective"] = {
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    }
+    document["tactical_v3"]["objective"][field] = value
+
+    with pytest.raises(ValueError, match=match):
         validate_scenario_document(document)
 
 
