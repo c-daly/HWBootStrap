@@ -1,6 +1,7 @@
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
@@ -42,6 +43,7 @@ namespace HexWars.NetServer.Tests
         FakeTimeProvider _clock = null!;
         RecordingConnectionSink _sink = null!;
         MatchCredentialService _credentials = null!;
+        MatchMetrics _metrics = null!;
         DurableMatchCoordinator _coordinator = null!;
         Guid _matchId;
         string _credential0 = null!;
@@ -69,19 +71,38 @@ namespace HexWars.NetServer.Tests
             _credential0 = (await _credentials.IssueAsync(_matchId, Seat0Steam, Ct)).Credential;
             _credential1 = (await _credentials.IssueAsync(_matchId, Seat1Steam, Ct)).Credential;
 
-            _coordinator = NewCoordinator();
+            _metrics = new MatchMetrics();
+            _coordinator = NewCoordinator(_metrics);
         }
 
         /// <summary>A coordinator over the same store with no projections of its own: what a restart looks
         /// like from the database, which is the only place a restart is visible.</summary>
-        DurableMatchCoordinator NewCoordinator() => new(
+        DurableMatchCoordinator NewCoordinator(MatchMetrics? metrics = null) => new(
             _faults,
             _credentials,
             new JournalLiveMatchLoader(_faults),
             _sink,
             Options.Create(_options),
             _clock,
+            metrics ?? new MatchMetrics(),
             NullLogger<DurableMatchCoordinator>.Instance);
+
+        /// <summary>The database-failure tags THIS coordinator has recorded. A restarted one gets a meter of
+        /// its own, so what is read here is only ever the host the assertion is about.</summary>
+        IReadOnlyDictionary<string, long> DbFailures() => _metrics.Snapshot().DatabaseFailuresByOp;
+
+        /// <summary>Asserts that the completion counter moved by exactly <paramref name="attempts"/> and that
+        /// no other database tag moved at all. The second half is the load-bearing one: a counter that moves
+        /// for every failure alike tells an operator nothing about which call is failing.</summary>
+        void AssertOnlyCompletionsFailed(int attempts)
+        {
+            IReadOnlyDictionary<string, long> byOp = DbFailures();
+
+            Assert.That(byOp.Keys, Is.EquivalentTo(new[] { MatchMetrics.DbOp.Complete }),
+                "only the completion failed, so only the completion may be counted");
+            Assert.That(byOp[MatchMetrics.DbOp.Complete], Is.EqualTo(attempts),
+                "one count per attempt that threw, including the retry");
+        }
 
         // ---- helpers ---------------------------------------------------------
 
@@ -549,6 +570,79 @@ namespace HexWars.NetServer.Tests
             Assert.That(_coordinator.ConnectionCount, Is.EqualTo(0));
         }
 
+
+        [Test]
+        public async Task AMatchThatIsBusy_IsNamedForTheNextEvictionRatherThanStranded()
+        {
+            await StartTheMatch();
+            Assert.That(_coordinator.TryGetLiveMatch(_matchId, out LiveMatch? match), Is.True);
+
+            // A commit in flight holds this gate. An eviction that waited on it forever would let one wedged
+            // match stall the retention sweep behind it, and one that dropped the match first and then gave
+            // up would leave these two players connected to a game nobody is hosting.
+            await match!.Gate.WaitAsync();
+            try
+            {
+                IReadOnlyList<Guid> unevicted =
+                    await _coordinator.EvictAsync(new[] { _matchId }, 1001, "abandoned");
+
+                Assert.That(unevicted, Is.EquivalentTo(new[] { _matchId }));
+                Assert.That(_sink.Closed, Is.Empty, "nothing was closed, so nothing was half-evicted");
+                Assert.That(_coordinator.TryGetLiveMatch(_matchId, out _), Is.True,
+                    "and the match is still here for the next pass to try again");
+            }
+            finally
+            {
+                match.Gate.Release();
+            }
+
+            IReadOnlyList<Guid> retried =
+                await _coordinator.EvictAsync(new[] { _matchId }, 1001, "abandoned");
+
+            Assert.That(retried, Is.Empty);
+            Assert.That(_coordinator.LiveMatchCount, Is.EqualTo(0));
+        }
+
+        [Test]
+        public async Task ReconciliationContinuesPastAnInterruptedReadOnTheNextSweep()
+        {
+            await SeatBothPlayers();
+            CreateMatchResult other = await _store.CreateMatchForLobbyAsync(new CreateMatchRequest(
+                "109775240000000043", GameSetup.Default.ToWire(), "hexwars-engine/1", 2, "test-build",
+                new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
+            string credential = (await _credentials.IssueAsync(other.Match.MatchId, Seat0Steam, Ct)).Credential;
+            await _coordinator.AuthenticateAsync("other", other.Match.MatchId.ToString(), credential, Ct);
+            foreach (Guid id in new[] { _matchId, other.Match.MatchId })
+                await _store.TryCompleteMatchAsync(id, MatchStatus.Expired, null, Begin, Ct);
+
+            using var deadline = new CancellationTokenSource();
+            Guid interrupted = Guid.Empty;
+            _faults.BeforeGetMatch = (id, ct) =>
+            {
+                interrupted = id;
+                deadline.Cancel();
+                ct.ThrowIfCancellationRequested();
+            };
+            Assert.ThrowsAsync<OperationCanceledException>(async () =>
+                await _coordinator.EvictReapedAsync(1001, "abandoned", deadline.Token));
+
+            var reads = new List<Guid>();
+            _faults.BeforeGetMatch = (id, _) => reads.Add(id);
+            await _coordinator.EvictReapedAsync(1001, "abandoned", Ct);
+            Assert.That(reads[0], Is.Not.EqualTo(interrupted), "the same first read must not starve other matches");
+            Assert.That(reads, Is.EquivalentTo(new[] { _matchId, other.Match.MatchId }));
+            Assert.That(_coordinator.LiveMatchCount, Is.Zero);
+        }
+
+        [Test]
+        public async Task EvictingAMatchThisHostIsNotPlaying_IsQuietlyNothing()
+        {
+            IReadOnlyList<Guid> unevicted =
+                await _coordinator.EvictAsync(new[] { Guid.NewGuid() }, 1001, "abandoned");
+
+            Assert.That(unevicted, Is.Empty, "a match nobody is hosting needs no retry");
+        }
+
         [Test]
         public async Task ADisconnectedMatchIsSweptOutOfMemoryButNotOutOfTheDatabase()
         {
@@ -617,6 +711,11 @@ namespace HexWars.NetServer.Tests
                 ("c0", DurableMatchCoordinator.ResyncCloseStatus,
                     DurableMatchCoordinator.ResyncCloseReason),
             }), "the issuer is disconnected instead, and learns the ending on its reconnect");
+
+            // Both attempts on the command path: the one that logs a warning and retries, and the one that
+            // gives up. Each is counted, so the pair reads as a database this host cannot finish a game
+            // against rather than as one bad moment.
+            AssertOnlyCompletionsFailed(2);
 
             _faults.FailEveryCompletion(null);
 
@@ -692,6 +791,10 @@ namespace HexWars.NetServer.Tests
             Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { expected }));
             Assert.That(_sink.Closed, Is.Empty);
             Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed));
+
+            // The players never learned anything happened, and an operator still does. One attempt threw,
+            // so the counter says one - the retry that worked adds nothing.
+            AssertOnlyCompletionsFailed(1);
         }
 
         [Test]
@@ -969,6 +1072,11 @@ namespace HexWars.NetServer.Tests
                 Is.All.EqualTo(DurableMatchCoordinator.ResyncCloseStatus));
             Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EquivalentTo(new[] { "c0", "c1" }));
             Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+
+            // Four attempts across two different sites: two while the winning command was being committed,
+            // and two more while the rebuild tried to close the game the journal had already ended. The
+            // rebuild path has its own retry and its own give-up, and both of them are on the record.
+            AssertOnlyCompletionsFailed(4);
         }
 
         [Test]
@@ -1140,7 +1248,7 @@ namespace HexWars.NetServer.Tests
 
             var coordinator = new DurableMatchCoordinator(
                 _faults, _credentials, slow, _sink, Options.Create(_options), _clock,
-                NullLogger<DurableMatchCoordinator>.Instance);
+                new MatchMetrics(), NullLogger<DurableMatchCoordinator>.Instance);
 
             _sink.Clear();
             DurableMatchCoordinator.AuthOutcome refused =
@@ -1166,7 +1274,7 @@ namespace HexWars.NetServer.Tests
 
             var coordinator = new DurableMatchCoordinator(
                 _faults, _credentials, slow, _sink, Options.Create(_options), _clock,
-                NullLogger<DurableMatchCoordinator>.Instance);
+                new MatchMetrics(), NullLogger<DurableMatchCoordinator>.Instance);
 
             _sink.Clear();
             DurableMatchCoordinator.AuthOutcome seated =
@@ -1286,6 +1394,10 @@ namespace HexWars.NetServer.Tests
             Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed),
                 "the completion did land; only the answer was lost");
             Assert.That(Live().Stale, Is.True);
+
+            // A row that really is terminal still cost two failed attempts, and both are counted. The
+            // counter is about calls that did not answer, not about rows that did not move.
+            AssertOnlyCompletionsFailed(2);
 
             // c1 never went away. c0 comes back on a new socket.
             _sink.Clear();

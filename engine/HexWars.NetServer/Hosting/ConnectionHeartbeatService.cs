@@ -1,3 +1,4 @@
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Runtime;
@@ -134,7 +135,11 @@ namespace HexWars.NetServer.Hosting
                     // and doing one inline would put every socket on this host behind the slowest of them:
                     // one match querying a wedged connection would hold up the ping that keeps every other
                     // match alive.
-                    StartDueRechecks(now, recheck, interval, stoppingToken);
+                    // Not while the host is going away. A re-check is a database round trip on behalf
+                    // of a socket that is about to be closed with 1012 regardless of what it says,
+                    // and shutdown is exactly when the store is least likely to have a connection
+                    // to spare. Pings carry on: a client still listening should still hear from us.
+                    if (!registry.Stopping) StartDueRechecks(now, recheck, interval, stoppingToken);
 
                     await coordinator.SweepAsync(now).ConfigureAwait(false);
                 }
@@ -147,7 +152,7 @@ namespace HexWars.NetServer.Hosting
             {
                 // A heartbeat that died silently would leave every socket on this host looking healthy
                 // forever, which is worse than the failure itself.
-                logger.LogError(failure, "The connection heartbeat stopped");
+                logger.LogRedacted(LogLevel.Error, failure, "The connection heartbeat stopped");
             }
         }
 
@@ -320,7 +325,7 @@ namespace HexWars.NetServer.Hosting
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "A credential re-check pass stopped early");
+                logger.LogRedacted(LogLevel.Warning, failure, "A credential re-check pass stopped early");
             }
         }
 
@@ -355,7 +360,7 @@ namespace HexWars.NetServer.Hosting
                 // A client that threw before it managed to return a task.
                 deadline.Dispose();
                 _outstanding.Release();
-                logger.LogWarning(failure, "A live credential could not be re-checked");
+                logger.LogRedacted(LogLevel.Warning, failure, "A live credential could not be re-checked");
                 return;
             }
 
@@ -395,7 +400,7 @@ namespace HexWars.NetServer.Hosting
             }
             catch (Exception failure)
             {
-                logger.LogWarning(failure, "A live credential could not be re-checked");
+                logger.LogRedacted(LogLevel.Warning, failure, "A live credential could not be re-checked");
             }
             finally
             {

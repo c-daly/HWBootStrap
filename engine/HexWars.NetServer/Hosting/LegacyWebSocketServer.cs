@@ -25,6 +25,13 @@ namespace HexWars.NetServer.Hosting
         static readonly object HubLock = new();
         const int MaxIncomingBytes = 64 * 1024;
 
+        const string LoggerCategory = "HexWars.NetServer.Hosting.LegacyWebSocketServer";
+
+        /// <summary>How much of a payload a debug line is allowed to carry. The v1 lobby has no secrets in
+        /// its message set, but a room code and a command wire are still traffic, and a log that reproduced
+        /// every frame in full would be a transcript of every game played on this host.</summary>
+        const int LoggedPayloadLength = 60;
+
         /// <summary>Accept a socket, seat it in the room from ?room=, then pump messages until it closes.</summary>
         internal static async Task Handle(HttpContext ctx)
         {
@@ -38,28 +45,40 @@ namespace HexWars.NetServer.Hosting
             string? token = ctx.Request.Query["token"].ToString();
             if (string.IsNullOrWhiteSpace(token)) token = null; // absent/garbled -> fresh identity (today's behavior)
 
+            // Through ILogger rather than the console, so these lines carry a level and a category
+            // and can be turned off in a deployment. At Debug, because a line per frame per connection is a
+            // debugging aid rather than something a production log should carry.
+            ILogger logger = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger(LoggerCategory);
+
             var socket = await ctx.WebSockets.AcceptWebSocketAsync();
             var conn = new Conn(Guid.NewGuid().ToString("N"), socket);
             Conns[conn.Id] = conn;
-            Console.WriteLine($"[ws] CONNECT room={room} id={conn.Id[..8]} setup=({setup.Mode} {setup.Width}x{setup.Height} pts{setup.StartingPoints} seed{setup.Seed}) total={Conns.Count}");
+            logger.LogDebug(
+                "v1 CONNECT room {Room} connection {Connection} setup {Mode} {Width}x{Height} "
+                + "points {Points} seed {Seed}, {Total} live",
+                room, conn.Id[..8], setup.Mode, setup.Width, setup.Height,
+                setup.StartingPoints, setup.Seed, Conns.Count);
             try
             {
-                Locked(() => Hub.Connect(room, conn.Id, setup, isPrivate, joinOnly, token));
+                Locked(logger, () => Hub.Connect(room, conn.Id, setup, isPrivate, joinOnly, token));
                 while (socket.State == WebSocketState.Open)
                 {
                     string? text = await Receive(socket);
                     if (text is null) break;          // closed / errored / over the size cap
                     if (text.Length == 0) continue;
-                    Console.WriteLine($"[ws] RECV  room={room} id={conn.Id[..8]}: {text}");
-                    Locked(() => Hub.Receive(room, conn.Id, text));
+                    logger.LogDebug(
+                        "v1 RECV room {Room} connection {Connection}: {Payload}",
+                        room, conn.Id[..8], Truncated(text));
+                    Locked(logger, () => Hub.Receive(room, conn.Id, text));
                 }
             }
             finally
             {
-                Console.WriteLine($"[ws] DISCONNECT room={room} id={conn.Id[..8]}");
+                logger.LogDebug(
+                    "v1 DISCONNECT room {Room} connection {Connection}", room, conn.Id[..8]);
                 // Only drops this connection's membership/token mapping — a Started room's seat itself is
                 // HELD (see MatchHub) for HoldWindowTicks so the same token can reclaim it on reconnect.
-                Locked(() => Hub.Disconnect(room, conn.Id));
+                Locked(logger, () => Hub.Disconnect(room, conn.Id));
                 Conns.TryRemove(conn.Id, out _);
                 conn.Close();
                 if (socket.State == WebSocketState.Open)
@@ -72,18 +91,25 @@ namespace HexWars.NetServer.Hosting
         // this is what closes the APPLY-ordering race: two concurrent Handle() calls can no longer
         // interleave their actual sends, because "compute the outbound messages" and "hand them to each
         // connection's own ordered queue" are now one atomic, lock-serialized step (audit N2).
-        static void Locked(Func<IReadOnlyList<Outbound>> f)
+        static void Locked(ILogger logger, Func<IReadOnlyList<Outbound>> f)
         {
             lock (HubLock)
             {
                 var outs = f();
                 foreach (var o in outs)
                 {
-                    Console.WriteLine($"[ws] SEND  -> {o.ConnectionId[..8]}: {(o.Message.Length > 60 ? o.Message[..60] + "…" : o.Message)}");
+                    logger.LogDebug(
+                        "v1 SEND connection {Connection}: {Payload}",
+                        o.ConnectionId[..8], Truncated(o.Message));
                     if (Conns.TryGetValue(o.ConnectionId, out var c)) c.Enqueue(o.Message);
                 }
             }
         }
+
+        /// <summary>As much of a payload as a debug line may carry, with an ellipsis when there was more.
+        /// The same rule the v2 handler follows, so the two logs read alike.</summary>
+        static string Truncated(string payload) =>
+            payload.Length > LoggedPayloadLength ? payload[..LoggedPayloadLength] + "\u2026" : payload;
 
         static async Task<string?> Receive(WebSocket socket)
         {

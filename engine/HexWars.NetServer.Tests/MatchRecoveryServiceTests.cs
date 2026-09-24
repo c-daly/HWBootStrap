@@ -1,6 +1,7 @@
 using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Runtime;
 using HexWars.NetServer.Tests.Fakes;
@@ -51,6 +52,7 @@ namespace HexWars.NetServer.Tests
                 _store,
                 Options.Create(new MatchHostingOptions()),
                 _clock,
+                new MatchMetrics(),
                 NullLogger<MatchRecoveryService>.Instance);
         }
 
@@ -226,11 +228,142 @@ namespace HexWars.NetServer.Tests
             Assert.That((await store.GetMatchAsync(matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
         }
 
+        // ---- what the database counter says the recovery pass did ------------
+
+        /// <summary>
+        /// The recovery tags belong to the STARTUP pass and to nothing else.
+        ///
+        /// LoadAsync is the shared ILiveMatchLoader: every live handshake and every stale reload goes
+        /// through it too. Tagging inside it counted an outage during an ordinary reconnect as a startup
+        /// problem, and counted it twice, because the caller already counts it as load or reload.
+        /// </summary>
+        [Test]
+        public void TheSharedLoader_DoesNotClaimTheRecoveryTag()
+        {
+            var metrics = new MatchMetrics();
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var recovery = new MatchRecoveryService(
+                _store, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await recovery.LoadAsync(Guid.NewGuid(), Ct));
+
+            Assert.That(metrics.Snapshot().DatabaseFailuresByOp, Is.Empty,
+                "a handshake that could not read a journal is not a recovery failure");
+        }
+
+        [Test]
+        public void TheStartupPass_TagsTheListItCouldNotRead()
+        {
+            var metrics = new MatchMetrics();
+            _store.Failure = new InvalidOperationException("the database is not there");
+
+            var recovery = new MatchRecoveryService(
+                _store, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await recovery.VerifyOpenMatchesAsync(Ct));
+
+            IReadOnlyDictionary<string, long> byOp = metrics.Snapshot().DatabaseFailuresByOp;
+
+            Assert.That(byOp[MatchMetrics.DbOp.RecoveryList], Is.EqualTo(1));
+            Assert.That(byOp.ContainsKey(MatchMetrics.DbOp.RecoveryLoad), Is.False,
+                "it never got as far as reading a journal");
+        }
+
+        /// <summary>
+        /// The journal read that failed, tagged as the pass it happened in.
+        ///
+        /// The negative above proves the shared loader does not claim this tag; on its own that is equally
+        /// consistent with nothing ever claiming it, which would be a counter an operator reads as a
+        /// healthy zero while the startup pass is failing.
+        /// </summary>
+        [Test]
+        public async Task TheStartupPass_TagsTheJournalItCouldNotRead()
+        {
+            var store = new InMemoryMatchStore();
+            await SeedAnOpenMatchAsync(store);
+
+            var faults = new FaultInjectingMatchStore(store);
+            faults.FailNextJournalRead(new InvalidOperationException("the database is not there"));
+
+            var metrics = new MatchMetrics();
+            var recovery = new MatchRecoveryService(
+                faults, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            Assert.ThrowsAsync<InvalidOperationException>(
+                async () => await recovery.VerifyOpenMatchesAsync(Ct));
+
+            IReadOnlyDictionary<string, long> byOp = metrics.Snapshot().DatabaseFailuresByOp;
+
+            Assert.That(byOp.Keys, Is.EquivalentTo(new[] { MatchMetrics.DbOp.RecoveryLoad }),
+                "the list was read, so this is the journal and nothing else");
+            Assert.That(byOp[MatchMetrics.DbOp.RecoveryLoad], Is.EqualTo(1));
+        }
+
+        /// <summary>
+        /// The healing write that failed, tagged apart from the journal that could not be read.
+        ///
+        /// They are different findings. A journal this pass cannot read is an outage that stops the pass
+        /// dead; a completion it cannot write is one match left open over an intact journal, which the next
+        /// handshake will try again. An operator who cannot tell them apart cannot tell whether the host
+        /// learned anything at all.
+        /// </summary>
+        [Test]
+        public async Task TheStartupPass_TagsTheHealingWriteItCouldNotMake()
+        {
+            var store = new InMemoryMatchStore();
+            (Guid matchId, MatchRecord _) = await SeedAFinishedButOpenMatchAsync(store);
+
+            var metrics = new MatchMetrics();
+            var recovery = new MatchRecoveryService(
+                store, Options.Create(new MatchHostingOptions()), _clock, metrics,
+                NullLogger<MatchRecoveryService>.Instance);
+
+            // Armed after the seeding, and one-shot: the completion this pass tries to write is the next
+            // write this store sees.
+            store.InjectedWriteFailure = new InvalidOperationException("the database is not there");
+
+            RecoveryReport report = await recovery.VerifyOpenMatchesAsync(Ct);
+
+            Assert.That(report.Verified, Is.EqualTo(1), "the journal was readable; only the write failed");
+            Assert.That(report.Healed, Is.Zero);
+            Assert.That(report.Failed, Is.Empty, "a write that failed is not a journal that cannot be replayed");
+            Assert.That((await store.GetMatchAsync(matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Active));
+
+            IReadOnlyDictionary<string, long> byOp = metrics.Snapshot().DatabaseFailuresByOp;
+
+            Assert.That(byOp.Keys, Is.EquivalentTo(new[] { MatchMetrics.DbOp.RecoveryHeal }),
+                "the list and the journal both answered, so only the heal is on the record");
+            Assert.That(byOp[MatchMetrics.DbOp.RecoveryHeal], Is.EqualTo(1));
+        }
+
         MatchRecoveryService NewRecovery(IMatchStore store) => new(
             store,
             Options.Create(new MatchHostingOptions()),
             _clock,
+            new MatchMetrics(),
             NullLogger<MatchRecoveryService>.Instance);
+
+        /// <summary>An active match with nothing played on it, written through the store the same way the
+        /// coordinator writes one.</summary>
+        static async Task<Guid> SeedAnOpenMatchAsync(InMemoryMatchStore store)
+        {
+            CreateMatchResult created = await store.CreateMatchForLobbyAsync(new CreateMatchRequest(
+                LobbyId, GameSetup.Default.ToWire(), EngineContract.Version, ProtocolContract.Version,
+                "test-build", new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
+
+            Assert.That(
+                await store.TryStartMatchAsync(
+                    created.Match.MatchId, ReplayFile.Write(FreshStart(), Array.Empty<Command>()), Begin, Ct),
+                Is.True);
+
+            return created.Match.MatchId;
+        }
 
         /// <summary>An active match whose journal replays to a finished game, written through the store the
         /// same way the coordinator writes one.</summary>
@@ -326,7 +459,8 @@ namespace HexWars.NetServer.Tests
         {
             var wrong = new MatchHostingOptions { ProtocolVersion = 3 };
             _recovery = new MatchRecoveryService(
-                _store, Options.Create(wrong), _clock, NullLogger<MatchRecoveryService>.Instance);
+                _store, Options.Create(wrong), _clock, new MatchMetrics(),
+                NullLogger<MatchRecoveryService>.Instance);
 
             Seed(Active(FreshStartReplay()));
 
@@ -757,6 +891,7 @@ namespace HexWars.NetServer.Tests
                     journals,
                     Options.Create(new MatchHostingOptions()),
                     new FakeTimeProvider(Begin),
+                    new MatchMetrics(),
                     NullLogger<MatchRecoveryService>.Instance));
 
                 return new Fixture
@@ -773,6 +908,7 @@ namespace HexWars.NetServer.Tests
                         sink,
                         Options.Create(new MatchHostingOptions()),
                         clock,
+                        new MatchMetrics(),
                         NullLogger<DurableMatchCoordinator>.Instance),
                 };
             }
@@ -884,6 +1020,10 @@ namespace HexWars.NetServer.Tests
             public Task<CredentialReplacement> ReplaceJoinCredentialAsync(
                 byte[] credentialHash, Guid matchId, string steamId, DateTimeOffset expiresAt,
                 DateTimeOffset now, CancellationToken ct, TimeSpan? allowTerminalWithin = null) =>
+                throw new NotSupportedException();
+
+            public Task<RetentionResult> ApplyRetentionAsync(
+                RetentionPolicy policy, DateTimeOffset now, CancellationToken ct) =>
                 throw new NotSupportedException();
         }
     }

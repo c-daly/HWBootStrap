@@ -169,11 +169,24 @@ namespace HexWars.Presentation.Tests
                 "the escape menu must not reopen during the same keypress frame");
         }
 
-        TitleScreen BuildTitle()
+        [TestCase(false)]
+        [TestCase(true)]
+        public void TitleShowsThePlatformAppropriateMultiplayerControls(bool steamBuild)
+        {
+            var title = BuildTitle(steamBuild);
+            var labels = Array.ConvertAll(title.GetComponentsInChildren<Text>(true), text => text.text);
+            Assert.That(Array.IndexOf(labels, "Quick Match") >= 0, Is.EqualTo(steamBuild));
+            Assert.That(Array.IndexOf(labels, "Invite Friend") >= 0, Is.EqualTo(steamBuild));
+            Assert.That(Array.IndexOf(labels, "Browse Games") >= 0, Is.EqualTo(!steamBuild));
+            Assert.That(Array.Exists(title.GetComponentsInChildren<InputField>(true),
+                field => field.gameObject.name == "Room code"), Is.EqualTo(!steamBuild));
+        }
+
+        TitleScreen BuildTitle(bool steamBuild = false)
         {
             _gameObject = new GameObject("Inline title test", typeof(BoardRenderer), typeof(GameBootstrap));
             var title = _gameObject.AddComponent<TitleScreen>();
-            Invoke(title, "Start");
+            Invoke(title, "BuildForPlatform", steamBuild);
             return title;
         }
 

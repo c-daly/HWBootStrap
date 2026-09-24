@@ -93,6 +93,41 @@ namespace HexWars.NetServer.Persistence
     public sealed record CredentialReplacement(bool Replaced, DateTimeOffset? EffectiveExpiresAt);
 
     /// <summary>
+    /// How long each class of match data is kept, as the retention decision states it.
+    ///
+    /// Spans rather than a schedule: the policy is a set of ages, and the sweeper that applies it and the
+    /// operator who reads <c>docs/operations/match-data-retention.md</c> should be looking at the same four
+    /// numbers. Nothing here decides how often the sweep runs, only what a sweep does when it runs.
+    /// </summary>
+    /// <param name="WaitingExpiry">Age at which a match that never started becomes <c>expired</c>.</param>
+    /// <param name="ActiveIdle">Silence after which a started match becomes <c>abandoned</c>.</param>
+    /// <param name="TerminalRetention">Age past its ending at which a terminal match is hard-deleted, taking
+    /// its seats, commands and credentials with it.</param>
+    /// <param name="CredentialRetention">Age past its expiry at which a join credential row is deleted.</param>
+    public sealed record RetentionPolicy(
+        TimeSpan WaitingExpiry, TimeSpan ActiveIdle, TimeSpan TerminalRetention, TimeSpan CredentialRetention);
+
+    /// <summary>
+    /// What one retention sweep did. Counts only, plus the ids of the matches it abandoned.
+    ///
+    /// The ids are here for one reason: a match that has just been abandoned may still have sockets
+    /// attached to it, and the only thing that can close them is the coordinator holding them. Everything
+    /// else about a sweep is a number, because a sweep is logged and a log line must not carry match ids,
+    /// Steam ids, command wires or credential material.
+    /// </summary>
+    public sealed record RetentionResult(
+        int Expired, int Abandoned, int CredentialsDeleted, int MatchesDeleted, IReadOnlyList<Guid> AbandonedIds)
+    {
+        /// <summary>A sweep that found nothing to do.</summary>
+        public static readonly RetentionResult Nothing =
+            new(0, 0, 0, 0, Array.Empty<Guid>());
+
+        /// <summary>True when this sweep changed nothing at all, which is the normal answer and the one
+        /// worth not writing a log line about.</summary>
+        public bool IsEmpty => Expired == 0 && Abandoned == 0 && CredentialsDeleted == 0 && MatchesDeleted == 0;
+    }
+
+    /// <summary>
     /// The single place that knows how <see cref="MatchStatus"/> is spelled in the database. The schema has a
     /// CHECK constraint on the same five words, so a mismatch here is a startup-time failure rather than a
     /// silently wrong row.

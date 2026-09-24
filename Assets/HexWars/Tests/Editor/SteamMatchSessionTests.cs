@@ -25,7 +25,7 @@ namespace HexWars.Presentation.Tests
             _sut.Opened();
 
             var outputs = _sut.Drain();
-            Assert.That(outputs, Has.Count.EqualTo(1));
+            Assert.That(outputs.Count, Is.EqualTo(1));
             Assert.That(outputs[0].Kind, Is.EqualTo(SteamMatchSessionOutputKind.Send));
             Assert.That(outputs[0].Text, Is.EqualTo("AUTH " + MatchId + " " + Credential));
             Assert.That(_sut.State, Is.EqualTo(SteamMatchSessionState.Authenticating));
@@ -46,7 +46,7 @@ namespace HexWars.Presentation.Tests
 
             _sut.Frame("SEAT 1");
             var seated = _sut.Drain();
-            Assert.That(seated, Has.Count.EqualTo(1));
+            Assert.That(seated.Count, Is.EqualTo(1));
             Assert.That(seated[0].Kind, Is.EqualTo(SteamMatchSessionOutputKind.Seat));
             Assert.That(seated[0].Seat, Is.EqualTo(1));
             Assert.That(_sut.State, Is.EqualTo(SteamMatchSessionState.Seated));

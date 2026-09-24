@@ -42,6 +42,10 @@ namespace HexWars.NetServer.Hosting
         /// </summary>
         internal static readonly TimeSpan ReceiveLoopExitWindow = TimeSpan.FromSeconds(2);
 
+        /// <summary>How long the close frame itself is given to reach a peer before the socket is simply
+        /// aborted. A client that has stopped reading is exactly the case this bound exists for.</summary>
+        internal static readonly TimeSpan CloseHandshakeWindow = TimeSpan.FromSeconds(3);
+
         readonly Channel<string> _outbound;
         readonly Task _writer;
         readonly TaskCompletionSource _closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -234,9 +238,24 @@ namespace HexWars.NetServer.Hosting
 
                 if (WebSocket.State is WebSocketState.Open or WebSocketState.CloseReceived)
                 {
-                    await WebSocket
-                        .CloseOutputAsync((WebSocketCloseStatus)status, reason, CancellationToken.None)
-                        .ConfigureAwait(false);
+                    // Bounded, because CloseOutputAsync writes to the peer and a peer that has stopped
+                    // reading never lets that write finish. An unbounded close here is the difference
+                    // between a shutdown that fits in its budget and one the platform kills halfway
+                    // through, and a killed shutdown sends no 1012 to anybody.
+                    using var sending = new CancellationTokenSource(CloseHandshakeWindow);
+                    try
+                    {
+                        await WebSocket
+                            .CloseOutputAsync((WebSocketCloseStatus)status, reason, sending.Token)
+                            .ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // A peer that will not take the close frame gets no close frame. Aborting is what
+                        // frees the receive loop and the socket, and there is nothing else to say to it.
+                        WebSocket.Abort();
+                        return;
+                    }
                 }
 
                 // CloseOutputAsync only says this end is done. The receive loop is still parked inside

@@ -141,5 +141,27 @@ namespace HexWars.NetServer.Persistence
         Task<CredentialReplacement> ReplaceJoinCredentialAsync(byte[] credentialHash, Guid matchId,
             string steamId, DateTimeOffset expiresAt, DateTimeOffset now, CancellationToken ct,
             TimeSpan? allowTerminalWithin = null);
+
+        /// <summary>
+        /// Applies the retention policy once: expires the waiting matches that never started, abandons the
+        /// started ones that went quiet, deletes long-expired join credentials, and hard-deletes terminal
+        /// matches past the keep window.
+        ///
+        /// One unit of work, in this order, because the order is what keeps a sweep from contradicting
+        /// itself: a match this sweep has just expired carries an ending stamped now, so the delete pass
+        /// that follows cannot also remove it. Deleting a match takes its seats, its command journal and its
+        /// credentials with it - the retention anchor is the match row and nothing else is reaped directly,
+        /// because a journal with a hole in it replays into a different game than the one that was played.
+        ///
+        /// Only transitions the lifecycle already allows are performed (waiting to expired, active to
+        /// abandoned), so this can never resurrect a finished match or record a result for a game nobody
+        /// played.
+        /// </summary>
+        /// <param name="policy">The four ages, from the retention decision.</param>
+        /// <param name="now">The instant the sweep judges every age against, and stamps its endings with.</param>
+        /// <returns>Counts per statement, plus the ids of the matches that were abandoned - the caller closes
+        /// whatever sockets those still have. Every other id stays inside the store.</returns>
+        Task<RetentionResult> ApplyRetentionAsync(
+            RetentionPolicy policy, DateTimeOffset now, CancellationToken ct);
     }
 }

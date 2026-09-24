@@ -8,17 +8,30 @@ namespace HexWars.NetServer.Hosting
     /// against the request Host, as this used to, also made ALLOWED_WEB_ORIGINS dead configuration: a
     /// client served from another domain was refused no matter what an operator configured. This keeps
     /// the same-origin allowance and honours the configured list alongside it.
+    ///
+    /// It is a browser rule and only a browser rule. A native client - the Steam build, a script, a
+    /// test - chooses what it sends here, so for those callers this is not a security boundary and must
+    /// never be treated as one. What protects a seat from a native client is the join credential, which
+    /// is issued to one Steam account for one match and proved on the socket. This rule exists because a
+    /// BROWSER does not let a page choose its Origin, which is what makes it worth checking there.
     /// </summary>
     public static class OriginPolicy
     {
-        /// <summary>True when the request may be upgraded. An absent or unparseable Origin is allowed
-        /// through unchanged (non-browser clients and the in-process selftest send none), which matches
-        /// the scope of the rule: it applies when both an Origin and a Host are present.</summary>
+        /// <summary>
+        /// True when the request may be upgraded.
+        ///
+        /// An ABSENT Origin is allowed: non-browser clients and the in-process selftest send none, and this
+        /// rule only has anything to say when a browser has attached one. An Origin that is present and
+        /// cannot be parsed as an absolute URL is REFUSED, which is not the same case. The value a browser
+        /// sends there is the literal word null, from a sandboxed frame or a document loaded from a file or
+        /// a data URL - exactly the contexts a cross-site upgrade would be launched from - and letting an
+        /// unreadable Origin through would leave the rule with a hole shaped like the attack.
+        /// </summary>
         public static bool IsAllowed(HttpContext context, IReadOnlyList<string> allowedOrigins)
         {
             string origin = context.Request.Headers.Origin.ToString();
             if (string.IsNullOrEmpty(origin)) return true;
-            if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri? originUri)) return true;
+            if (!Uri.TryCreate(origin, UriKind.Absolute, out Uri? originUri)) return false;
 
             string originAuthority = Authority(originUri);
             string host = context.Request.Host.Value ?? string.Empty;

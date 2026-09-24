@@ -26,6 +26,19 @@ namespace HexWars.NetServer.Hosting
         readonly int _maxPerAddress = options.Value.MaxSocketsPerIp;
 
         int _maxQueueDepth;
+        int _stopping;
+
+        /// <summary>Whether this host has begun going away, and is therefore refusing new sockets.</summary>
+        public bool Stopping => Volatile.Read(ref _stopping) != 0;
+
+        /// <summary>
+        /// Refuse every socket from here on.
+        ///
+        /// Set before shutdown takes its snapshot of what to close, which is the whole point: a socket
+        /// admitted after the snapshot is a socket nobody closes, and its client learns the host went away
+        /// from a torn connection rather than from a 1012 that tells it to come back.
+        /// </summary>
+        public void BeginShutdown() => Interlocked.Exchange(ref _stopping, 1);
 
         /// <summary>Sockets currently registered, authenticated or not.</summary>
         public int Count => _connections.Count;
@@ -48,6 +61,8 @@ namespace HexWars.NetServer.Hosting
         public bool TryReserve(string ip)
         {
             ArgumentNullException.ThrowIfNull(ip);
+
+            if (Stopping) return false;
 
             while (true)
             {
@@ -83,8 +98,27 @@ namespace HexWars.NetServer.Hosting
             }
         }
 
-        /// <summary>Takes ownership of the reservation already made for this connection address.</summary>
-        internal void Add(V2Connection connection) => _connections[connection.Id] = connection;
+        /// <summary>
+        /// Takes ownership of the reservation already made for this connection address. False when this
+        /// host is going away, and the caller must then close the socket rather than serve it.
+        ///
+        /// Checked here as well as in TryReserve because the two are not the same moment: a request that
+        /// passed the reservation before the flag was set is still mid-upgrade when it arrives here.
+        /// </summary>
+        internal bool Add(V2Connection connection)
+        {
+            if (Stopping) return false;
+
+            _connections[connection.Id] = connection;
+
+            // Re-checked after the write, because the flag can be set between the check above and it. The
+            // shutdown snapshot is taken after the flag, so an entry written before the flag is seen and an
+            // entry written after it is removed here; either way nothing is left holding an open socket.
+            if (!Stopping) return true;
+
+            _connections.TryRemove(connection.Id, out _);
+            return false;
+        }
 
         internal void Remove(string connectionId)
         {

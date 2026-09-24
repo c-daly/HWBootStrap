@@ -24,12 +24,20 @@ namespace HexWars.NetServer
 
         public static async Task<int> Run()
         {
-            var builder = WebApplication.CreateBuilder();
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Development,
+            });
             builder.WebHost.UseUrls(Url);
             builder.Logging.ClearProviders();
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["LOBBY_PROVIDER"] = "Legacy",
+                ["DATABASE_URL"] = null,
+            });
+            builder.AddHexWarsServer();
             var app = builder.Build();
-            app.UseWebSockets();
-            app.Map("/ws", LegacyWebSocketServer.Handle);
+            app.UseHexWarsServer();
             await app.StartAsync();
 
             try
@@ -160,21 +168,29 @@ namespace HexWars.NetServer
         static async Task<ClientWebSocket> Connect(string url = Ws)
         {
             var c = new ClientWebSocket();
-            await c.ConnectAsync(new Uri(url), CancellationToken.None);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            try { await c.ConnectAsync(new Uri(url), deadline.Token); }
+            catch { c.Dispose(); throw; }
             return c;
         }
 
-        static async Task Send(ClientWebSocket c, string msg) =>
-            await c.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, CancellationToken.None);
+        static async Task Send(ClientWebSocket c, string msg)
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+            await c.SendAsync(Encoding.UTF8.GetBytes(msg), WebSocketMessageType.Text, true, deadline.Token);
+        }
 
         static async Task<string> Recv(ClientWebSocket c)
         {
             var buf = new byte[16384];
             using var ms = new MemoryStream();
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             WebSocketReceiveResult res;
             do
             {
-                res = await c.ReceiveAsync(new ArraySegment<byte>(buf), CancellationToken.None);
+                res = await c.ReceiveAsync(new ArraySegment<byte>(buf), deadline.Token);
+                if (res.MessageType == WebSocketMessageType.Close)
+                    throw new InvalidOperationException("Socket closed before the expected frame: " + res.CloseStatus);
                 ms.Write(buf, 0, res.Count);
             } while (!res.EndOfMessage);
             return Encoding.UTF8.GetString(ms.ToArray());
@@ -218,7 +234,7 @@ namespace HexWars.NetServer
         /// because it had nothing to test is worse than one that did not run, and a deploy pipeline needs to
         /// be able to tell those apart.
         /// </summary>
-        public static async Task<int> RunDurable()
+        public static async Task<int> RunDurable(bool crash = false)
         {
             string? databaseUrl = Environment.GetEnvironmentVariable(DurableDatabaseVariable);
             if (string.IsNullOrWhiteSpace(databaseUrl))
@@ -242,25 +258,29 @@ namespace HexWars.NetServer
             try
             {
                 await ResetSchema(databaseUrl);
-                return await DriveARestart(databaseUrl);
+                return await DriveARestart(databaseUrl, crash);
             }
             catch (Exception failure)
             {
-                Console.WriteLine("SELFTEST-DURABLE FAIL " + failure);
+                Console.WriteLine("SELFTEST-DURABLE FAIL " + SteamLogRedaction.Describe(failure));
                 return 1;
             }
         }
 
-        static async Task<int> DriveARestart(string databaseUrl)
+        static async Task<int> DriveARestart(string databaseUrl, bool crash)
         {
-            var steam = new SelfTestSteamClient();
             Guid matchId;
+            GameState opening = ReplayFile.Read(DirectReplayText(DurableScript.Length)).Start;
+            MatchRecord continuation = Match.Record(opening, new GreedyAgent(11), new GreedyAgent(29), 4000);
+            if (!continuation.Result.Final.IsGameOver)
+                throw new InvalidOperationException("The offline game did not finish within the command budget");
+            Command[] complete = DurableScript.Concat(continuation.Commands).ToArray();
 
             // ---- the process that played the opening ----
-            WebApplication a = BuildDurableHost(databaseUrl, steam);
-            await a.StartAsync();
-            try
+            int firstPid;
+            await using (SelfTestProcess a = await SelfTestProcess.StartAsync(databaseUrl, expectedRecovered: 0))
             {
+                firstPid = a.Id;
                 using var http = new HttpClient();
 
                 (Guid allocated, int seatZero, string credentialZero) = await CreateMatch(http);
@@ -285,29 +305,14 @@ namespace HexWars.NetServer
 
                 foreach (Command command in DurableScript) await PlayOne(zero, one, command);
 
-                RequireJournal(await Journal(databaseUrl, matchId), DurableScript.Length, "before the restart");
-            }
-            finally
-            {
-                // Stop rather than abandon: the port has to be free for the process that takes over, and a
-                // graceful stop is the shutdown a deploy actually performs.
-                await a.StopAsync();
-                await a.DisposeAsync();
+                RequireJournal(await Journal(databaseUrl, matchId), DurableScript, "before the restart");
+                if (crash) await a.CrashAsync();
             }
 
             // ---- the process that took over ----
-            WebApplication b = BuildDurableHost(databaseUrl, steam);
-            await b.StartAsync();
-            try
+            await using (SelfTestProcess b = await SelfTestProcess.StartAsync(databaseUrl, expectedRecovered: 1))
             {
-                RecoveryState recovery = b.Services.GetRequiredService<RecoveryState>();
-                if (recovery.Report is null)
-                    throw new InvalidOperationException(
-                        "startup recovery did not run: " + (recovery.Error?.Message ?? "no report"));
-                if (recovery.Report.Verified != 1 || recovery.Report.Failed.Count != 0)
-                    throw new InvalidOperationException(
-                        "startup recovery verified " + recovery.Report.Verified + " and refused "
-                        + recovery.Report.Failed.Count + ", expected 1 and 0");
+                if (b.Id == firstPid) throw new InvalidOperationException("The server process was not replaced");
 
                 using var http = new HttpClient();
 
@@ -340,21 +345,63 @@ namespace HexWars.NetServer
                     throw new InvalidOperationException(
                         "the recovered position is not the one the commands produce from a fresh start");
 
-                // The game carries on: a command from the other seat, applied on top of what was recovered.
-                await PlayOne(zero, one, new EndTurn(PlayerId.Player1));
+                // Finish the game through the real sockets, validating each broadcast to both seats.
+                foreach (Command command in continuation.Commands) await PlayOne(zero, one, command);
 
-                RequireJournal(
-                    await Journal(databaseUrl, matchId), DurableScript.Length + 1, "after the restart");
+                RequireJournal(await Journal(databaseUrl, matchId), complete, "after completion");
+                await RequireCompleted(databaseUrl, matchId, continuation.Result.Final.Winner);
             }
-            finally
+
+            // The terminal state also survives a fresh process; both players can reconnect to see it.
+            await using (SelfTestProcess c = await SelfTestProcess.StartAsync(databaseUrl, expectedRecovered: 0))
             {
-                await b.StopAsync();
-                await b.DisposeAsync();
+                using var http = new HttpClient();
+                string expected = ReplayFile.Write(continuation.Result.Final, Array.Empty<Command>());
+                foreach (var (ticket, seat) in new[] { (SelfTestOwnerTicket, 0), (SelfTestGuestTicket, 1) })
+                {
+                    (_, int returnedSeat, string credential) = await JoinMatch(http, matchId, ticket);
+                    if (returnedSeat != seat) throw new InvalidOperationException("The terminal seat changed");
+                    using ClientWebSocket socket = await SeatSocket(matchId, credential, seat);
+                    string terminal = await Expect(socket, "START ");
+                    if (CommandCount(terminal) != complete.Length || FastForward(terminal) != expected)
+                        throw new InvalidOperationException("The terminal reconnect did not reproduce the full game");
+                }
+                RequireJournal(await Journal(databaseUrl, matchId), complete, "after terminal reconnect");
+                await RequireCompleted(databaseUrl, matchId, continuation.Result.Final.Winner);
             }
 
             Console.WriteLine(
-                "SELFTEST-DURABLE PASS - a match survived a process restart with its journal intact");
+                $"SELFTEST-DURABLE PASS - {complete.Length} commands, winner={continuation.Result.Final.Winner}, "
+                + (crash ? "forced process termination" : "graceful process restart")
+                + ", complete journal and both terminal reconnects verified; Steam API scripted");
             return 0;
+        }
+
+        // Only the self-test parent invokes this mode. EOF also stops the child if the parent dies.
+        internal static async Task<int> RunDurableHost()
+        {
+            string? databaseUrl = Environment.GetEnvironmentVariable(DurableDatabaseVariable);
+            if (!Console.IsInputRedirected || string.IsNullOrWhiteSpace(databaseUrl)
+                || !DisposableDatabaseGuard.IsDisposable(databaseUrl, Environment.GetEnvironmentVariable, out _))
+                return 3;
+            try
+            {
+                await using WebApplication app = BuildDurableHost(databaseUrl, new SelfTestSteamClient());
+                await app.StartAsync();
+                RecoveryState recovery = app.Services.GetRequiredService<RecoveryState>();
+                if (recovery.Report is null || recovery.Error is not null || recovery.Report.Failed.Count != 0)
+                    throw new InvalidOperationException("The child server could not recover its matches");
+                Console.WriteLine($"SELFTEST-HOST READY {Environment.ProcessId} {recovery.Report.Verified}");
+                await Console.Out.FlushAsync();
+                await Console.In.ReadLineAsync();
+                await app.StopAsync();
+                return 0;
+            }
+            catch (Exception failure)
+            {
+                Console.Error.WriteLine(SteamLogRedaction.Describe(failure));
+                return 1;
+            }
         }
 
         // ---- the host --------------------------------------------------------
@@ -560,11 +607,11 @@ namespace HexWars.NetServer
 
         /// <summary>Every acknowledged command, once each, in the order it was acknowledged.</summary>
         static void RequireJournal(
-            IReadOnlyList<(int Sequence, string Wire)> journal, int expected, string when)
+            IReadOnlyList<(int Sequence, string Wire)> journal, IReadOnlyList<Command> expected, string when)
         {
-            if (journal.Count != expected)
+            if (journal.Count != expected.Count)
                 throw new InvalidOperationException(
-                    "the journal holds " + journal.Count + " command(s) " + when + ", expected " + expected);
+                    "the journal holds " + journal.Count + " command(s) " + when + ", expected " + expected.Count);
 
             for (var i = 0; i < journal.Count; i++)
             {
@@ -573,15 +620,26 @@ namespace HexWars.NetServer
                         "the journal is not contiguous " + when + ": row " + i + " holds sequence "
                         + journal[i].Sequence);
 
-                string wire = i < DurableScript.Length
-                    ? CommandWire.Write(DurableScript[i])
-                    : CommandWire.Write(new EndTurn(PlayerId.Player1));
+                string wire = CommandWire.Write(expected[i]);
 
                 if (journal[i].Wire != wire)
                     throw new InvalidOperationException(
                         "sequence " + journal[i].Sequence + " holds " + journal[i].Wire + " " + when
                         + ", expected " + wire);
             }
+        }
+
+        static async Task RequireCompleted(string databaseUrl, Guid matchId, PlayerId? winner)
+        {
+            await using NpgsqlDataSource data =
+                NpgsqlDataSource.Create(DatabaseUrl.ToNpgsqlConnectionString(databaseUrl));
+            await using NpgsqlCommand read = data.CreateCommand(
+                "SELECT status, winner_seat, completed_at FROM matches WHERE match_id = @match");
+            read.Parameters.AddWithValue("match", matchId);
+            await using NpgsqlDataReader row = await read.ExecuteReaderAsync();
+            if (!await row.ReadAsync() || row.GetString(0) != "completed" || row.IsDBNull(2)
+                || (row.IsDBNull(1) ? (int?)null : row.GetInt32(1)) != (winner is null ? null : (int)winner))
+                throw new InvalidOperationException("The completed result was not recorded durably");
         }
     }
 

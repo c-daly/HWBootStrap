@@ -27,6 +27,9 @@ namespace HexWars.NetServer.Tests.Fakes
         Exception? _nextJournalReadFailure;
         Exception? _nextGetMatchFailure;
 
+        TaskCompletionSource? _appendsHang;
+        readonly TaskCompletionSource _appendReached = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         /// <summary>How many appends actually reached the inner store.</summary>
         public int AppendsForwarded { get; private set; }
 
@@ -43,6 +46,8 @@ namespace HexWars.NetServer.Tests.Fakes
         /// <summary>Runs inside TouchAsync. A liveness stamp is the last database call a handshake makes,
         /// so it is where a test puts the time that a boundary can be crossed in.</summary>
         public Func<Task>? BeforeTouch { get; set; }
+
+        public Action<Guid, CancellationToken>? BeforeGetMatch { get; set; }
 
         /// <summary>Arms the next AppendCommandAsync to throw, once. Null disarms it.</summary>
         public void FailNextAppend(Exception? failure) => _nextAppendFailure = failure;
@@ -91,9 +96,35 @@ namespace HexWars.NetServer.Tests.Fakes
         /// <summary>Arms the next GetMatchAsync to throw, once.</summary>
         public void FailNextGetMatch(Exception? failure) => _nextGetMatchFailure = failure;
 
+        /// <summary>
+        /// A store that accepted an append and never answered.
+        ///
+        /// It is the failure a timeout cannot see and a thrown exception cannot stand in for: the call is
+        /// still outstanding, the match gate is still held, and anything that waits on either waits
+        /// forever. Shutdown has to survive it, so a test has to be able to produce it.
+        /// </summary>
+        public void HangEveryAppend()
+        {
+            _appendsHang = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
+        /// <summary>Lets every hung append through, so a test can tidy up after itself.</summary>
+        public void ReleaseHungAppends() => _appendsHang?.TrySetResult();
+
+        /// <summary>Completes once an append has actually reached the hang, so a test can be sure the
+        /// match gate is held before it does anything else.</summary>
+        public Task AppendReached => _appendReached.Task;
+
         public async Task<AppendResult> AppendCommandAsync(Guid matchId, int expectedSequence,
             string commandWire, string issuerSteamId, DateTimeOffset acceptedAt, CancellationToken ct)
         {
+            TaskCompletionSource? hang = _appendsHang;
+            if (hang is not null)
+            {
+                _appendReached.TrySetResult();
+                await hang.Task.ConfigureAwait(false);
+            }
+
             Exception? failure = _nextAppendFailure;
             if (failure is not null)
             {
@@ -125,6 +156,7 @@ namespace HexWars.NetServer.Tests.Fakes
 
         public Task<PersistedMatch?> GetMatchAsync(Guid matchId, CancellationToken ct)
         {
+            BeforeGetMatch?.Invoke(matchId, ct);
             Exception? failure = _nextGetMatchFailure;
             if (failure is null) return inner.GetMatchAsync(matchId, ct);
 
@@ -210,5 +242,9 @@ namespace HexWars.NetServer.Tests.Fakes
             TimeSpan? allowTerminalWithin = null) =>
             inner.ReplaceJoinCredentialAsync(
                 credentialHash, matchId, steamId, expiresAt, now, ct, allowTerminalWithin);
+
+        public Task<RetentionResult> ApplyRetentionAsync(
+            RetentionPolicy policy, DateTimeOffset now, CancellationToken ct) =>
+            inner.ApplyRetentionAsync(policy, now, ct);
     }
 }

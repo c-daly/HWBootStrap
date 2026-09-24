@@ -271,3 +271,5 @@ for want of anything to test is worse than one that did not run.
 
 - `docs/operations/steam-render-environments.md` — the environment variables named above.
 - `docs/operations/steam-client-configuration.md` — what the Unity client needs to reach this endpoint.
+- `docs/operations/health-and-shutdown.md` — the probes, the metrics, and the shutdown sequence that
+  produces `SERVER RESTART` and close 1012.

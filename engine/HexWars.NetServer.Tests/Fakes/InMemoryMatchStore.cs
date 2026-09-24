@@ -426,6 +426,70 @@ namespace HexWars.NetServer.Tests.Fakes
             }
         }
 
+        // ---- retention -------------------------------------------------------
+
+        public Task<RetentionResult> ApplyRetentionAsync(
+            RetentionPolicy policy, DateTimeOffset now, CancellationToken ct)
+        {
+            ArgumentNullException.ThrowIfNull(policy);
+
+            lock (_gate)
+            {
+                DateTimeOffset stamp = Stored(now);
+
+                // The same four passes the SQL makes, in the same order and judged by the same comparisons.
+                // Strictly older than the age, so a row exactly on the boundary survives - the database says
+                // the same, and a double that disagreed at the boundary would hide the one bug worth finding.
+                var expired = 0;
+                foreach (MatchRow row in _matches.Values)
+                {
+                    if (row.Status != MatchStatus.Waiting) continue;
+                    if (row.CreatedAt >= stamp - policy.WaitingExpiry) continue;
+
+                    row.Status = MatchStatus.Expired;
+                    row.CompletedAt = stamp;
+                    row.LastActivityAt = Later(row.LastActivityAt, stamp);
+                    expired++;
+                }
+
+                var abandoned = new List<Guid>();
+                foreach (MatchRow row in _matches.Values)
+                {
+                    if (row.Status != MatchStatus.Active) continue;
+                    if (row.LastActivityAt >= stamp - policy.ActiveIdle) continue;
+
+                    row.Status = MatchStatus.Abandoned;
+                    row.CompletedAt = stamp;
+                    row.LastActivityAt = Later(row.LastActivityAt, stamp);
+                    abandoned.Add(row.MatchId);
+                }
+
+                DateTimeOffset credentialCutoff = stamp - policy.CredentialRetention;
+                int credentials = _credentials.RemoveAll(row => row.ExpiresAt < credentialCutoff);
+
+                DateTimeOffset terminalCutoff = stamp - policy.TerminalRetention;
+                var reaped = new List<Guid>();
+                foreach (MatchRow row in _matches.Values)
+                {
+                    if (row.IsOpen) continue;
+                    if (row.CompletedAt is not DateTimeOffset ended || ended >= terminalCutoff) continue;
+
+                    reaped.Add(row.MatchId);
+                }
+
+                foreach (Guid matchId in reaped)
+                {
+                    // Deleting the match takes its seats, its commands and its credentials with it, which is
+                    // the cascade the schema performs. Nothing is ever reaped one seat at a time.
+                    _matches.Remove(matchId);
+                    _credentials.RemoveAll(row => row.MatchId == matchId);
+                }
+
+                return Task.FromResult(
+                    new RetentionResult(expired, abandoned.Count, credentials, reaped.Count, abandoned));
+            }
+        }
+
         // ---- internals -------------------------------------------------------
 
         /// <summary>Consumes an injected failure if one is armed, then counts the call.</summary>

@@ -238,6 +238,10 @@ namespace HexWars.NetServer.Tests.Fixtures
             }
         }
 
+        /// <summary>Whether this socket is still open from the client side. What tells a seat that was
+        /// left alone apart from one that was superseded: both are silent, and only one is still there.</summary>
+        public bool IsOpen => _socket is { State: WebSocketState.Open };
+
         /// <summary>A dead socket: no close handshake, exactly like a client whose process went away.</summary>
         public void Drop()
         {
@@ -322,11 +326,12 @@ namespace HexWars.NetServer.Tests.Fixtures
                         await _socket.CloseAsync(
                             WebSocketCloseStatus.NormalClosure, "done", CancellationToken.None);
                 }
-                catch (WebSocketException)
+                catch (Exception)
                 {
-                }
-                catch (OperationCanceledException)
-                {
+                    // Every exception, and deliberately so. This close is a courtesy: the server may have
+                    // already closed or aborted this socket, and the in-memory transport reports that in
+                    // more than one way. A test that failed in its own teardown would report the courtesy
+                    // rather than the thing it was written to check.
                 }
 
                 _socket.Dispose();

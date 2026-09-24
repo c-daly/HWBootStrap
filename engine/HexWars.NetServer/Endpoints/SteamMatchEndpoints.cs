@@ -3,6 +3,7 @@ using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Persistence;
 using HexWars.NetServer.Steam;
 using Microsoft.Extensions.Options;
@@ -46,8 +47,8 @@ namespace HexWars.NetServer.Endpoints
         const int MaxRequestedSetupLength = 256;
 
         /// <summary>The partition key when the connection has no remote address, which under a test server
-        /// or a misconfigured proxy is every request. Named rather than empty so it reads in a log.</summary>
-        public const string UnknownCaller = "unknown";
+        /// or a misconfigured proxy is every request.</summary>
+        public const string UnknownCaller = Hosting.CallerKey.Unknown;
 
         public static IEndpointRouteBuilder MapSteamMatchEndpoints(this IEndpointRouteBuilder app)
         {
@@ -63,6 +64,10 @@ namespace HexWars.NetServer.Endpoints
             IMatchStore store,
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
+            ServiceReadiness readiness,
+            MatchMetrics metrics,
+            PlayerBlockList blockList,
+            OpenMatchQuota quota,
             TimeProvider time,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
@@ -71,6 +76,11 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            // Before the body, and before anything that costs a round trip: a host on its way out
+            // must not take a seat in a match it will not be here to host, and refusing early is what
+            // makes a rolling deploy cost a player one retry rather than one game.
+            if (readiness.ShuttingDown) return ApiErrors.UnavailableResult();
 
             if (IsRefusedTransport(http, environment))
             {
@@ -92,18 +102,68 @@ namespace HexWars.NetServer.Endpoints
             string caller = CallerKey(http);
             if (throttle.IsThrottled(caller)) return ApiErrors.RateLimitedResult();
 
+            // Taken under the quota lock before anything is awaited, and taken as a SEAT rather than as an
+            // answer to a question. Asking whether there is room and spending it later is check-then-act:
+            // the room is granted in between, so a dozen concurrent creations from one address all read the
+            // same low number and all proceed. It is also before the Steam round trips and before the write,
+            // for the same reason the throttle is: a caller that has filled its share of the database costs
+            // this server nothing to refuse.
+            string bucket = OpenMatchQuota.BucketFor(http.Connection.RemoteIpAddress);
+            bool reserved = quota.TryReserve(bucket, out QuotaLease lease);
+
+            // Nothing has been written yet, so a lease that never gets past here is handed straight back.
+            // The one moment that is neither is the create call itself: an exception from it may or may not
+            // have left a row, and the two mistakes are not equal, so an ambiguous commit is charged.
+            CreationOutcome outcome = CreationOutcome.NothingWritten;
+
+            // The try starts IMMEDIATELY after the seat is taken, and everything else is inside it. Anything
+            // between the two - opening a logging scope, one indexed read - can throw, and a seat stranded
+            // by a throw is a seat nobody ever gets back.
             try
             {
+                // Every line the rest of this call writes carries the lobby, including the ones written from
+                // the catch blocks, which is where an operator actually goes looking.
+                using IDisposable? lobbyScope = LogScopes.LobbyScope(logger, request.SteamLobbyId);
+
+                // The one request still worth serving over the cap is a retry for a lobby that ALREADY has a
+                // match, because that request writes nothing - it hands the caller back the match they were
+                // already given. Refusing it would lock a player out of the game they just started because
+                // their first response was lost. It costs one indexed read, and only over the cap.
+                //
+                // The row is CARRIED rather than discarded. Proving an allocation exists and then calling
+                // create-or-get several awaits later is a race with its own ending: if the match went
+                // terminal in between, the store INSERTS a new one and this request is holding no seat for
+                // it - and committing a refused lease cannot take a row back.
+                PersistedMatch? provenAllocation = null;
+                if (!reserved)
+                {
+                    provenAllocation = await store
+                        .FindOpenMatchForLobbyAsync(request.SteamLobbyId!, ct).ConfigureAwait(false);
+
+                    if (provenAllocation is null)
+                    {
+                        logger.LogWarning(
+                            "Refused a match creation: this address already allocated {Cap} matches this window",
+                            options.MaxOpenMatchesPerIp);
+                        return ApiErrors.RateLimitedResult();
+                    }
+                }
+
                 SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
 
-                if (IsRefusedAccount(options, identity, logger, "a match creation"))
+                if (IsRefusedAccount(blockList, identity, logger, "a match creation"))
                 {
+                    metrics.SteamFailure(BlockedFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
                 }
 
                 if (!await steam.CheckAppOwnershipAsync(identity.SteamId, ct).ConfigureAwait(false))
                 {
+                    // A refusal Valve answered with rather than threw. It belongs with the other Steam
+                    // failures for the same reason the thrown ones do: an operator watching that counter
+                    // is watching whether Steam is letting players in, and a no is a no either way.
+                    metrics.SteamFailure(OwnershipFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden,
                         ApiErrors.OwnershipMissing,
@@ -119,20 +179,68 @@ namespace HexWars.NetServer.Endpoints
 
                 if (!RequestedSetupStillMatches(request.RequestedSetup, verified.Setup))
                 {
+                    metrics.SteamFailure(LobbyChangedFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status409Conflict, ApiErrors.LobbyChanged, ApiErrors.SettingsChangedMessage);
                 }
 
-                CreateMatchResult result = await store.CreateMatchForLobbyAsync(
-                    new CreateMatchRequest(
-                        verified.LobbyId,
-                        verified.Setup.ToWire(),
-                        EngineContract.Version,
-                        options.ProtocolVersion,
-                        options.BuildId,
-                        verified.Players,
-                        time.GetUtcNow()),
-                    ct).ConfigureAwait(false);
+                var allocation = new CreateMatchRequest(
+                    verified.LobbyId,
+                    verified.Setup.ToWire(),
+                    EngineContract.Version,
+                    options.ProtocolVersion,
+                    options.BuildId,
+                    verified.Players,
+                    time.GetUtcNow());
+
+                CreateMatchResult result;
+
+                if (provenAllocation is null)
+                {
+                    outcome = CreationOutcome.Ambiguous;
+                    result = await store.CreateMatchForLobbyAsync(allocation, ct).ConfigureAwait(false);
+                }
+                else
+                {
+                    // This request holds no seat: it was let through only because a match already existed
+                    // for the lobby. So it may not INSERT one, and create-or-get would. The allocation is
+                    // re-read instead, and the answer decides which of two different requests this is.
+                    PersistedMatch? stillOpen = await store
+                        .FindOpenMatchForLobbyAsync(verified.LobbyId, ct).ConfigureAwait(false);
+
+                    if (stillOpen is not null)
+                    {
+                        // Still the retry it presented itself as. Nothing is written and nothing is charged.
+                        result = new CreateMatchResult(stillOpen, Created: false);
+                    }
+                    else
+                    {
+                        // The match it was retrying for has ended. This is now an allocation like any other
+                        // and needs a seat of its own before a row can be written for it.
+                        lease.Release();
+
+                        if (!quota.TryReserve(bucket, out lease))
+                        {
+                            logger.LogWarning(
+                                "Refused a match creation: the allocation it was retrying for has ended and "
+                                + "this address already allocated {Cap} matches this window",
+                                options.MaxOpenMatchesPerIp);
+                            return ApiErrors.RateLimitedResult();
+                        }
+
+                        outcome = CreationOutcome.Ambiguous;
+                        result = await store.CreateMatchForLobbyAsync(allocation, ct).ConfigureAwait(false);
+                    }
+                }
+
+                // Charged only for a match this call actually allocated. A create that found the lobby
+                // already had one wrote nothing, and the other seat asking for their credential is the normal
+                // way that happens - billing them for it would lock a pair out of their own rematches.
+                outcome = result.Created ? CreationOutcome.Created : CreationOutcome.NothingWritten;
+
+                // The row, not the response. A creation refused below this line still left a match in the
+                // database, and a counter that missed it would understate what this host has allocated.
+                if (result.Created) metrics.MatchCreated();
 
                 string requesterId = Canonical(identity.SteamId);
                 int? seat = SeatOf(verified.Players, requesterId);
@@ -149,6 +257,7 @@ namespace HexWars.NetServer.Endpoints
                     if (!RosterMatches(existing, verified.Players) ||
                         !string.Equals(result.Match.SetupWire, verified.Setup.ToWire(), StringComparison.Ordinal))
                     {
+                        metrics.SteamFailure(LobbyChangedFailure);
                         logger.LogInformation(
                             "Refused an existing match {MatchId} for lobby {LobbyId}: the lobby no longer matches it",
                             Short(result.Match.MatchId), verified.LobbyId);
@@ -199,6 +308,7 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (SteamApiException failure)
             {
+                RecordSteamRefusal(metrics, failure);
                 logger.LogInformation(
                     "Steam refused a match creation for lobby {LobbyId}: {Failure} ({Detail})",
                     request.SteamLobbyId, failure.Failure, failure.Detail);
@@ -219,8 +329,8 @@ namespace HexWars.NetServer.Endpoints
                 // service. It is a refusal, not a fault: answering 500 would tell a caller the server
                 // broke when what actually happened is that their request could not be honoured.
                 logger.LogWarning(
-                    invalid, "Refused a match creation for lobby {LobbyId}: {Reason}",
-                    request.SteamLobbyId, invalid.Message);
+                    "Refused a match creation for lobby {LobbyId}: {Reason}",
+                    request.SteamLobbyId, SteamLogRedaction.Redact(invalid.Message));
                 return ApiErrors.InvalidRequestResult();
             }
             catch (OperationCanceledException)
@@ -229,12 +339,33 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (Exception storage)
             {
-                // Storage is the only thing left that can throw here. The ticket is deliberately not in
-                // scope of this line: an exception message may be echoed into a log sink verbatim.
-                logger.LogError(
+                metrics.DbFailure(MatchMetrics.DbOp.Create);
+                // The exception is described rather than handed to the logger. Anything that reaches
+                // here failed while holding something: a transport error quotes the URL it could not reach,
+                // which for the Steam client is the publisher key and the ticket, and a connection failure
+                // quotes DATABASE_URL. Describe keeps the stack trace and takes the values out.
+                logger.LogRedactedError(
                     storage, "Match creation failed for lobby {LobbyId}", request.SteamLobbyId);
                 return ApiErrors.UnavailableResult();
             }
+            finally
+            {
+                // The single place the seat is settled, whichever of the dozen exits this handler took.
+                // Everything before the create call wrote nothing, so the seat goes straight back; the call
+                // itself may have left a row it could not tell us about, and that one is charged.
+                if (outcome == CreationOutcome.NothingWritten) lease.Release();
+                else lease.Commit();
+            }
+        }
+
+        /// <summary>What the create call managed to do, which is what decides whether the caller is charged
+        /// for it. <see cref="Ambiguous"/> is the window inside the store call: a row may exist and this
+        /// process cannot say, so it is treated as one.</summary>
+        enum CreationOutcome
+        {
+            NothingWritten,
+            Ambiguous,
+            Created,
         }
 
         static async Task<IResult> JoinAsync(
@@ -244,6 +375,9 @@ namespace HexWars.NetServer.Endpoints
             IMatchStore store,
             IMatchCredentialService credentials,
             AuthFailureThrottle throttle,
+            ServiceReadiness readiness,
+            MatchMetrics metrics,
+            PlayerBlockList blockList,
             IOptions<MatchHostingOptions> hosting,
             IHostEnvironment environment,
             TimeProvider time,
@@ -252,6 +386,13 @@ namespace HexWars.NetServer.Endpoints
         {
             ILogger logger = loggerFactory.CreateLogger(LoggerCategory);
             MatchHostingOptions options = hosting.Value;
+
+            // Before the body, and before anything that costs a round trip: a host on its way out
+            // must not take a seat in a match it will not be here to host, and refusing early is what
+            // makes a rolling deploy cost a player one retry rather than one game.
+            if (readiness.ShuttingDown) return ApiErrors.UnavailableResult();
+            // The match is known from the route, so every line this call writes can carry it.
+            using IDisposable? matchScope = LogScopes.MatchScope(logger, matchId);
 
             if (IsRefusedTransport(http, environment))
             {
@@ -277,8 +418,9 @@ namespace HexWars.NetServer.Endpoints
 
                 SteamIdentity identity = await AuthenticateAsync(steam, throttle, caller, request.Ticket!, ct);
 
-                if (IsRefusedAccount(options, identity, logger, "a join"))
+                if (IsRefusedAccount(blockList, identity, logger, "a join"))
                 {
+                    metrics.SteamFailure(BlockedFailure);
                     return ApiErrors.Failure(
                         StatusCodes.Status403Forbidden, ApiErrors.Blocked, ApiErrors.BlockedMessage);
                 }
@@ -347,6 +489,7 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (SteamApiException failure)
             {
+                RecordSteamRefusal(metrics, failure);
                 logger.LogInformation(
                     "Steam refused a join at match {MatchId}: {Failure} ({Detail})",
                     Short(matchId), failure.Failure, failure.Detail);
@@ -365,7 +508,8 @@ namespace HexWars.NetServer.Endpoints
             catch (ArgumentException invalid)
             {
                 logger.LogWarning(
-                    invalid, "Refused a join at match {MatchId}: {Reason}", Short(matchId), invalid.Message);
+                    "Refused a join at match {MatchId}: {Reason}",
+                    Short(matchId), SteamLogRedaction.Redact(invalid.Message));
                 return ApiErrors.InvalidRequestResult();
             }
             catch (OperationCanceledException)
@@ -374,7 +518,8 @@ namespace HexWars.NetServer.Endpoints
             }
             catch (Exception storage)
             {
-                logger.LogError(storage, "Join failed for match {MatchId}", Short(matchId));
+                metrics.DbFailure(MatchMetrics.DbOp.Join);
+                logger.LogRedactedError(storage, "Join failed for match {MatchId}", Short(matchId));
                 return ApiErrors.UnavailableResult();
             }
         }
@@ -401,10 +546,11 @@ namespace HexWars.NetServer.Endpoints
             }
         }
 
-        /// <summary>The rate-limit and throttle partition: the connection address, or a fixed key when
-        /// there is none. Never anything from the request, which the caller controls.</summary>
-        public static string CallerKey(HttpContext http) =>
-            http.Connection.RemoteIpAddress?.ToString() ?? UnknownCaller;
+        /// <summary>The rate-limit and throttle partition. Never anything from the request, which the
+        /// caller controls, and always the same bucketing the other per-caller controls use - a limiter that
+        /// counted raw addresses while the quota counted prefixes would be a limiter an IPv6 client walks
+        /// straight past.</summary>
+        public static string CallerKey(HttpContext http) => Hosting.CallerKey.From(http);
 
         /// <summary>Whether a match that is over is close enough to its ending for a seat to rejoin it. Only
         /// a match that actually started - one that expired while waiting has no game to show anybody.</summary>
@@ -483,7 +629,7 @@ namespace HexWars.NetServer.Endpoints
         /// title. It is logged, because an operator investigating a report will want to know.
         /// </summary>
         static bool IsRefusedAccount(
-            MatchHostingOptions options, SteamIdentity identity, ILogger logger, string what)
+            PlayerBlockList blockList, SteamIdentity identity, ILogger logger, string what)
         {
             string handle = SteamLogRedaction.HashSteamId(identity.SteamId);
 
@@ -493,7 +639,7 @@ namespace HexWars.NetServer.Endpoints
                 return true;
             }
 
-            if (IsBlocked(options, identity.SteamId))
+            if (blockList.IsBlocked(identity.SteamId))
             {
                 logger.LogWarning("Refused {What} from blocked account {Sid}", what, handle);
                 return true;
@@ -522,20 +668,31 @@ namespace HexWars.NetServer.Endpoints
         static bool IsRefusedTransport(HttpContext http, IHostEnvironment environment) =>
             environment.IsProduction() && !http.Request.IsHttps;
 
-        /// <summary>Compares canonically, so a blocked id configured with padding or in a non-canonical
-        /// form still matches the account it was meant to name.</summary>
-        internal static bool IsBlocked(MatchHostingOptions options, string steamId)
+        /// <summary>
+        /// Records what Valve refused, once, for both handlers.
+        ///
+        /// An authentication refusal is counted twice on purpose. It belongs with the other Steam failures
+        /// because that is where an operator looks when Steam is having a bad day, and on its own because a
+        /// rise in rejected tickets with everything else steady is somebody trying credentials rather than
+        /// a platform outage, and the two want different responses.
+        /// </summary>
+        static void RecordSteamRefusal(MatchMetrics metrics, SteamApiException failure)
         {
-            if (options.BlockedSteamIds.Length == 0) return false;
+            metrics.SteamFailure(failure.Failure.ToString());
 
-            string canonical = Canonical(steamId);
-            foreach (string blocked in options.BlockedSteamIds)
-            {
-                if (string.Equals(Canonical(blocked), canonical, StringComparison.Ordinal)) return true;
-            }
-
-            return false;
+            if (failure.Failure == SteamFailure.AuthenticationFailed)
+                metrics.AuthFailure(MatchMetrics.AuthStage.Ticket);
         }
+
+        /// <summary>The two refusals this server decides rather than Valve, named so they read alongside
+        /// the SteamFailure values in the same counter.</summary>
+        const string OwnershipFailure = "OwnershipMissing";
+
+        /// <summary>The lobby moved on between the client reading it and this server validating it. Not a
+        /// refusal Valve issued, but the same thing to an operator: a player who could not get in because
+        /// of what the lobby said.</summary>
+        const string LobbyChangedFailure = "lobby_changed";
+        const string BlockedFailure = "Blocked";
 
         static string Canonical(string steamId) =>
             SteamId64.TryNormalize(steamId, out string canonical) ? canonical : steamId.Trim();

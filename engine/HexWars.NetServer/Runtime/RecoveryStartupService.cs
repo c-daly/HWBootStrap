@@ -1,3 +1,5 @@
+using HexWars.NetServer.Operations;
+
 namespace HexWars.NetServer.Runtime
 {
     /// <summary>
@@ -45,7 +47,16 @@ namespace HexWars.NetServer.Runtime
 
         readonly CancellationTokenSource _stopping = new();
 
-        Task? _retries;
+        /// <summary>Guards the one state transition this service has: cancelled, then disposed. Stopping and
+        /// disposing arrive from different parts of the host and in either order.</summary>
+        readonly object _gate = new();
+
+        bool _cancelled;
+        bool _disposed;
+
+        /// <summary>Written under the gate by StartAsync, read by StopAsync from whichever thread the host
+        /// stops on.</summary>
+        volatile Task? _retries;
 
         public async Task StartAsync(CancellationToken cancellationToken)
         {
@@ -66,12 +77,32 @@ namespace HexWars.NetServer.Runtime
             // Only a host that could not verify goes on trying, and it does that behind startup rather than
             // inside it. Blocking here would hold the whole host down for as long as the database is,
             // which is the crash loop this service exists to avoid.
-            _retries = Task.Run(() => RetryUntilItSucceedsAsync(_stopping.Token), CancellationToken.None);
+            // The token is taken under the gate, and the loop is not started at all if this service has
+            // already been torn down. Reading Token on a disposed source throws, and a host CAN be disposed
+            // while its own start is still finishing.
+            CancellationToken stopping;
+            lock (_gate)
+            {
+                if (_disposed) return;
+
+                stopping = _stopping.Token;
+                _retries = Task.Run(() => RetryUntilItSucceedsAsync(stopping), CancellationToken.None);
+            }
         }
 
+        /// <summary>
+        /// Stops the retry loop and waits for it to unwind.
+        ///
+        /// It does NOT assume it runs before <see cref="Dispose"/>. Nothing in the hosted-service contract
+        /// promises that: the container disposes singletons when the provider is disposed, and disposing an
+        /// IHost disposes the provider WITHOUT stopping anything - which is exactly what the synchronous
+        /// dispose of a test host, or any `using var host = builder.Build()`, does. A service that cancelled
+        /// an already-disposed source there threw ObjectDisposedException out of the host teardown and took
+        /// whatever was tearing it down with it.
+        /// </summary>
         public async Task StopAsync(CancellationToken cancellationToken)
         {
-            await _stopping.CancelAsync().ConfigureAwait(false);
+            CancelOnce();
 
             if (_retries is null) return;
 
@@ -85,7 +116,52 @@ namespace HexWars.NetServer.Runtime
             }
         }
 
-        public void Dispose() => _stopping.Dispose();
+        /// <summary>
+        /// Releases the cancellation source, cancelling it first.
+        ///
+        /// Cancelling here rather than only in <see cref="StopAsync"/> is the other half of the same
+        /// problem. A host that is disposed without being stopped used to dispose this source while the
+        /// retry loop was still awaiting a delay on its token: the registration goes with the source, so the
+        /// delay never completes and the loop is stranded for the life of the process, holding the host it
+        /// belonged to alive behind it.
+        /// </summary>
+        public void Dispose()
+        {
+            lock (_gate)
+            {
+                if (_disposed) return;
+                _disposed = true;
+
+                if (!_cancelled)
+                {
+                    _cancelled = true;
+                    _stopping.Cancel();
+                }
+
+                _stopping.Dispose();
+            }
+        }
+
+        /// <summary>
+        /// Cancels the loop exactly once, whichever way this service is being torn down.
+        ///
+        /// The cancel happens under the gate rather than outside it, because the whole point is that
+        /// cancelling and disposing cannot interleave. Its callbacks are the token registrations of a delay
+        /// and a wait, neither of which re-enters this service, so there is nothing here to deadlock on.
+        /// </summary>
+        void CancelOnce()
+        {
+            lock (_gate)
+            {
+                if (_cancelled || _disposed) return;
+
+                _cancelled = true;
+                _stopping.Cancel();
+            }
+        }
+
+        /// <summary>The retry loop, for a test that needs to see it finish. Null until one is started.</summary>
+        internal Task? RetryLoop => _retries;
 
         /// <summary>One attempt. True when the host now knows what it is hosting.</summary>
         async Task<bool> TryVerifyAsync(CancellationToken ct)
@@ -109,7 +185,7 @@ namespace HexWars.NetServer.Runtime
                 // down has still not verified anything, and readiness must say so rather than inherit an
                 // all-clear from a run that did not happen.
                 state.RecordFailure(failure);
-                logger.LogError(failure,
+                logger.LogRedacted(LogLevel.Error, failure,
                     "Startup recovery could not run; this host will report unready and try again");
 
                 return false;

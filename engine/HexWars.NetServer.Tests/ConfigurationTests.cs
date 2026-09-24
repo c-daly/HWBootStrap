@@ -247,6 +247,43 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
+        public void BuildId_FallsBackToTheRenderCommitWhenItIsNotSet()
+        {
+            // Render sets RENDER_GIT_COMMIT on every deploy and there is nowhere in a Blueprint to write
+            // the commit into MATCH_BUILD_ID by hand. Without the fallback, either every deploy is refused
+            // for a missing build id or the operator pins a literal that stops matching what is deployed -
+            // and the build id is what a client compatibility check is made against.
+            var settings = ValidSteamSettings();
+            settings.Remove("MATCH_BUILD_ID");
+            settings["RENDER_GIT_COMMIT"] = "9f2c41ab8d3e5570bd11c0aa77e6c2f419b3d840";
+
+            var result = Read(settings);
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Match.BuildId, Is.EqualTo("9f2c41ab8d3e5570bd11c0aa77e6c2f419b3d840"));
+        }
+
+        [Test]
+        public void BuildId_PrefersAnExplicitValueOverTheRenderCommit()
+        {
+            var settings = ValidSteamSettings();
+            settings["MATCH_BUILD_ID"] = "playtest-7";
+            settings["RENDER_GIT_COMMIT"] = "9f2c41ab8d3e5570bd11c0aa77e6c2f419b3d840";
+
+            Assert.That(Read(settings).Match.BuildId, Is.EqualTo("playtest-7"),
+                "a build id somebody chose outranks the one the platform happens to know");
+        }
+
+        [Test]
+        public void BuildId_IsStillRefusedWhenNeitherIsSet()
+        {
+            var settings = ValidSteamSettings();
+            settings.Remove("MATCH_BUILD_ID");
+
+            Assert.That(Read(settings, "Production").Errors, Does.Contain("MATCH_BUILD_ID: missing"));
+        }
+
+        [Test]
         public void ErrorMessages_NeverContainConfiguredValues()
         {
             var settings = ValidSteamSettings();
@@ -836,7 +873,9 @@ namespace HexWars.NetServer.Tests
             using var factory = new WebApplicationFactory<Program>();
             using var client = factory.CreateClient();
 
-            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+            Assert.That(await client.GetStringAsync("/healthz"),
+                Does.Contain("\"status\":\"live\""),
+                "healthz is the liveness alias, and answers the same body as /health/live");
 
             var games = await client.GetAsync("/games");
             Assert.That(games.StatusCode, Is.EqualTo(HttpStatusCode.OK));
@@ -867,7 +906,9 @@ namespace HexWars.NetServer.Tests
             });
             using var client = factory.CreateClient();
 
-            Assert.That(await client.GetStringAsync("/healthz"), Is.EqualTo("ok"));
+            Assert.That(await client.GetStringAsync("/healthz"),
+                Does.Contain("\"status\":\"live\""),
+                "healthz is the liveness alias, and answers the same body as /health/live");
 
             var games = await client.GetAsync("/games");
             Assert.That(games.StatusCode, Is.EqualTo(HttpStatusCode.NotFound));

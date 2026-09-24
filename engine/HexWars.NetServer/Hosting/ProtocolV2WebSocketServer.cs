@@ -4,6 +4,7 @@ using HexWars.Engine;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Endpoints;
+using HexWars.NetServer.Operations;
 using HexWars.NetServer.Runtime;
 using Microsoft.Extensions.Options;
 
@@ -58,6 +59,25 @@ namespace HexWars.NetServer.Hosting
         static readonly SemaphoreSlim ValidationSlots =
             new(MaxConcurrentValidations, MaxConcurrentValidations);
 
+        /// <summary>
+        /// Test seam: holds every validation slot until the returned handle is disposed.
+        ///
+        /// The ceiling is process-wide and static, which is what makes it a ceiling; a test that wanted to
+        /// reach it by opening sixty-four real handshakes would be testing the thread pool. It is only
+        /// reachable from the test assembly.
+        /// </summary>
+        internal static IDisposable HoldEveryValidationSlot()
+        {
+            for (var taken = 0; taken < MaxConcurrentValidations; taken++) ValidationSlots.Wait();
+
+            return new SlotRelease();
+        }
+
+        sealed class SlotRelease : IDisposable
+        {
+            public void Dispose() => ValidationSlots.Release(MaxConcurrentValidations);
+        }
+
         const string LoggerCategory = "HexWars.NetServer.Hosting.ProtocolV2WebSocketServer";
 
         /// <summary>How much of an inbound payload a debug line is allowed to carry.</summary>
@@ -86,6 +106,15 @@ namespace HexWars.NetServer.Hosting
             if (!context.WebSockets.IsWebSocketRequest)
             {
                 context.Response.StatusCode = StatusCodes.Status400BadRequest;
+                return;
+            }
+
+            // Before the origin check and long before the upgrade: a host that has been told to stop has
+            // nothing to offer a new socket, and a client turned away now reconnects to whatever replaces
+            // this process rather than being closed a second after it authenticated.
+            if (context.RequestServices.GetRequiredService<ServiceReadiness>().ShuttingDown)
+            {
+                context.Response.StatusCode = StatusCodes.Status503ServiceUnavailable;
                 return;
             }
 
@@ -119,8 +148,10 @@ namespace HexWars.NetServer.Hosting
                 return;
             }
 
-            string remoteIp =
-                context.Connection.RemoteIpAddress?.ToString() ?? SteamMatchEndpoints.UnknownCaller;
+            // The same bucketing every other per-caller control on this server uses. Counting raw
+            // addresses here would let an IPv6 client hold one socket per address inside its own prefix and
+            // spend the auth-failure budget once per address as well.
+            string remoteIp = CallerKey.From(context);
 
             // Also before the upgrade, and as a reservation rather than a count. An accepted socket costs a
             // receive buffer, a writer task and a registry entry before it has proved anything - and a
@@ -157,13 +188,34 @@ namespace HexWars.NetServer.Hosting
             // Registered before the handshake, because the coordinator answers AUTH by sending SEAT through
             // the sink: a connection the sink cannot find would authenticate into silence. Add takes over
             // the reservation above; Remove is what hands it back.
-            registry.Add(connection);
+            //
+            // It refuses once this host is going away. The readiness check higher up is a moment, not a
+            // barrier: a request that passed it is still mid-upgrade when shutdown takes its snapshot of
+            // what to close, and a socket added after that snapshot is one nobody ever closes. Refused
+            // here it gets the same 1012 every other socket gets, which is the answer that tells a client
+            // to come back rather than that something broke.
+            if (!registry.Add(connection))
+            {
+                logger.LogDebug("Refused a v2 socket that arrived as this host was going away");
+                registry.Release(remoteIp);
+                await connection
+                    .CloseAsync(GracefulShutdownService.RestartCloseStatus, GracefulShutdownService.RestartCloseReason)
+                    .ConfigureAwait(false);
+                return;
+            }
 
             try
             {
                 if (!await AuthenticateAsync(context, connection, coordinator, options, time, logger)
                         .ConfigureAwait(false))
                     return;
+
+                // Only after the handshake, because only then is there a match to name. Every line the pump
+                // writes for the rest of this socket carries it, which is what makes a log searchable by game
+                // rather than by guesswork about which frame belonged to whom.
+                using IDisposable? scope = connection.MatchId is Guid seated
+                    ? LogScopes.MatchScope(logger, seated)
+                    : null;
 
                 await PumpAsync(context, connection, coordinator, time, logger).ConfigureAwait(false);
             }
@@ -191,6 +243,8 @@ namespace HexWars.NetServer.Hosting
         {
             CancellationToken aborted = context.RequestAborted;
             var throttle = context.RequestServices.GetRequiredService<AuthFailureThrottle>();
+            var metrics = context.RequestServices.GetRequiredService<MatchMetrics>();
+            var registry = context.RequestServices.GetRequiredService<V2ConnectionRegistry>();
 
             using var deadline = new CancellationTokenSource(
                 TimeSpan.FromSeconds(options.AuthFrameTimeoutSeconds), time);
@@ -201,6 +255,7 @@ namespace HexWars.NetServer.Hosting
 
             if (first.Kind == FrameKind.TooBig)
             {
+                metrics.AuthFailure(MatchMetrics.AuthStage.Frame);
                 await connection.CloseFromReceiveLoopAsync(CloseTooBig, "message too large")
                     .ConfigureAwait(false);
                 return false;
@@ -210,6 +265,7 @@ namespace HexWars.NetServer.Hosting
             {
                 // Closed without a word. The bytes are not dispatched and not decoded, so a binary frame
                 // that happens to spell a valid AUTH authenticates nothing.
+                metrics.AuthFailure(MatchMetrics.AuthStage.Frame);
                 logger.LogDebug("Closed a v2 socket that opened with a binary frame");
                 await connection.CloseFromReceiveLoopAsync(CloseUnsupportedData, TextFramesOnly)
                     .ConfigureAwait(false);
@@ -222,6 +278,7 @@ namespace HexWars.NetServer.Hosting
                 // whole point of the deadline; a client that hung up on its own needs nothing said to it.
                 if (deadline.IsCancellationRequested && !aborted.IsCancellationRequested)
                 {
+                    metrics.AuthFailure(MatchMetrics.AuthStage.Timeout);
                     logger.LogDebug("Closed a v2 socket that never sent AUTH");
                     await connection.CloseFromReceiveLoopAsync(ClosePolicy, "auth timeout")
                         .ConfigureAwait(false);
@@ -241,7 +298,8 @@ namespace HexWars.NetServer.Hosting
                 logger.LogDebug(
                     "A v2 socket opened with something other than AUTH, {Bytes} bytes", first.Text.Length);
                 throttle.RecordFailure(connection.RemoteIp);
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid,
+                    metrics, MatchMetrics.AuthStage.Frame).ConfigureAwait(false);
                 return false;
             }
 
@@ -250,7 +308,23 @@ namespace HexWars.NetServer.Hosting
             {
                 logger.LogDebug("A v2 socket sent an AUTH frame that is not a match id and a credential");
                 throttle.RecordFailure(connection.RemoteIp);
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid,
+                    metrics, MatchMetrics.AuthStage.Frame).ConfigureAwait(false);
+                return false;
+            }
+
+            // This host began going away while the socket was still proving who it is. It gets the same
+            // 1012 every seated socket gets rather than a seat in a match this process will not be hosting
+            // a moment from now, and no credential is looked up on its behalf. Checked here rather than at
+            // the upgrade because the whole point is the window in between: the frame this socket is being
+            // judged on arrived after the upgrade was accepted.
+            if (registry.Stopping)
+            {
+                logger.LogDebug("Refused a v2 handshake that landed as this host was going away");
+                await connection.CloseFromReceiveLoopAsync(
+                        GracefulShutdownService.RestartCloseStatus,
+                        GracefulShutdownService.RestartCloseReason)
+                    .ConfigureAwait(false);
                 return false;
             }
 
@@ -260,7 +334,8 @@ namespace HexWars.NetServer.Hosting
             if (throttle.IsThrottled(connection.RemoteIp))
             {
                 logger.LogWarning("Refused an AUTH frame from a caller that has spent its failures");
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailInvalid,
+                    metrics, MatchMetrics.AuthStage.Frame).ConfigureAwait(false);
                 return false;
             }
 
@@ -280,7 +355,8 @@ namespace HexWars.NetServer.Hosting
                 logger.LogWarning(
                     "Refused an AUTH frame: {Slots} handshakes are already being validated",
                     MaxConcurrentValidations);
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable,
+                    metrics, MatchMetrics.AuthStage.Capacity).ConfigureAwait(false);
                 return false;
             }
 
@@ -300,13 +376,27 @@ namespace HexWars.NetServer.Hosting
                 // The coordinator turns the failures it expects into a fail code of its own, so anything
                 // that reaches here is a bug. The player still gets an answer they can retry on, and it is
                 // not counted against them: this one is ours.
-                logger.LogError(failure, "A v2 handshake failed unexpectedly");
-                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable).ConfigureAwait(false);
+                logger.LogRedactedError(failure, "A v2 handshake failed unexpectedly");
+                await RefuseAsync(connection, DurableMatchCoordinator.AuthFailUnavailable,
+                    metrics, MatchMetrics.AuthStage.Internal).ConfigureAwait(false);
                 return false;
             }
             finally
             {
                 ValidationSlots.Release();
+            }
+
+            // Refused because this host is leaving, not because anything about the caller was wrong. It
+            // gets the same 1012 every seated socket is about to get, so the client reconnects to whatever
+            // replaces this process instead of treating it as a credential it should stop using.
+            if (!outcome.Ok && outcome.ShuttingDown)
+            {
+                logger.LogDebug("Closed a v2 handshake that finished after this host began shutting down");
+                await connection.CloseFromReceiveLoopAsync(
+                        GracefulShutdownService.RestartCloseStatus,
+                        GracefulShutdownService.RestartCloseReason)
+                    .ConfigureAwait(false);
+                return false;
             }
 
             if (!outcome.Ok)
@@ -396,8 +486,18 @@ namespace HexWars.NetServer.Hosting
 
         /// <summary>Names the refusal, then closes. The frame goes out first because the close drains the
         /// outbound queue: a client told only by a close status cannot tell invalid from unavailable.</summary>
-        static async Task RefuseAsync(V2Connection connection, string failCode)
+        /// <summary>
+        /// Refuses a handshake and records how far it got.
+        ///
+        /// The stage is the whole value of the counter. A rise in frame refusals is a client sending
+        /// rubbish and costs this server nothing; a rise in credential refusals is a database read per
+        /// attempt. They are the same number and they want different responses.
+        /// </summary>
+        static async Task RefuseAsync(
+            V2Connection connection, string failCode, MatchMetrics? metrics = null, string? stage = null)
         {
+            if (metrics is not null && stage is not null) metrics.AuthFailure(stage);
+
             connection.TryEnqueue(AuthFailPrefix + failCode);
             await connection.CloseFromReceiveLoopAsync(ClosePolicy, "auth failed").ConfigureAwait(false);
         }

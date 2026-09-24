@@ -144,6 +144,10 @@ if you change the source at runtime, which is what the tests do.
 
 ## Running the suites
 
+An App ID is not needed for local verification. Keep the shipped URL placeholder and use the
+[local multiplayer validation workflow](local-multiplayer-validation.md), which provides synthetic
+Steam identities for the server proof and the Unity suites.
+
 Both suites live in the Unity editor under **Window > General > Test Runner**.
 
 - **EditMode** (`HexWars.Presentation.Tests`, `Assets/HexWars/Tests/Editor/`) covers the pure C#:

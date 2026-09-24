@@ -41,6 +41,17 @@ namespace HexWars.NetServer.Configuration
         public const string MatchPublicBaseUrlKey = "MATCH_PUBLIC_BASE_URL";
         public const string MatchJoinTokenTtlSecondsKey = "MATCH_JOIN_TOKEN_TTL_SECONDS";
         public const string MatchBuildIdKey = "MATCH_BUILD_ID";
+
+        /// <summary>
+        /// The commit Render sets on every deploy, used as the build id when nothing else supplies one.
+        ///
+        /// Not a HexWars setting and not documented as one: it is read only as a fallback, because a
+        /// Blueprint has nowhere to write the commit it is about to deploy. Without it an operator has
+        /// two bad choices - leave the build id unset and be refused at startup, or pin a literal that
+        /// stops matching what is actually running, which is the one thing a client compatibility check
+        /// is made against.
+        /// </summary>
+        public const string RenderGitCommitKey = "RENDER_GIT_COMMIT";
         public const string MatchProtocolVersionKey = "MATCH_PROTOCOL_VERSION";
         public const string AllowedWebOriginsKey = "ALLOWED_WEB_ORIGINS";
         public const string LobbyProviderKey = "LOBBY_PROVIDER";
@@ -60,6 +71,12 @@ namespace HexWars.NetServer.Configuration
         public const string MatchOutboundQueueBytesKey = "MATCH_OUTBOUND_QUEUE_BYTES";
         public const string MatchCredentialRecheckSecondsKey = "MATCH_CREDENTIAL_RECHECK_SECONDS";
         public const string MatchMaxRechecksPerCadenceKey = "MATCH_MAX_RECHECKS_PER_CADENCE";
+        public const string MatchMaxOpenMatchesPerIpKey = "MATCH_MAX_OPEN_MATCHES_PER_IP";
+        public const string MatchRetentionSweepMinutesKey = "MATCH_RETENTION_SWEEP_MINUTES";
+        public const string MatchRetentionWaitingMinutesKey = "MATCH_RETENTION_WAITING_MINUTES";
+        public const string MatchRetentionActiveIdleDaysKey = "MATCH_RETENTION_ACTIVE_IDLE_DAYS";
+        public const string MatchRetentionTerminalDaysKey = "MATCH_RETENTION_TERMINAL_DAYS";
+        public const string MatchRetentionCredentialHoursKey = "MATCH_RETENTION_CREDENTIAL_HOURS";
 
         /// <summary>Keys whose failures belong to <see cref="SteamOptions"/> rather than the match host.</summary>
         public static readonly string[] SteamKeys =
@@ -100,7 +117,10 @@ namespace HexWars.NetServer.Configuration
             string? webApiBaseRaw = Value(config, SteamWebApiBaseUrlKey);
             string? databaseUrlRaw = Value(config, DatabaseUrlKey);
             string? publicBaseRaw = Value(config, MatchPublicBaseUrlKey);
-            string? buildIdRaw = Value(config, MatchBuildIdKey);
+            // An explicit build id outranks the platform one: somebody who set it meant it, and a
+            // deployment that pins a build for a compatibility window must not have it silently
+            // replaced by whatever commit happened to deploy.
+            string? buildIdRaw = Value(config, MatchBuildIdKey) ?? Value(config, RenderGitCommitKey);
 
             // A missing, unparseable or zero App ID all mean the same thing to an operator: not configured.
             if (appIdRaw is not null
@@ -216,6 +236,42 @@ namespace HexWars.NetServer.Configuration
                 MatchHostingOptions.MinMaxRechecksPerCadence,
                 MatchHostingOptions.MaxMaxRechecksPerCadence,
                 MatchHostingOptions.DefaultMaxRechecksPerCadence, errors);
+
+            match.MaxOpenMatchesPerIp = BoundedInt(
+                config, MatchMaxOpenMatchesPerIpKey,
+                MatchHostingOptions.MinMaxOpenMatchesPerIp,
+                MatchHostingOptions.MaxMaxOpenMatchesPerIp,
+                MatchHostingOptions.DefaultMaxOpenMatchesPerIp, errors);
+
+            match.RetentionSweepMinutes = BoundedInt(
+                config, MatchRetentionSweepMinutesKey,
+                MatchHostingOptions.MinRetentionSweepMinutes,
+                MatchHostingOptions.MaxRetentionSweepMinutes,
+                MatchHostingOptions.DefaultRetentionSweepMinutes, errors);
+
+            match.RetentionWaitingMinutes = BoundedInt(
+                config, MatchRetentionWaitingMinutesKey,
+                MatchHostingOptions.MinRetentionWaitingMinutes,
+                MatchHostingOptions.MaxRetentionWaitingMinutes,
+                MatchHostingOptions.DefaultRetentionWaitingMinutes, errors);
+
+            match.RetentionActiveIdleDays = BoundedInt(
+                config, MatchRetentionActiveIdleDaysKey,
+                MatchHostingOptions.MinRetentionActiveIdleDays,
+                MatchHostingOptions.MaxRetentionActiveIdleDays,
+                MatchHostingOptions.DefaultRetentionActiveIdleDays, errors);
+
+            match.RetentionTerminalDays = BoundedInt(
+                config, MatchRetentionTerminalDaysKey,
+                MatchHostingOptions.MinRetentionTerminalDays,
+                MatchHostingOptions.MaxRetentionTerminalDays,
+                MatchHostingOptions.DefaultRetentionTerminalDays, errors);
+
+            match.RetentionCredentialHours = BoundedInt(
+                config, MatchRetentionCredentialHoursKey,
+                MatchHostingOptions.MinRetentionCredentialHours,
+                MatchHostingOptions.MaxRetentionCredentialHours,
+                MatchHostingOptions.DefaultRetentionCredentialHours, errors);
 
             // Checked as a pair rather than as two ranges, because either value alone can be perfectly
             // reasonable and the combination still closes healthy sockets: a window that is not longer than
@@ -425,6 +481,12 @@ namespace HexWars.NetServer.Configuration
             target.OutboundQueueBytes = source.OutboundQueueBytes;
             target.CredentialRecheckSeconds = source.CredentialRecheckSeconds;
             target.MaxRechecksPerCadence = source.MaxRechecksPerCadence;
+            target.MaxOpenMatchesPerIp = source.MaxOpenMatchesPerIp;
+            target.RetentionSweepMinutes = source.RetentionSweepMinutes;
+            target.RetentionWaitingMinutes = source.RetentionWaitingMinutes;
+            target.RetentionActiveIdleDays = source.RetentionActiveIdleDays;
+            target.RetentionTerminalDays = source.RetentionTerminalDays;
+            target.RetentionCredentialHours = source.RetentionCredentialHours;
         }
 
         /// <summary>Environment variables cannot change under a running process, so the verdict is computed

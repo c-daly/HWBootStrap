@@ -175,6 +175,95 @@ namespace HexWars.NetServer.Tests.Fixtures
         public Task<IReadOnlyList<string>> ApplyMigrationsAsync() =>
             new MigrationRunner(DataSource, NullLogger<MigrationRunner>.Instance).ApplyAsync(CancellationToken.None);
 
+        /// <summary>
+        /// A second database on the same server, created for one test and dropped with it.
+        ///
+        /// It exists for the one verb that is meant to be pointed at a database nobody may destroy.
+        /// Exercising verify-journals against <see cref="ContainerDatabase"/> proves less than it looks:
+        /// that name IS disposable, so a guard put back in front of the verb would let such a test through
+        /// and the procedure would still be broken. This hands out a database whose name carries no
+        /// delimited "test" token, which is the only kind of target that can fail that way.
+        /// </summary>
+        public async Task<SiblingDatabase> CreateSiblingAsync(string name)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(name);
+
+            // A database name is an identifier, and identifiers cannot be parameters. So it is restricted
+            // to what can never need quoting rather than escaped into a CREATE DATABASE by hand.
+            if (!name.All(c => char.IsAsciiLetterLower(c) || char.IsAsciiDigit(c) || c == '_'))
+                throw new ArgumentException(
+                    "a sibling database name must be lower-case ASCII letters, digits or underscores",
+                    nameof(name));
+
+            await DropAsync(name).ConfigureAwait(false);
+
+            await using (NpgsqlConnection admin = await DataSource.OpenConnectionAsync().ConfigureAwait(false))
+            await using (var create = new NpgsqlCommand("CREATE DATABASE " + name, admin))
+            {
+                await create.ExecuteNonQueryAsync().ConfigureAwait(false);
+            }
+
+            var parts = new NpgsqlConnectionStringBuilder(ConnectionString) { Database = name };
+            return new SiblingDatabase(this, name, parts.ConnectionString);
+        }
+
+        /// <summary>Removes a sibling, disconnecting whatever is still holding it. Named databases only:
+        /// this never touches the database the fixture itself hands out.</summary>
+        async Task DropAsync(string name)
+        {
+            await using NpgsqlConnection admin = await DataSource.OpenConnectionAsync().ConfigureAwait(false);
+
+            await using (var evict = new NpgsqlCommand(
+                "SELECT pg_terminate_backend(pid) FROM pg_stat_activity "
+                + "WHERE datname = @name AND pid <> pg_backend_pid()", admin))
+            {
+                evict.Parameters.AddWithValue("name", name);
+                await evict.ExecuteNonQueryAsync().ConfigureAwait(false);
+            }
+
+            await using var drop = new NpgsqlCommand("DROP DATABASE IF EXISTS " + name, admin);
+            await drop.ExecuteNonQueryAsync().ConfigureAwait(false);
+        }
+
+        /// <summary>A database <see cref="CreateSiblingAsync"/> made, and the pool and both address forms
+        /// for it. Disposing drops it.</summary>
+        public sealed class SiblingDatabase : IAsyncDisposable
+        {
+            readonly PostgresTestDatabase _server;
+            readonly string _name;
+
+            internal SiblingDatabase(PostgresTestDatabase server, string name, string connectionString)
+            {
+                _server = server;
+                _name = name;
+                ConnectionString = connectionString;
+                DatabaseUrl = ComposeUrl(connectionString);
+                DataSource = NpgsqlDataSource.Create(connectionString);
+            }
+
+            /// <summary>postgres://user:password@host:port/database, the form a deploy puts in DATABASE_URL.</summary>
+            public string DatabaseUrl { get; }
+
+            /// <summary>The same target in the Key=Value form Npgsql consumes.</summary>
+            public string ConnectionString { get; }
+
+            /// <summary>A pool the test owns.</summary>
+            public NpgsqlDataSource DataSource { get; }
+
+            /// <summary>The same production migration runner the shared fixture uses.</summary>
+            public Task<IReadOnlyList<string>> ApplyMigrationsAsync() =>
+                new MigrationRunner(DataSource, NullLogger<MigrationRunner>.Instance)
+                    .ApplyAsync(CancellationToken.None);
+
+            public async ValueTask DisposeAsync()
+            {
+                // This pool first: a database with a connection open in this process cannot be dropped,
+                // and the pool holds its connections open long after the last command on them.
+                await DataSource.DisposeAsync().ConfigureAwait(false);
+                await _server.DropAsync(_name).ConfigureAwait(false);
+            }
+        }
+
         internal static async Task ShutdownAsync()
         {
             var instance = Interlocked.Exchange(ref _instance, null);

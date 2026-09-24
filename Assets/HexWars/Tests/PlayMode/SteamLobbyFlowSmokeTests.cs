@@ -6,6 +6,7 @@ using HexWars.Engine;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
+using Object = UnityEngine.Object;
 
 namespace HexWars.Presentation.PlayModeTests
 {
@@ -38,8 +39,9 @@ namespace HexWars.Presentation.PlayModeTests
         [SetUp]
         public void SetUp()
         {
-            // the handoff opens a websocket to an unroutable host on purpose; its failure is not the subject
-            LogAssert.ignoreFailingMessages = true;
+            // Every lobby handoff uses the fake transport, including tests that stop before AUTH.
+            // Real connection errors can otherwise arrive after teardown and contaminate the next test.
+            SteamMatchConnection.DriverFactoryForTests = () => new FakeSteamSocketDriver();
 
             _steam = new FakeSteamLobbyClient
             {
@@ -71,7 +73,6 @@ namespace HexWars.Presentation.PlayModeTests
             SteamMatchConnection.DriverFactoryForTests = null;
             if (_host != null) Object.DestroyImmediate(_host);
             _steam.Dispose();
-            LogAssert.ignoreFailingMessages = false;
         }
 
         [UnityTest]
