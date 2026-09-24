@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "id": "design-1790288646398-xrfdpu",
+  "name": "Cliffwatch",
+  "stats": {
+    "health": 5,
+    "damage": 2,
+    "defense": 7,
+    "movement": 1,
+    "climb": 0,
+    "range": 1,
+    "fireUp": 0,
+    "vision": 2,
+    "seeUp": 0
+  },
+  "appearance": {
+    "selection": "crux-01",
+    "resolvedArtId": "crux-01",
+    "finish": "graphite"
+  }
+}

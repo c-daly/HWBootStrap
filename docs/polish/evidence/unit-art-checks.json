@@ -1,0 +1,53 @@
+{
+  "checkedAt": "2026-09-24T22:24:11.245Z",
+  "browser": "149.0.7827.53",
+  "checks": [
+    "All eight selectable forms update hero, board and 32/48/72 px previews without changing cost",
+    "Manual art survives role changes; automatic art follows role and resolves top-score ties to Relay",
+    "Save and reload preserve name, exact stats, explicit form and finish",
+    "Export includes stable explicit art ID, finish and unchanged stats",
+    "Silhouette mode and broken opponent rim render on chosen art",
+    "All eight role cases including combined horizontal/vertical reach match source classification",
+    "Input bounds preserve the health floor and finite integer values",
+    "Unknown saved art falls back to role-derived art without losing stats",
+    "Desktop/mobile overflow checks, keyboard art choice and reduced-motion behavior",
+    "No page/console errors or external network requests",
+    "Unique SVG gradient IDs across all simultaneous renders"
+  ],
+  "roles": [
+    {
+      "expected": "Brute",
+      "actual": "Brute"
+    },
+    {
+      "expected": "Striker",
+      "actual": "Striker"
+    },
+    {
+      "expected": "Bulwark",
+      "actual": "Bulwark"
+    },
+    {
+      "expected": "Runner",
+      "actual": "Runner"
+    },
+    {
+      "expected": "Climber",
+      "actual": "Climber"
+    },
+    {
+      "expected": "Sniper",
+      "actual": "Sniper"
+    },
+    {
+      "expected": "Spotter",
+      "actual": "Spotter"
+    },
+    {
+      "expected": "Generalist",
+      "actual": "Generalist"
+    }
+  ],
+  "errors": [],
+  "requests": []
+}

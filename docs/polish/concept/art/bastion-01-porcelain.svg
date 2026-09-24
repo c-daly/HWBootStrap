@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" class="unit-art" viewBox="0 0 200 200" role="img" aria-label="Bastion, Bulwark form" data-art-id="bastion-01"><defs>
+      <linearGradient id="unit-7-body" x1="0" y1="0" x2=".9" y2="1" gradientUnits="objectBoundingBox"><stop stop-color="#fffdf2"/><stop offset=".46" stop-color="#d8dfd9"/><stop offset="1" stop-color="#8fa6ab"/></linearGradient>
+      <linearGradient id="unit-7-top" x1="0" y1="0" x2="1" y2="1"><stop stop-color="#fffdf2"/><stop offset="1" stop-color="#d8dfd9"/></linearGradient>
+      <linearGradient id="unit-7-side" x1="0" y1="0" x2="1" y2=".7"><stop stop-color="#8fa6ab"/><stop offset="1" stop-color="#647e88"/></linearGradient>
+      <linearGradient id="unit-7-dark"><stop stop-color="#647e88"/><stop offset="1" stop-color="#13242d"/></linearGradient>
+      <radialGradient id="unit-7-shadow"><stop stop-color="#000" stop-opacity=".5"/><stop offset="1" stop-color="#000" stop-opacity="0"/></radialGradient>
+    </defs><ellipse class="cast-shadow" cx="104" cy="159" rx="75" ry="28" fill="url(#unit-7-shadow)"/>
+    <g class="footing"><path d="M52 137 100 119 148 137V150L100 168 52 150Z" fill="#182831" stroke="#40545d" stroke-width=".7"/><path d="M52 137 100 119 148 137 100 155Z" fill="#263940"/>
+    <path d="M57 147 100 163 143 147" fill="none" stroke="#80d9c4" stroke-width="2" /></g>
+    <g class="sculpture"><path d="M51 68 94 47 94 145 57 129Z" fill="url(#unit-7-body)" /><path d="M51 68 67 76 94 62 94 47Z" fill="url(#unit-7-top)" /><path d="M67 76 94 62 94 145 70 136Z" fill="url(#unit-7-side)" /><path d="M106 47 149 68 143 129 106 145Z" fill="url(#unit-7-body)" /><path d="M106 47 149 68 133 76 106 62Z" fill="url(#unit-7-top)" /><path d="M106 62 133 76 130 136 106 145Z" fill="url(#unit-7-side)" /><path d="M100 81v50" fill="none" stroke="#80d9c4" stroke-width="2.7" stroke-linecap="round"/><path d="M52 68 66 76M134 76 148 68" fill="none" stroke="#fffdf2" stroke-opacity=".66" stroke-width="1.1" stroke-linecap="round"/></g></svg>

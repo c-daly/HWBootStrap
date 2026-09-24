@@ -6,9 +6,20 @@
   "concept-workshop-design.png": "98a45a3dcdfaffb46ccce63b0bc457c287665026c158b5b6cd11e05d3f322835",
   "concept-workshop-desktop.png": "d29ef2380cfcf2530ef32d24f0883d4511654984a8d976b5368438be278e79e2",
   "concept-workshop-mobile.png": "31de4026df8c396c81896636acdee8d97b9047f5f1117c30e77d780fe75508f6",
+  "dark-unit-workshop.png": "79336baae60147376138adb4a69691cb5961f0941d8d31713473e86fbf878d05",
+  "exported-concept-design.json": "e8a25715f08ccd07b70dcb5f3b8c7155fa0a4373b5f72bb0969933bd35b8c9d8",
   "legacy-browser-errors-summary.json": "5396d2eb5a1ecee7b2651707f0473b8be7eb1e2cb5806f0d3f4a0f20627af4a6",
   "legacy-webgl-match.png": "106f24fdd005c51ce58e06d4b1680b0a102511580b0b3e25e442de1d6d2f0733",
   "legacy-webgl-setup.png": "554972d12784e6dbd49fa895a2ae93e71053b97e3c4827a085c5ebce3cc969d4",
   "legacy-webgl-sha256.json": "aa4111c70a958a45e2cc4c8549bf0bbafcdb9f38524d95272cd3fc415c0b2adb",
-  "legacy-webgl-title.png": "7577427e85174bf5136fec75d510ae1d828ff3f7de65e21be2696e4dd7d52d61"
+  "legacy-webgl-title.png": "7577427e85174bf5136fec75d510ae1d828ff3f7de65e21be2696e4dd7d52d61",
+  "unit-art-checks.json": "51d7613622674a6c72923891a7fcb50a1d35e286cdba3b599255fa3763137937",
+  "unit-board-team-preview.png": "9ae802d7d75152b4270ac8a108886a31d5a0a374c685fcc98300a0a9d27090ae",
+  "unit-collection-graphite.png": "9910d9d3752e123b24fe3b5c7b0856d13f281130fbccf970c2482905703a257d",
+  "unit-collection-porcelain.png": "0632f9bd2eb9d2a565191412cea993403fb41e48f53c6a4d7d76dca62f21fa8a",
+  "unit-collection-silhouette.png": "35b0070fa3708c945c403f9fdfefae6658c486786f142e7e304e10dea256ffb3",
+  "unit-storage-checks.json": "87b9953ee764c9434d4bc43706d63fc405679f31198add0fd206486c6de8153a",
+  "unit-workshop-1280.png": "2759966b323d2b46a8eda8e5ea4994aa14bd1724375baf874092169e48ced3bf",
+  "unit-workshop-1920.png": "1121106fa8f857bf06e2a9a16659230599af917253612f1a9c18c7303f91847c",
+  "unit-workshop-390.png": "60a1c4f3a7db008d0f9b83a376ae6ff8075cbefc96b17176caee60102fed76f2"
 }

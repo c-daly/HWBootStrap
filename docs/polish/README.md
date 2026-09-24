@@ -6,12 +6,26 @@
 
 **Status:** proposals and an interactive visual study; no Unity gameplay changes
 
+## Latest: dark unit workshop
+
+Following your preference for the dark theme and simpler, more elegant units, start with the
+**[new interactive unit workshop](concept/units.html)**. It has eight distinct forms, porcelain and
+graphite finishes, automatic or explicit art selection, board/scale previews, and saved designs
+that retain their art. [Windows launcher](<concept/Open Unit Workshop.cmd>).
+
+See the [unit design decisions and integration notes](unit-art-direction.md), or compare the
+[porcelain collection](evidence/unit-collection-porcelain.png) and
+[graphite collection](evidence/unit-collection-graphite.png). The dark direction now takes priority
+over the initial warm-palette recommendation below.
+
+## Initial exploration
+
 Start with the [recommendations](recommendations.md). Open [the visual study](concept/index.html)
 directly in a browser to compare three directions, inspect a damage preview, and adjust a unit's
 point allocation. It uses local HTML, CSS and SVG, requires no packages or network access, and
 does not connect to Steam or the game engine. Its example names, stats and maps are illustrative.
 
-My recommendation is **The Workshop**: keep the floating hex battlefield, make the pieces feel
+The initial recommendation was **The Workshop**: keep the floating hex battlefield, make the pieces feel
 like deliberately constructed objects, and make designing a counter the game's central promise.
 Pair that visual direction with a guided first encounter and an exact attack forecast before
 expanding the content offering.

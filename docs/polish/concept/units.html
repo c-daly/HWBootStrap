@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HexWars — unit workshop</title>
+  <link rel="stylesheet" href="units.css">
+  <script src="unit-art.js" defer></script><script src="units.js" defer></script>
+</head>
+<body>
+  <header class="masthead"><a class="brand" href="units.html"><span class="brand-mark">H</span> HEXWARS</a><span class="edition">FORM STUDY / 02</span><nav aria-label="Study navigation"><a href="#collection">The collection</a><a href="index.html">Earlier study ↗</a></nav></header>
+  <main>
+    <section class="intro"><div><p class="eyebrow">A quieter kind of war machine</p><h1>A small army.<br>A clear silhouette.</h1></div><div class="intro-note"><p>Eight forms. Two finishes. One visual language.</p><p>Choose a shape for the unit you're building, then see how it reads on a dark battlefield.</p><span class="study-label">Interactive art & creation concept · not the Unity game</span></div></section>
+    <section class="workbench" aria-label="Unit creation study">
+      <div class="showcase">
+        <div class="showcase-heading"><div><p class="eyebrow">Selected form / <span id="form-number">07</span></p><h2 id="form-name">Lance</h2><p id="form-cue">A quiet body with one unmistakable reach.</p></div><span id="choice-mode" class="pill">Automatic</span></div>
+        <div class="hero-stage"><div class="stage-ring"></div><div id="hero-art"></div><span class="coordinate left">FORM / FRONT THREE-QUARTER</span><span class="coordinate right">CERAMIC · 01</span></div>
+        <div class="finish-row"><fieldset><legend>Surface</legend><div class="segmented"><button data-finish="porcelain" aria-pressed="true"><i class="finish-dot porcelain"></i>Porcelain</button><button data-finish="graphite" aria-pressed="false"><i class="finish-dot graphite"></i>Graphite</button></div></fieldset><label class="silhouette-toggle"><input id="silhouette" type="checkbox">Silhouette only</label></div>
+        <div class="scale-study"><div><p class="eyebrow">At a glance</p><p>Same art. Actual display sizes.</p></div><figure><div id="scale-32"></div><figcaption>32 px</figcaption></figure><figure><div id="scale-48"></div><figcaption>48 px</figcaption></figure><figure><div id="scale-72"></div><figcaption>72 px</figcaption></figure></div>
+      </div>
+      <aside class="creator" aria-labelledby="creator-title">
+        <p class="eyebrow">Create a unit</p><div class="creator-heading"><h2 id="creator-title">Make it yours.</h2><div class="cost"><output id="point-cost">19</output><span>points</span></div></div>
+        <label class="field-label" for="design-name">Design name</label><input id="design-name" class="text-input" value="Longshot" maxlength="20" autocomplete="off">
+        <div class="preset-row"><label class="field-label" for="preset">Start from an example</label><select id="preset"><option value="sniper">Longshot / ranged</option><option value="spotter">Lookout / vision</option><option value="bulwark">Holdfast / defense</option><option value="runner">Courier / movement</option><option value="generalist">Allrounder / balanced</option></select></div>
+        <div class="stat-grid" id="stat-grid"></div>
+        <div class="role-line"><span>Role from stats</span><strong id="derived-role">Sniper</strong></div><p id="role-reason" class="role-reason"></p>
+        <div class="appearance-summary"><div><span class="field-label">Appearance</span><strong id="appearance-value">Lance · Porcelain</strong></div><a href="#collection">Choose art ↓</a></div>
+        <button id="auto-art" class="auto-button" aria-pressed="true"><span class="auto-dot"></span><span>Match art to role<span id="auto-recommendation">Lance is suggested for Sniper.</span></span><span aria-hidden="true">↗</span></button>
+        <p id="art-explanation" class="helper">Automatic art follows your stats. Choose a form below to keep a specific appearance.</p>
+        <div class="save-row"><button id="save-design" class="primary">Save design <span aria-hidden="true">↗</span></button><button id="export-design" class="export-button" title="Export this concept design as JSON">Export JSON</button></div>
+        <p id="save-status" class="status" aria-live="polite">Saved designs stay in this browser when storage is available.</p>
+      </aside>
+    </section>
+    <section class="collection-section" id="collection" aria-labelledby="collection-title"><div class="section-heading"><div><p class="eyebrow">A family, not eight unrelated miniatures</p><h2 id="collection-title">Choose the unit's form.</h2></div><p>A recommended form is marked. Any form can be chosen.<br>Appearance never changes the point cost or abilities.</p></div><div id="art-collection" class="art-grid" role="group" aria-label="Unit appearance"></div></section>
+    <section class="field-test" aria-labelledby="field-title"><div class="field-copy"><p class="eyebrow">From the workshop to the board</p><h2 id="field-title">Readable where<br>it matters.</h2><p>The same chosen art appears on your piece. Team color sits on the rim and a small seam. The opponent has a broken rim as well.</p><fieldset><legend>Preview team</legend><div class="segmented"><button data-team="friendly" aria-pressed="true">Your army</button><button data-team="enemy" aria-pressed="false">Opponent</button></div></fieldset><p class="helper">Role and action state remain separate from the chosen appearance.</p></div><div class="board-stage" id="board-stage"><svg class="board-hexes" viewBox="0 0 720 340" aria-hidden="true"><g id="board-hexes"></g></svg><div class="board-piece neighbor-a" id="neighbor-a"></div><div class="board-piece chosen" id="board-chosen"></div><div class="board-piece neighbor-b" id="neighbor-b"></div><div class="board-label"><strong id="board-name">Longshot</strong><span><b id="board-role">Sniper</b> · Move ready · Attack ready</span></div></div></section>
+    <section class="saved-section" aria-labelledby="saved-title"><div class="section-heading"><div><p class="eyebrow">Your designs</p><h2 id="saved-title">Keep the shape you chose.</h2></div><p>Save, switch examples, then reopen a design.<br>Its stats, form and finish return together.</p></div><div id="saved-designs" class="saved-grid"><p class="empty">Your first saved design will appear here.</p></div></section>
+    <footer><p>Original vector form studies. Stats follow the existing point-buy vocabulary; art selection and local saving are demonstrated only in this browser concept.</p><a href="../unit-art-direction.md">Design decisions & Unity integration notes ↗</a></footer>
+  </main>
+</body>
+</html>

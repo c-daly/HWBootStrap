@@ -1,5 +1,10 @@
 # Make designing the counter the reason to play
 
+**Direction update:** the owner prefers the dark theme and more elegant unit forms. The
+[new unit-art study](unit-art-direction.md) develops that direction and demonstrates art selection
+in the creator. It supersedes the warm visual recommendation in this initial comparison; the
+prioritized UX proposals below remain available for review.
+
 **Review date:** 2026-09-24. **Proposal baseline:** `7048f42`. All changes below are suggestions,
 not implemented product features. Default audience hypothesis: approachable tactics with enough
 depth for competitive play. There is no player-research or sales evidence yet for that positioning.

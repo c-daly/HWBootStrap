@@ -1,5 +1,13 @@
 # Evidence and validation boundaries
 
+## Added: dark unit and creator study
+
+The [unit-art continuation](unit-art-direction.md) adds eight forms, two finishes and a browser
+creator that preserves explicit art selections. Its separate [verification receipt](evidence/unit-art-checks.json)
+covers selection, derived-role matching, save/reload, export, fallback and responsive behavior.
+The earlier study now defaults to the dark direction. Earlier captures below are preserved as
+historical comparisons rather than overwritten. No Unity C# or protocol changes were made.
+
 ## Current source
 
 The study branch starts at `7048f421697d0fccf96c106d30d889576fc4dcbd`, the head of multiplayer
