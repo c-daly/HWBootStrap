@@ -55,7 +55,11 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(music.isPlaying, Is.True);
             var clip = music.clip;
             music.time = 8f;
-            SoundManager.StopTitleMusic(); SoundManager.StartAmbience(); Tick(1);
+            SoundManager.StopTitleMusic(); Tick(3);
+            Assert.That(music.isPlaying, Is.True, "Waiting for the server's initial state must keep the music playing.");
+            Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f));
+            Assert.That(Source("Ambience").isPlaying, Is.False, "Waiting does not start board ambience.");
+            SoundManager.StartAmbience(); Tick(1);
             Assert.That(music.isPlaying, Is.True);
             Assert.That(music.clip, Is.SameAs(clip));
             Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f), "Entering a match must not restart the theme.");

@@ -74,8 +74,8 @@ namespace HexWars.Presentation
             }
             bool audible = _focused && !SoundSettings.MuteAll;
             float duck = Time.unscaledTime < _duckUntil ? .55f : 1f;
-            // Keep the same source and playhead when the title hands off to a match.
-            bool musicWanted = _titleWanted || (_ambienceWanted && SoundSettings.MusicDuringGame);
+            // Opt-in music also spans setup and online waiting, before board ambience starts.
+            bool musicWanted = _titleWanted || SoundSettings.MusicDuringGame;
             Fade(_music, "Tabletop/TitleTheme", ref _musicLevel, audible && musicWanted ? .24f * SoundSettings.Music : 0f, dt, 0f);
             Fade(_ambience, "AmbientBed", ref _ambienceLevel,
                 audible && _ambienceWanted ? .1f * SoundSettings.Atmosphere * duck * (_designerWanted ? .3f : 1f) : 0f, dt, 0f);
