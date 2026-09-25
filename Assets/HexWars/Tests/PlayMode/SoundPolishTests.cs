@@ -2,6 +2,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using HexWars.Engine;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -14,6 +15,8 @@ namespace HexWars.Presentation.PlayModeTests
         readonly Dictionary<string, float?> _before = new Dictionary<string, float?>();
         bool _hadMute, _wasMuted, _demoMuted; float _listenerVolume;
         GameObject _host; SoundMixDriver _driver; AudioClip _longClip;
+        SoundMixDriver _previousDriver;
+        static readonly FieldInfo DriverField = typeof(SoundManager).GetField("_driver", BindingFlags.Static | BindingFlags.NonPublic);
         [UnitySetUp]
         public IEnumerator SetUp()
         {
@@ -22,6 +25,7 @@ namespace HexWars.Presentation.PlayModeTests
             foreach(var key in _keys) _before[key]=PlayerPrefs.HasKey(key)?PlayerPrefs.GetFloat(key):(float?)null;
             SoundSettings.MuteAll=false;SoundSettings.Volume=0;SoundSettings.Effects=1;SoundSettings.Music=.5f;SoundSettings.Atmosphere=.5f;
             _host=new GameObject("Sound mix test");_driver=_host.AddComponent<SoundMixDriver>();
+            _previousDriver = (SoundMixDriver)DriverField.GetValue(null); DriverField.SetValue(null, _driver);
             _longClip=AudioClip.Create("Voice-limit fixture",44100*8,1,44100,false);
             yield return null;
             _driver.SendMessage("OnApplicationFocus",true);
@@ -29,6 +33,7 @@ namespace HexWars.Presentation.PlayModeTests
         [UnityTearDown]
         public IEnumerator TearDown()
         {
+            DriverField.SetValue(null, _previousDriver);
             Object.Destroy(_host);Object.Destroy(_longClip);
             foreach(var pair in _before)if(pair.Value.HasValue)PlayerPrefs.SetFloat(pair.Key,pair.Value.Value);else PlayerPrefs.DeleteKey(pair.Key);
             if(_hadMute)PlayerPrefs.SetInt("HexWars.MuteAll",_wasMuted?1:0);else PlayerPrefs.DeleteKey("HexWars.MuteAll");
@@ -37,6 +42,82 @@ namespace HexWars.Presentation.PlayModeTests
         }
         void Tick(float dt) => typeof(SoundMixDriver).GetMethod("Tick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(_driver,new object[]{dt});
         AudioSource Source(string name)=>_host.transform.Find(name).GetComponent<AudioSource>();
+
+        [UnityTest]
+        public IEnumerator FastForwardKeepsOneConclusionAcrossQueuedDeaths()
+        {
+            yield return CheckQueuedResolution(true, SoundKind.Win);
+        }
+
+        [UnityTest]
+        public IEnumerator FastForwardKeepsOneDeathCueWithoutStackingTheQueue()
+        {
+            yield return CheckQueuedResolution(false, SoundKind.Death);
+        }
+
+        IEnumerator CheckQueuedResolution(bool decisive, SoundKind expected)
+        {
+            bool reduced = MotionSettings.Reduced;
+            bool hadReduced = PlayerPrefs.HasKey("HexWars.ReducedMotion");
+            try
+            {
+                MotionSettings.Reduced = false; SoundManager.Muted = false;
+                var host = new GameObject("Queued battle", typeof(BoardRenderer), typeof(TokenStore), typeof(GameBootstrap));
+                host.transform.SetParent(_host.transform);
+                var game = host.GetComponent<GameBootstrap>(); game.enabled = false;
+                var presenter = host.AddComponent<ActionPresenter>();
+                var tiles = Enumerable.Range(0, 5).SelectMany(q => Enumerable.Range(0, 3)
+                    .Select(r => new Tile(new HexCoord(q, r), 0, TerrainType.Plains))).ToArray();
+                var victims = new List<Unit> {
+                    new Unit(10, PlayerId.Player0, new UnitStats(2,1,0,1,1,1,1,2,1), new HexCoord(0,1), 0),
+                    new Unit(11, PlayerId.Player0, new UnitStats(2,1,0,1,1,1,1,2,1), new HexCoord(0,2), 0)
+                };
+                if (!decisive) victims.Add(new Unit(12, PlayerId.Player0,
+                    new UnitStats(2,1,0,1,1,1,1,2,1), new HexCoord(0,0), 0));
+                var attackers = new[] {
+                    new Unit(20, PlayerId.Player1, new UnitStats(4,6,0,3,1,5,1,6,1), new HexCoord(3,1), 0),
+                    new Unit(21, PlayerId.Player1, new UnitStats(4,6,0,3,1,5,1,6,1), new HexCoord(3,2), 0)
+                };
+                var state = new GameState(new Board(tiles), GameConfig.Default(), new[] {
+                    new PlayerState(PlayerId.Player0, 0, unitsOnBoard: victims),
+                    new PlayerState(PlayerId.Player1, 0, unitsOnBoard: attackers)
+                }, PlayerId.Player1, 2, 22); // Annihilation activates from round two.
+                typeof(GameBootstrap).GetProperty("State").SetValue(game, state);
+                host.GetComponent<BoardRenderer>().Render(state.Board);
+                host.GetComponent<BoardRenderer>().RenderEntities(state);
+                int committed = 0; GameState presented = null;
+                presenter.ItemCommitted += (prev, cmd, next) => { committed++; presented = next; };
+                foreach (var command in new Command[] {
+                    new MoveUnit(PlayerId.Player1, 20, new HexCoord(2,1)),
+                    new AttackUnit(PlayerId.Player1, 20, 10),
+                    new AttackUnit(PlayerId.Player1, 21, 11)
+                })
+                {
+                    var applied = GameEngine.Apply(state, command);
+                    Assert.That(applied.Success, Is.True, command.ToString());
+                    presenter.Enqueue(state, command, applied.NewState, false);
+                    state = applied.NewState;
+                }
+                Assert.That(presenter.IsBusy, Is.True, "The opponent's attacks must wait behind the current move.");
+                Assert.That(state.IsGameOver, Is.EqualTo(decisive));
+                // Observe only resolution audio; the already-started move remains ordinary feedback.
+                foreach (var source in _host.GetComponentsInChildren<AudioSource>()) source.Stop();
+                MotionSettings.Reduced = true;
+                presenter.FastForward();
+                Assert.That(presenter.IsBusy, Is.False);
+                Assert.That(committed, Is.EqualTo(3)); Assert.That(presented, Is.SameAs(state));
+                var audible = _host.GetComponentsInChildren<AudioSource>().Where(s => !s.loop && s.isPlaying).ToArray();
+                Assert.That(audible.Length, Is.EqualTo(1), "The whole skipped batch gets one important result cue.");
+                Assert.That(audible[0].clip.name, Is.EqualTo(expected.ToString()));
+                presenter.FastForward(); Assert.That(committed, Is.EqualTo(3), "Repeated fast-forward cannot recommit the result.");
+                yield return null;
+            }
+            finally
+            {
+                if (hadReduced) MotionSettings.Reduced = reduced;
+                else { PlayerPrefs.DeleteKey("HexWars.ReducedMotion"); PlayerPrefs.Save(); }
+            }
+        }
 
         [UnityTest]
         public IEnumerator RepeatedClicksAndFullVoicePoolsStayBounded()

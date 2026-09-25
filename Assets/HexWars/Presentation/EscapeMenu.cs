@@ -54,7 +54,7 @@ namespace HexWars.Presentation
             if (_overlay != null) { Close(); return true; }
             if (GameObject.Find(GameOverBanner.RootName) != null) { GameOverBanner.Dismiss(); return true; }
             if (TipBubble.IsOpen) { TipBubble.Dismiss(); return true; }
-            if (hud != null && hud.WorkshopOpen) { hud.SetWorkshop(false); return true; }
+            if (hud != null && hud.WorkshopOpen) { hud.DismissWorkshop(); return true; }
             return false;
         }
 

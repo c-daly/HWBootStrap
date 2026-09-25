@@ -184,6 +184,12 @@ namespace HexWars.Presentation
             _input?.ClearPreview();_dirty=true;
         }
 
+        internal void DismissWorkshop()
+        {
+            if(_designer!=null)WebGlInputBridge.CancelFocusedEdit(_designer.transform);
+            SetWorkshop(false);
+        }
+
         PlayerId Seat
         {
             get

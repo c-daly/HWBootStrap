@@ -426,6 +426,8 @@ namespace HexWars.Presentation
         /// a null state is what lets it come back). The next created game rebuilds everything.</summary>
         public void ReturnToMenu()
         {
+            TipsService.NewGame(); // Deferred coaching belongs to the match being left.
+            TipBubble.Dismiss();
             Presenter?.ResetQueue();
             GameOverBanner.Dismiss();
             // a lobby coordinator kept alive as the credential broker must not outlive the match
