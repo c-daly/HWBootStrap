@@ -1,0 +1,98 @@
+{
+  "errors": [],
+  "failed": [],
+  "intentionalStops": [
+    {
+      "url": "http://127.0.0.1:8196/sound-study/TitleMusic.wav?v=452476e8c2e2",
+      "error": "net::ERR_ABORTED"
+    }
+  ],
+  "checks": [
+    {
+      "name": "Move a piece — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/Move.wav?v=8c1d9f710096",
+        "duration": 0.23,
+        "time": 0.009789,
+        "paused": false
+      }
+    },
+    {
+      "name": "Light shot — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/AttackLight_0.wav?v=98f7e93a76d8",
+        "duration": 0.21,
+        "time": 0.010086,
+        "paused": false
+      }
+    },
+    {
+      "name": "Medium shot — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/AttackMid_0.wav?v=2b5c2d235edd",
+        "duration": 0.26,
+        "time": 0.007922,
+        "paused": false
+      }
+    },
+    {
+      "name": "Heavy shot — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/AttackHeavy_0.wav?v=a8a4c5638af9",
+        "duration": 0.32,
+        "time": 0.008113,
+        "paused": false
+      }
+    },
+    {
+      "name": "Place from barracks — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/Deploy.wav?v=1049620ac8a4",
+        "duration": 0.28,
+        "time": 0.011003,
+        "paused": false
+      }
+    },
+    {
+      "name": "Remove a piece — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/Death.wav?v=1517e166ab7e",
+        "duration": 0.36,
+        "time": 0.007448,
+        "paused": false
+      }
+    },
+    {
+      "name": "Turn change — new",
+      "state": {
+        "url": "http://127.0.0.1:8196/sound-study/EndTurn.wav?v=2a4a485ea485",
+        "duration": 0.54,
+        "time": 0.007198,
+        "paused": false
+      }
+    },
+    {
+      "name": "moves",
+      "completed": true
+    },
+    {
+      "name": "sequence",
+      "completed": true
+    }
+  ],
+  "comparisons": 7,
+  "title": {
+    "duration": 61.935488,
+    "time": 3.932555,
+    "paused": false,
+    "volume": 0.7,
+    "url": "http://127.0.0.1:8196/sound-study/TitleMusic.wav?v=452476e8c2e2"
+  },
+  "escape": {
+    "paused": true,
+    "src": null,
+    "pressed": 0
+  },
+  "volume": 0.35,
+  "mobileOverflow": false
+}

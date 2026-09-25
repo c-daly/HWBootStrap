@@ -90,7 +90,7 @@ namespace HexWars.Presentation
             var prt = panel.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0.5f);
             bool online = _game.Networked;
-            prt.sizeDelta = new Vector2(340f, online ? 538f : 488f);
+            prt.sizeDelta = new Vector2(340f, online ? 582f : 532f);
 
             UiKit.Label(panel.transform, "MENU", 0f, -18f, 300f, 30f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
 
@@ -104,18 +104,27 @@ namespace HexWars.Presentation
             SoundRow(panel.transform, "Ambience", -174f, () => SoundSettings.Atmosphere, v => SoundSettings.Atmosphere = v, false);
             SoundRow(panel.transform, "Music", -210f, () => SoundSettings.Music, v => SoundSettings.Music = v, false);
 
+            Button music = null;
+            music = UiKit.Button(panel.transform, MusicDuringGameLabel(), 0f, -246f, 280f, 32f, () =>
+            {
+                SoundSettings.MusicDuringGame = !SoundSettings.MusicDuringGame;
+                music.GetComponentInChildren<Text>().text = MusicDuringGameLabel();
+                UiKit.SetToggled(music, SoundSettings.MusicDuringGame);
+            }, UiKit.ButtonStyle.Secondary, UiKit.SizeCaption);
+            UiKit.SetToggled(music, SoundSettings.MusicDuringGame);
+
             Text motion = null;
-            motion = UiKit.Button(panel.transform, MotionLabel(), 0f, -258f, 280f, 36f, () =>
+            motion = UiKit.Button(panel.transform, MotionLabel(), 0f, -302f, 280f, 36f, () =>
             {
                 MotionSettings.Reduced = !MotionSettings.Reduced;
                 if (MotionSettings.Reduced) _game.Presenter?.FastForward();
                 motion.text = MotionLabel();
             }, UiKit.ButtonStyle.Secondary, UiKit.SizeCaption).GetComponentInChildren<Text>();
-            UiKit.Button(panel.transform, "How to play", -73f, -304f, 134f, 36f,
+            UiKit.Button(panel.transform, "How to play", -73f, -348f, 134f, 36f,
                 () => GameRules.Show(_overlay.transform, UiKit.Font(), UiKit.OrderEscape+10), UiKit.ButtonStyle.Secondary, UiKit.SizeCaption);
-            TipsService.BuildToggle(panel.transform, 70f, -304f);
-            UiKit.Button(panel.transform, "Resume", 0f, -358f, 280f, 44f, Close, UiKit.ButtonStyle.Cta);
-            UiKit.Button(panel.transform, "Leave game", 0f, -410f, 280f, 44f, () =>
+            TipsService.BuildToggle(panel.transform, 70f, -348f);
+            UiKit.Button(panel.transform, "Resume", 0f, -402f, 280f, 44f, Close, UiKit.ButtonStyle.Cta);
+            UiKit.Button(panel.transform, "Leave game", 0f, -454f, 280f, 44f, () =>
             {
                 Close();
                 _game.ReturnToMenu();
@@ -123,12 +132,13 @@ namespace HexWars.Presentation
             if (online)
                 UiKit.Label(panel.transform,
                             "Leaving disconnects you - rejoin from the lobby\nwhile the room is held (about 10 minutes).",
-                            0f, -464f, 320f, 40f, UiKit.SizeCaption, TextAnchor.UpperCenter, UiKit.TextDim);
+                            0f, -508f, 320f, 40f, UiKit.SizeCaption, TextAnchor.UpperCenter, UiKit.TextDim);
         }
 
         Text _muteText;
         static string MotionLabel() => "Reduced motion: " + (MotionSettings.Reduced ? "On" : "Off");
         static string MuteLabel() => SoundSettings.MuteAll ? "Sound: Off" : "Sound: On";
+        static string MusicDuringGameLabel() => "Music during game: " + (SoundSettings.MusicDuringGame ? "On" : "Off");
 
         static void SoundRow(Transform parent, string name, float y, System.Func<float> get,
                              System.Action<float> set, bool preview)

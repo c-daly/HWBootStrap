@@ -19,9 +19,29 @@ press **Ready** when finished. Round one starts after both armies are ready. The
 automatic placement; AI opponents keep that formation. Escape immediately dismisses help and the
 designer, and automatic tips are smaller and expire after six seconds.
 
-The [sound pass](sound-direction.md) is included: shorter and quieter effects, fading background
+The [tabletop sound pass](tabletop-audio.md) is included: shorter and quieter effects, fading background
 audio, and separate Master / Effects / Ambience / Music controls in **Menu**. The comparison page
-is served at `/sound-study/`.
+is served at `/sound-study/`. **Music during game** optionally keeps the theme playing through
+matches, with a saved preference and immediate switching.
+
+## Deploy the audio feature branch without merging
+
+`codex/tabletop-audio-20260925` includes the earlier gameplay/UI changes, the Steam-optional web
+server, the audio changes and the compiled browser client. Deploy the whole branch or its latest
+commit, rather than cherry-picking the music-setting commit. Unity is not required on the web host.
+
+For the existing Render WebGL service, keep the repository root as the Docker context and use
+`./Dockerfile`. Set `LOBBY_PROVIDER=Legacy` and `INCLUDE_WEBGL=true`; leave unused Steam credentials
+and `DATABASE_URL` unset. Set `ALLOWED_WEB_ORIGINS` to the actual HTTPS site origin for browser
+multiplayer. The server exposes `/health/ready` for the health check.
+
+Use **Manual Deploy > Deploy a specific commit** with the feature branch's full SHA, or point the
+service's linked branch at `codex/tabletop-audio-20260925` and deploy its latest commit. The first
+method disables automatic deploys so another branch's next push cannot replace the preview.
+See [Render's deployment documentation](https://render.com/docs/deploys#deploying-a-specific-commit).
+
+The root `render.yaml` describes the separate Steam match services and databases; it is not the
+blueprint for this existing WebGL service. No PR merge is needed for this deployment.
 
 ## Run the committed build
 
@@ -50,12 +70,13 @@ This startup fix changes only the server; the WebGL player bundle does not need 
 
 Steam lobbies, invitations and the persistent match-service entry flow still belong to the native
 Steam client. Browser guest accounts/invite links remain separate follow-up work.
-This branch has not been deployed to the production site.
+These checks do not trigger a production deployment.
 
 ## Tactical implementation validation
 
-The [integration receipt](evidence/polish-integration-checks.json) covers the current build and review
-fixes. The [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) preserves the prior checks.
+The [music-setting receipt](evidence/music-during-game-checks.json) covers the latest WebGL build,
+browser controls and clean branch deployment checks. The [integration receipt](evidence/polish-integration-checks.json)
+covers the preceding gameplay and review fixes. The [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) preserves the prior checks.
 The [implementation receipt](evidence/tactical-implementation-checks.json) and
 [browser receipt](evidence/tactical-webgl-checks.json) preserve the preceding implementation checks. The gameplay/UI walkthrough
 and actual Unity screenshots are in [gameplay-visual-language.md](gameplay-visual-language.md).
