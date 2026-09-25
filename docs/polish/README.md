@@ -16,7 +16,9 @@ effects, ambience and music controls. With the preview server running,
 
 Open the [WebGL player instructions](webgl-preview.md) or the
 [Windows game launcher](<Open Tactical Game.cmd>). The [Windows build notes](windows-preview.md)
-and [latest validation receipt](evidence/battlefield-clarity-checks.json) describe what was tested.
+and [latest validation receipt](evidence/polish-integration-checks.json) describe what was tested.
+
+The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.
 
 The [original tactical study](concept/tactical.html) remains an illustrative browser fixture.
 The material below records earlier explorations and does not override the current direction.

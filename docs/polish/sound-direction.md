@@ -48,3 +48,5 @@ judging the subjective balance on your speakers or headphones.
 
 The sound branch is stacked on the gameplay-polish PR. It includes refreshed native and staged
 WebGL builds locally; the staged browser bundle is committed. It has not been deployed to production.
+
+The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.

@@ -1,0 +1,62 @@
+{
+  "date": "2026-09-25T18:12:22.724569+00:00",
+  "source_commit": "d183d22959c3d3582f15197c960a0d2166bb4093",
+  "cache_key": "5eeb69d9",
+  "browser": "149.0.7827.53",
+  "page_errors": [],
+  "failed_requests": [],
+  "warning_kinds": [
+    "Unity persistent-data synchronization deprecation",
+    "Additional-light cookie format fallback",
+    "FSR upscaling unavailable under SwiftShader"
+  ],
+  "territory_900x480": "Visually checked: decision preview, move/attack, territory action and End turn remain visible.",
+  "designer_cancel": {
+    "observed_values": [
+      "Original",
+      "Discard draft",
+      "Original"
+    ],
+    "escape_closes_immediately": true,
+    "reopened_draft_restored": true
+  },
+  "turn_handover": {
+    "unused_actions_confirmation_required": true,
+    "confirmed_player2_visible": true,
+    "source_EndTurn_duration_seconds": 0.36,
+    "buffer_events_after_confirmation": [
+      {
+        "at": 17097.200000047684,
+        "duration": 0.37151927437641724,
+        "loop": true
+      },
+      {
+        "at": 17097.299999952316,
+        "duration": 0.37151927437641724,
+        "loop": false
+      }
+    ],
+    "measured_game_audio": {
+      "state": "running",
+      "peak": 0.059339843690395355,
+      "sum": 12.256167989737426,
+      "samples": 144384,
+      "activeFrames": 141,
+      "rms": 0.009213355266448868
+    },
+    "note": "Confirmation starts a short non-looping source. The browser buffer is 0.371519s versus 0.36s in the source WAV; exact duration identity was not established. Unity creates/restarts its source, so two start calls are not evidence of two audible cues. The signal measurement includes ambience."
+  },
+  "h_logo": "Visible on final title and match header.",
+  "raw_receipt_sha256": {
+    "final-browser.json": "d78140d2a429e20421e72062fe821560fb35cb244815db67a916ec30ee9ca94b",
+    "final-turn-browser.json": "f6d7e874b5a0de8ac856574231f6eeaa3d41e16fa9b79ce22b7c202ad70fb3d8"
+  },
+  "captures": {
+    "integration-title.png": "9b7642632712383fd26a442567aef9bf3f4b6cff1a69a5eeb78bf73acdbeecb8",
+    "integration-territory-900x480.png": "fe7872e52f80c1b4d5dd0f6cff56e6da453bbf19ec759ce843cb12179bb07e6d",
+    "integration-designer-cancelled.png": "22918211c5fa72a05b02cf323ef7335b01ce27c5a74db918d5c623731063fa33",
+    "integration-designer-restored.png": "95a27b741b2571d996e5a0183f78b9de3b83d6f952733d025939573e862d1bfa",
+    "integration-player2.png": "04f6e146499bd1a9ea98d81b9e1a7b4ff82bcd5004396219937f483ca8d2735b",
+    "integration-native-range.png": "0a6bc32b42f1bbc23e86b55648c90eaa2f5dd7e6006aa20fe5ef6086c7d41e3b"
+  }
+}

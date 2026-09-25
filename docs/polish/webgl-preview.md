@@ -54,11 +54,14 @@ This branch has not been deployed to the production site.
 
 ## Tactical implementation validation
 
-The latest [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) covers this revision.
+The [integration receipt](evidence/polish-integration-checks.json) covers the current build and review
+fixes. The [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) preserves the prior checks.
 The [implementation receipt](evidence/tactical-implementation-checks.json) and
 [browser receipt](evidence/tactical-webgl-checks.json) preserve the preceding implementation checks. The gameplay/UI walkthrough
 and actual Unity screenshots are in [gameplay-visual-language.md](gameplay-visual-language.md).
 The historical receipts below describe the earlier build; they are retained as earlier evidence.
+
+The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.
 
 ## Rebuild
 
