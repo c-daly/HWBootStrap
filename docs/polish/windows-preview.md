@@ -1,3 +1,16 @@
+# Current tactical Windows preview
+
+Open [Open Tactical Game.cmd](<Open Tactical Game.cmd>) or
+`Build\TacticalPreview\HexWars.exe`. Unity Play Mode is not required.
+This contains the new machine meshes and cleaner tactical interface. Use **Unit details** for full
+stats and attack arithmetic, **Design army** for creating/deploying units, and **Menu** for help,
+sound and Reduced motion. See [the walkthrough and screenshots](gameplay-visual-language.md).
+
+Build it in Unity with **HexWars → Build Tactical Windows Preview**. This standalone preview does
+not require Steam; native Steam integration remains a separate configured build path.
+
+---
+
 # Graphite Windows preview
 
 This feature branch applies the graphite direction to the Unity game. It adds eight original

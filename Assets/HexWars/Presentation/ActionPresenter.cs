@@ -197,7 +197,7 @@ namespace HexWars.Presentation
 
         IEnumerator Play(Item item)
         {
-            if (!item.IsLocal)
+            if (!item.IsLocal && !MotionSettings.Reduced)
             {
                 var site = ActionSite(item);
                 if (site.HasValue && OffScreen(site.Value))
@@ -248,6 +248,7 @@ namespace HexWars.Presentation
 
             SoundManager.Play(SoundKind.Move);
             _presented = true;
+            if (MotionSettings.Reduced) yield break;
             token.transform.localPosition = Tokens().CellTop(path[span.First], item.Next.Board.TileAt(path[span.First]).Elevation);
             if (span.First > 0) yield return PopIn(token.transform);            // enters vision mid-path
             int lastElev = item.Next.Board.TileAt(path[span.First]).Elevation;
@@ -322,6 +323,7 @@ namespace HexWars.Presentation
 
             SoundManager.PlayAttack(projTier); // tiered weapon shot — same tier value the projectile visual uses
             _presented = true;
+            if (MotionSettings.Reduced) yield break;
             _projectile = MakeProjectile(from, projScale, projTier, projColor);
             for (float t = 0f; t < flightDur; t += Time.deltaTime)
             {
@@ -356,6 +358,7 @@ namespace HexWars.Presentation
             SoundManager.Play(SoundKind.Deploy); // visibility gate first, then sound (mirrors PlayClaim)
             _presented = true;
 
+            if (MotionSettings.Reduced) yield break;
             // drop-in: fall from above + landing squash
             var rest = token.transform.localPosition;
             const float dur = 0.25f;

@@ -10,11 +10,10 @@ using HexWars.Engine;
 namespace HexWars.Presentation
 {
     /// <summary>
-    /// Mouse interaction for units. Hover shows a capability tooltip. Click your own unit to select
-    /// (a marker floats above it). With one of your units selected: click an empty hex to <b>move</b>
-    /// (slides there), or click an enemy to <b>attack</b> (fires a projectile; the target explodes on
-    /// a kill). Animations play, then the engine command is applied.
+    /// Select a machine, preview a destination or target, then explicitly confirm the command.
+    /// The engine commits state; the shared presenter animates the accepted result.
     /// </summary>
+    [DefaultExecutionOrder(-10)]
     [RequireComponent(typeof(UnitTooltip))]
     public sealed class UnitInputController : MonoBehaviour
     {
@@ -42,6 +41,95 @@ namespace HexWars.Presentation
         /// <summary>Spectator mode: hover tooltips and click-to-inspect still work, but no commands are
         /// issued (the AI is playing). Set by <see cref="SpectatorDriver"/> instead of disabling input.</summary>
         public bool ReadOnly;
+        public enum Intent { Move, Attack }
+        public Intent Mode { get; private set; } = Intent.Move;
+        public int SelectedId => _selectedId;
+        public int TargetId { get; private set; } = -1;
+        public bool AwaitingServer { get; private set; }
+        public event System.Action PresentationChanged;
+        GameState _previewState;
+        public PlayerId Viewer => _game != null && _game.State != null ? (_game.FogViewer() ?? _game.State.ActivePlayer) : PlayerId.Player0;
+        public Unit? SelectedUnit => _game != null ? TacticalForecast.FindVisible(_game.State, _selectedId, Viewer) : null;
+        public MovementRoute LockedRoute => _movementPreview.TouchLocked ? PreviewRoute() : null;
+        public HexCoord? Destination => _movementPreview.TouchLocked ? _movementPreview.Destination : null;
+        public IReadOnlyDictionary<HexCoord, MovementRoute> Routes => _routes;
+        public bool CanCommand => _game != null && _game.State != null && !ReadOnly && !_game.DemoMode
+            && !_game.State.IsGameOver && !_game.Reconnecting && !AwaitingServer && _game.WaitingHumanSeat() == null;
+
+        public void SetMode(Intent mode)
+        {
+            Mode = mode;
+            ClearPreview();
+            RefreshMovementRoutes();
+            RefreshMovementHighlights();
+        }
+
+        public void ClearPreview()
+        {
+            TargetId = -1;
+            _previewState = null;
+            _movementPreview.Clear();
+            RefreshMovementHighlights();
+            PresentationChanged?.Invoke();
+        }
+
+        public bool PreviewMove(HexCoord cell)
+        {
+            RefreshMovementRoutes();
+            if (!CanCommand || !_routes.ContainsKey(cell) || !SelectedUnit.HasValue) return false;
+            if (!GameEngine.Apply(_game.State, new MoveUnit(_game.State.ActivePlayer, _selectedId, cell)).Success) return false;
+            Mode = Intent.Move; TargetId = -1;
+            _movementPreview.Tap(cell, true);
+            _previewState = _game.State;
+            RefreshMovementHighlights();
+            PresentationChanged?.Invoke();
+            return true;
+        }
+
+        public bool PreviewAttack(int id)
+        {
+            if (!CanCommand || !TacticalForecast.TryCreate(_game.State, Viewer, _selectedId, id, out _)) return false;
+            Mode = Intent.Attack; TargetId = id; _movementPreview.Clear();
+            _previewState = _game.State;
+            RefreshMovementHighlights();
+            PresentationChanged?.Invoke();
+            return true;
+        }
+
+        public bool ConfirmPreview()
+        {
+            if (!CanCommand || !ReferenceEquals(_previewState, _game.State)) { ClearPreview(); return false; }
+            Command command = null;
+            if (Mode == Intent.Move && Destination.HasValue && _routes.ContainsKey(Destination.Value))
+                command = new MoveUnit(_game.State.ActivePlayer, _selectedId, Destination.Value);
+            if (Mode == Intent.Attack && TacticalForecast.TryCreate(_game.State, Viewer, _selectedId, TargetId, out _))
+                command = new AttackUnit(_game.State.ActivePlayer, _selectedId, TargetId);
+            if (command == null) { ClearPreview(); return false; }
+            ClearPreview();
+            _game.Presenter?.FastForward();
+            AwaitingServer = _game.Networked;
+            bool accepted = _game.TryApply(command);
+            if (!accepted) AwaitingServer = false;
+            ReacquireSelection();
+            PresentationChanged?.Invoke();
+            return accepted;
+        }
+
+        void OnStateChanged()
+        {
+            AwaitingServer = false;
+            TargetId = -1; _previewState = null;
+            ReacquireSelection();
+            PresentationChanged?.Invoke();
+        }
+
+        void OnRejected() { AwaitingServer = false; ClearPreview(); ReacquireSelection(); }
+        void OnDestroy()
+        {
+            if (_game != null) { _game.StateChanged -= OnStateChanged; _game.CommandRejected -= OnRejected; }
+            if (_markerMat != null) Destroy(_markerMat);
+        }
+
 
         void Awake()
         {
@@ -63,6 +151,8 @@ namespace HexWars.Presentation
                     ?? _board.gameObject.AddComponent<AttackTargetHighlightController>();
             }
             MakeActionButton();
+            if (_game != null) { _game.StateChanged += OnStateChanged; _game.CommandRejected += OnRejected; }
+
         }
 
         Vector2 _pressPos;
@@ -71,6 +161,14 @@ namespace HexWars.Presentation
 
         void Update()
         {
+            var keyboard = DeviceInput.Allowed && !UiKit.AnyInputOwnsFocus() ? Keyboard.current : null;
+            if (keyboard != null && _game != null && !_game.DemoMode)
+            {
+                if (keyboard.mKey.wasPressedThisFrame) SetMode(Intent.Move);
+                if (keyboard.fKey.wasPressedThisFrame) SetMode(Intent.Attack);
+                if (keyboard.escapeKey.wasPressedThisFrame && (Destination.HasValue || TargetId >= 0))
+                { UiKit.MarkInputEscapeHandled(); ClearPreview(); }
+            }
             var pointer = DeviceInput.Allowed ? Pointer.current : null; // mouse OR touch — one path for desktop and mobile
             var cam = Camera.main;
             if (pointer == null || cam == null) return;
@@ -86,14 +184,15 @@ namespace HexWars.Presentation
 
             RefreshMovementRoutes();
             bool isTouch = pointer is Touchscreen;
-            if (!isTouch) UpdateDesktopMovementPreview(hoveredTile);
+            if (!isTouch && Mode == Intent.Move && !IsPointerOverUi()) UpdateDesktopMovementPreview(hoveredTile);
 
             GameState inspectionState = ResolveInspectionState(
                 _game != null ? _game.State : null,
                 _duelDriver != null ? _duelDriver.PresentedState : null);
 
             var previewRoute = PreviewRoute();
-            if (hoveredUnit != null)
+            if (_game != null && _game.GetComponent<TacticalHud>() != null && !_game.DemoMode) _tooltip.Hide();
+            else if (hoveredUnit != null)
             {
                 var hoveredRoute = hoveredUnit.Unit.Id == _selectedId ? previewRoute : null;
                 if (inspectionState != null) _tooltip.Show(hoveredUnit.Unit, mp, inspectionState, hoveredRoute);
@@ -116,13 +215,8 @@ namespace HexWars.Presentation
             if (_selected != null && _marker.activeSelf)
             {
                 var p = _selected.transform.position;
-                float bob = Mathf.Sin(Time.time * 4f) * 0.08f;
-                _marker.transform.position = new Vector3(p.x, p.y + 0.85f + bob, p.z);
+                _marker.transform.position = new Vector3(p.x, p.y + .04f, p.z);
 
-                // yellow if this unit is yours to command this turn, gray otherwise
-                bool mine = _game != null && _game.State != null && _selected.Unit.Owner == _game.State.ActivePlayer;
-                var c = mine ? new Color(1f, 0.92f, 0.15f) : new Color(0.6f, 0.6f, 0.65f);
-                if (_markerMat != null) { if (_markerMat.HasProperty("_BaseColor")) _markerMat.SetColor("_BaseColor", c); _markerMat.color = c; }
             }
 
             UpdateActionButton();
@@ -149,15 +243,14 @@ namespace HexWars.Presentation
                 return; // while building, taps only place generators
             }
 
-            bool ownSelected = _selected != null && _selected.Unit.Owner == active && _selected.Unit.IsAlive;
+            var selected = SelectedUnit;
+            bool ownSelected = selected.HasValue && selected.Value.Owner == active;
 
             // attack intent: only fire if not already attacked AND actually targetable (range/vision/LOS/arc)
             if (ownSelected && unit != null && unit.Unit.Owner != active)
             {
-                if (HasActed(_game.State.AttackedUnitIds, _selected.Unit.Id)) { Toast.Show("Already attacked this turn"); return; }
-                if (!TargetingService.CanTarget(_game.State, _selected.Unit, unit.Unit.Cell, unit.Unit.Elevation))
-                { Toast.Show(WhyCannotTarget(_game.State, _selected.Unit, unit.Unit)); return; }
-                Issue(new AttackUnit(active, _selected.Unit.Id, unit.Unit.Id));
+                // A visible opponent that cannot be attacked is still useful to inspect.
+                if (!PreviewAttack(unit.Unit.Id)) SelectById(unit.Unit.Id);
                 return;
             }
             // territory claim/build is done via the explicit on-screen action button (UpdateActionButton),
@@ -176,15 +269,7 @@ namespace HexWars.Presentation
                     return;
                 }
 
-                if (isTouch)
-                {
-                    var decision = _movementPreview.Tap(tile.Coord, reachable: true);
-                    RefreshMovementHighlights();
-                    if (decision != MovementPreviewDecision.Confirm) return;
-                }
-
-                CancelMovementPreview();
-                Issue(new MoveUnit(active, _selected.Unit.Id, tile.Coord));
+                if (!PreviewMove(tile.Coord)) Toast.Show("That move is not available now");
                 return;
             }
             NotifyIfWaiting(unit, tile);
@@ -231,7 +316,7 @@ namespace HexWars.Presentation
         {
             selectedUnit = default;
             if (_game == null || _game.State == null || _selectedId < 0
-                || ReadOnly || _game.DemoMode || _game.State.IsGameOver || _buildMode
+                || ReadOnly || _game.DemoMode || _game.State.IsGameOver || _game.Reconnecting || AwaitingServer || _buildMode
                 || (_barracks != null && _barracks.IsDeploying)
                 || _game.WaitingHumanSeat() != null)
                 return false;
@@ -248,7 +333,7 @@ namespace HexWars.Presentation
 
         void UpdateDesktopMovementPreview(TileView hoveredTile)
         {
-            if (_movementPreview.TouchLocked) return;
+            if (_movementPreview.TouchLocked || Mode != Intent.Move) return;
             HexCoord? destination = hoveredTile != null && _routes.ContainsKey(hoveredTile.Coord)
                 ? (HexCoord?)hoveredTile.Coord
                 : null;
@@ -285,7 +370,8 @@ namespace HexWars.Presentation
         {
             if (_movementHighlights == null || _game == null || _game.State == null)
                 return;
-            _movementHighlights.Show(_game.State, _routes, _movementPreview.Destination);
+            if (Mode == Intent.Move) _movementHighlights.Show(_game.State, _routes, _movementPreview.Destination);
+            else _movementHighlights.Clear();
 
             if (_attackHighlights == null) return;
             if (!TryGetSelectedStateUnit(out var attacker))
@@ -297,6 +383,8 @@ namespace HexWars.Presentation
             var viewer = _game.FogViewer() ?? attacker.Owner;
             _attackHighlights.Show(AttackPreviewTargets.Resolve(
                 _game.State, attacker, _movementPreview.Destination, viewer));
+            if (Mode == Intent.Attack && TacticalForecast.TryCreate(_game.State, viewer, attacker.Id, TargetId, out var shot))
+                _attackHighlights.ShowShot(attacker, shot.Target, LineOfSight.IsClear(_game.State.Board, attacker.Cell, attacker.Elevation, shot.Target.Cell, shot.Target.Elevation));
         }
 
         static bool HasGeneratorOn(GameState s, HexCoord cell)
@@ -357,25 +445,28 @@ namespace HexWars.Presentation
             Select(null); // every unit has acted this turn
         }
 
-        void SelectById(int id)
+        public void SelectById(int id)
         {
+            if (_game != null && !TacticalForecast.FindVisible(_game.State, id, Viewer).HasValue) return;
+            ClearPreview();
             ClearMovementRoutes();
             _selectedId = id;
-            _selected = null;
-            foreach (var v in FindObjectsByType<UnitView>(FindObjectsSortMode.None))
-                if (v.Unit.Id == id && v.Unit.IsAlive) { _selected = v; break; }
+            _selected = CurrentView(id);
             UpdateMarker();
             RefreshMovementRoutes();
+            PresentationChanged?.Invoke();
         }
 
         void Select(UnitView unit)
         {
+            ClearPreview();
             ClearMovementRoutes();
             _selected = unit;
             _selectedId = unit != null ? unit.Unit.Id : -1;
             UpdateMarker();
             RefreshMovementRoutes();
 
+            PresentationChanged?.Invoke();
             // gated on !DemoMode: the title-screen demo's units are hoverable/clickable (this class isn't
             // demo-aware), but a Tips bubble popping up over the muted showcase would break DemoMode's
             // whole point (suppressed gameplay UI) — see GameBootstrap.DemoMode's doc comment.
@@ -383,7 +474,7 @@ namespace HexWars.Presentation
             {
                 Vector2 screenPos = Camera.main.WorldToScreenPoint(unit.transform.position);
                 TipsService.Show("first-select",
-                    "Green rings show movement. Blue halos mark enemies you can hit; hover a move to preview both.",
+                    "Mint outlines show moves; copper brackets show targets. Choose a cell or target, then confirm in the unit panel.",
                     screenPos);
             }
         }
@@ -402,13 +493,19 @@ namespace HexWars.Presentation
             AutoAdvance();
         }
 
+        // TokenStore owns the current match. Scene-wide ID searches can find a previous demo's
+        // pending-destruction tokens during the frame a new match starts.
+        UnitView CurrentView(int id)
+        {
+            var token = _board != null ? _board.GetComponent<TokenStore>()?.UnitToken(id) : null;
+            return token != null ? token.GetComponent<UnitView>() : null;
+        }
+
         void ReacquireSelection()
         {
             ClearMovementRoutes();
             _selected = null;
-            if (_selectedId >= 0)
-                foreach (var v in FindObjectsByType<UnitView>(FindObjectsSortMode.None))
-                    if (v.Unit.Id == _selectedId && v.Unit.IsAlive) { _selected = v; break; }
+            if (_selectedId >= 0 && SelectedUnit.HasValue) _selected = CurrentView(_selectedId);
             if (_selected == null) _selectedId = -1;
             UpdateMarker();
             RefreshMovementRoutes();
@@ -422,24 +519,21 @@ namespace HexWars.Presentation
 
         void BuildMarker()
         {
-            _marker = GameObject.CreatePrimitive(PrimitiveType.Sphere);
-            _marker.name = "SelectionMarker";
-            var col = _marker.GetComponent<Collider>();
-            if (col != null) Destroy(col);
+            _marker = new GameObject("SelectionBrackets");
             _marker.transform.SetParent(transform, false);
-            _marker.transform.localScale = Vector3.one * 0.42f;
-
-            var mr = _marker.GetComponent<MeshRenderer>();
-            var unlit = Shader.Find("Universal Render Pipeline/Unlit");
-            if (unlit == null) unlit = Shader.Find("Unlit/Color");
-            var m = new Material(unlit);
-            var yellow = new Color(1f, 0.92f, 0.15f);
-            if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", yellow);
-            m.color = yellow;
-            mr.sharedMaterial = m;
-            _markerMat = m;
-            mr.shadowCastingMode = ShadowCastingMode.Off;
-
+            var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
+            _markerMat = new Material(shader);
+            _markerMat.color = new Color(.96f, .96f, .87f);
+            if (_markerMat.HasProperty("_BaseColor")) _markerMat.SetColor("_BaseColor", _markerMat.color);
+            for (int i = 0; i < 4; i++)
+            {
+                float x = (i % 2 == 0 ? -1 : 1) * .68f, z = (i / 2 == 0 ? -1 : 1) * .68f;
+                var go = new GameObject("Corner"); go.transform.SetParent(_marker.transform, false);
+                var line = go.AddComponent<LineRenderer>(); line.useWorldSpace = false; line.positionCount = 3;
+                line.SetPositions(new[] { new Vector3(x*.56f,0,z), new Vector3(x,0,z), new Vector3(x,0,z*.56f) });
+                line.startWidth = line.endWidth = .035f; line.sharedMaterial = _markerMat;
+                line.shadowCastingMode = ShadowCastingMode.Off;
+            }
             _marker.SetActive(false);
         }
 
@@ -447,7 +541,7 @@ namespace HexWars.Presentation
         {
             if (_selected == null) { _marker.SetActive(false); return; }
             var p = _selected.transform.position;
-            _marker.transform.position = new Vector3(p.x, p.y + 0.85f, p.z);
+            _marker.transform.position = new Vector3(p.x, p.y + .04f, p.z);
             _marker.SetActive(true);
         }
 

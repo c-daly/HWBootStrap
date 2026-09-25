@@ -2,7 +2,9 @@
 
 This branch includes a freshly built Unity browser client in
 `engine/HexWars.NetServer/wwwroot/`. It contains eight selectable unit forms, the dark board and
-interface, and the H-in-hex mark on the loader, title, collection and match header. Material/theme
+interface, a focused tactical HUD with explicit movement/attack confirmation, and the H-in-hex mark
+on the loader, title, collection and match header. Unit stats and damage arithmetic expand under
+**Unit details**; compact squad cards keep the default view quiet. Material/theme
 descriptors are removed from the game screens; the eight form names remain.
 
 ## Run the committed build
@@ -14,7 +16,7 @@ python -m http.server 8196 --bind 127.0.0.1 --directory engine/HexWars.NetServer
 ```
 
 Open `http://localhost:8196`. Select **Unit collection**, inspect a form and choose
-**Try on the battlefield**. In the designer, choose an appearance, adjust stats and select
+**Try on the battlefield**. Open **Design army**, choose an appearance, adjust stats and select
 **Save to barracks**. Selecting **Match role** returns to automatic art selection.
 
 To use Browse/Host/room-code multiplayer, run the matching .NET server from
@@ -31,6 +33,13 @@ This startup fix changes only the server; the WebGL player bundle does not need 
 Steam lobbies, invitations and the persistent match-service entry flow still belong to the native
 Steam client. Browser guest accounts/invite links and the sound pass are separate follow-up work.
 This branch has not been deployed to the production site.
+
+## Tactical implementation validation
+
+The [implementation receipt](evidence/tactical-implementation-checks.json) and
+[browser receipt](evidence/tactical-webgl-checks.json) cover this revision. The gameplay/UI walkthrough
+and actual Unity screenshots are in [gameplay-visual-language.md](gameplay-visual-language.md).
+The historical receipts below describe the earlier build; they are retained as earlier evidence.
 
 ## Rebuild
 

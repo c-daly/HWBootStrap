@@ -92,13 +92,19 @@ namespace HexWars.Presentation
 
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
+        public event System.Action CommandRejected;
 
         public ActionPresenter Presenter { get; private set; }
 
         void Start()
         {
+            if (GetComponent<TacticalHud>() == null) gameObject.AddComponent<TacticalHud>();
             if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-graphite-workshop") >= 0)
                 gameObject.AddComponent<GraphitePreviewLaunch>();
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR
+            if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-tactical-capture") >= 0)
+                gameObject.AddComponent<TacticalPreviewCapture>();
+#endif
             Presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
 
             bool isWebGl = false;
@@ -604,6 +610,7 @@ namespace HexWars.Presentation
 
         internal void OnNetReject(string reason)
         {
+            CommandRejected?.Invoke();
             Debug.Log("[Net] move rejected: " + reason);
             Toast.Show(Friendly(reason));
             if (State != null) GetComponent<BoardRenderer>().RenderEntities(State, FogViewer()); // snap optimistic UI back to truth

@@ -19,6 +19,7 @@ namespace HexWars.Presentation
         Material _expensiveMaterial;
         Material _destinationMaterial;
         int _used;
+        LineRenderer _routeLine;
 
         void Awake() => _board = GetComponent<BoardRenderer>();
 
@@ -32,12 +33,36 @@ namespace HexWars.Presentation
             var destinations = new List<HexCoord>(routes.Keys);
             destinations.Sort(CompareCoords);
             foreach (var destination in destinations)
+            {
                 AddRing(state, destination, MovementHighlightKind.Reachable);
+                // Large maps retain all outlines; avoid hundreds of unnecessary text meshes.
+                if (destinations.Count <= 100)
+                {
+                    var ring = _pool[_used - 1];
+                    var label = ring.GetComponentInChildren<TextMesh>(true);
+                    if (label == null)
+                    {
+                        var go = new GameObject("Movement cost");go.transform.SetParent(ring.transform,false);
+                        go.transform.localPosition = new Vector3(0,.14f,0);
+                        label = go.AddComponent<TextMesh>();label.font=UiKit.Font();label.fontSize=48;
+                        label.characterSize=.075f;label.anchor=TextAnchor.MiddleCenter;label.color=new Color(.8f,.98f,.9f);
+                        go.GetComponent<MeshRenderer>().sharedMaterial=label.font.material;go.AddComponent<Billboard>();
+                    }
+                    label.text=routes[destination].HorizontalCost.ToString();label.gameObject.SetActive(true);
+                }
+            }
 
             if (!previewDestination.HasValue
                 || !routes.TryGetValue(previewDestination.Value, out var preview))
                 return;
 
+            _routeLine.gameObject.SetActive(true);
+            _routeLine.positionCount = preview.Cells.Count;
+            for (int i=0;i<preview.Cells.Count;i++)
+            {
+                var c=preview.Cells[i];var w=HexLayout.ToWorld(c,_board.HexSize);
+                _routeLine.SetPosition(i,new Vector3((float)w.x,(state.Board.TileAt(c).Elevation+1)*_board.LevelHeight+.11f,(float)w.z));
+            }
             foreach (var cell in preview.Cells)
             {
                 var kind = MovementHighlightClassifier.Classify(
@@ -51,6 +76,7 @@ namespace HexWars.Presentation
             for (int i = 0; i < _pool.Count; i++)
                 if (_pool[i] != null) _pool[i].SetActive(false);
             _used = 0;
+            if (_routeLine != null) _routeLine.gameObject.SetActive(false);
         }
 
         void EnsureResources()
@@ -73,10 +99,17 @@ namespace HexWars.Presentation
             if (_strongRing == null) _strongRing = HexMesh.Ring(radius * 0.91f, radius * 0.78f);
             if (_reachableMaterial == null)
             {
-                _reachableMaterial = CreateMaterial(new Color(0.20f, 0.78f, 0.30f));
-                _routeMaterial = CreateMaterial(new Color(1.00f, 0.88f, 0.20f));
-                _expensiveMaterial = CreateMaterial(new Color(1.00f, 0.58f, 0.08f));
+                _reachableMaterial = CreateMaterial(new Color(.40f, .72f, .63f));
+                _routeMaterial = CreateMaterial(new Color(.69f, .94f, .83f));
+                _expensiveMaterial = CreateMaterial(new Color(.35f, .63f, .57f));
                 _destinationMaterial = CreateMaterial(new Color(1.00f, 1.00f, 0.88f));
+            }
+            if (_routeLine == null)
+            {
+                var go=new GameObject("Movement route");go.transform.SetParent(transform,false);
+                _routeLine=go.AddComponent<LineRenderer>();_routeLine.useWorldSpace=false;
+                _routeLine.startWidth=_routeLine.endWidth=.045f;_routeLine.sharedMaterial=_routeMaterial;
+                _routeLine.shadowCastingMode=ShadowCastingMode.Off;
             }
         }
 
@@ -107,6 +140,8 @@ namespace HexWars.Presentation
             }
             _used++;
 
+            var oldCost = ring.GetComponentInChildren<TextMesh>(true);
+            if (oldCost != null) oldCost.gameObject.SetActive(false);
             ring.name = "MovementHighlight_" + kind;
             var filter = ring.GetComponent<MeshFilter>();
             var meshRenderer = ring.GetComponent<MeshRenderer>();

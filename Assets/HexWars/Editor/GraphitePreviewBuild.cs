@@ -9,7 +9,12 @@ namespace HexWars.Presentation.EditorTools
     public static class GraphitePreviewBuild
     {
         [MenuItem("HexWars/Build Graphite Windows Preview")]
-        public static void Build()
+        public static void Build() => BuildTo("GraphitePreview");
+
+        [MenuItem("HexWars/Build Tactical Windows Preview")]
+        public static void BuildTactical() => BuildTo("TacticalPreview");
+
+        static void BuildTo(string folder)
         {
             WebGLBuild.EnsureShadersIncluded("Universal Render Pipeline/Lit", "Universal Render Pipeline/Unlit",
                 "HexWars/Matcap", "HexWars/IconUnlit", "Unlit/Color", "Unlit/Texture", "Skybox/Panoramic");
@@ -20,9 +25,9 @@ namespace HexWars.Presentation.EditorTools
             if(camera!=null) { camera.clearFlags=CameraClearFlags.SolidColor;camera.backgroundColor=UiKit.Bg;EditorUtility.SetDirty(camera); }
             EditorSceneManager.MarkSceneDirty(scene);EditorSceneManager.SaveScene(scene);
             AssetDatabase.SaveAssets();
-            Directory.CreateDirectory("Build/GraphitePreview");
+            Directory.CreateDirectory("Build/"+folder);
             var result=BuildPipeline.BuildPlayer(new BuildPlayerOptions {
-                scenes=new[]{"Assets/Scenes/HexWars.unity"},locationPathName="Build/GraphitePreview/HexWars.exe",
+                scenes=new[]{"Assets/Scenes/HexWars.unity"},locationPathName="Build/"+folder+"/HexWars.exe",
                 target=BuildTarget.StandaloneWindows64,options=BuildOptions.None,extraScriptingDefines=new[]{"DISABLESTEAMWORKS"} });
             Debug.Log($"[GraphitePreviewBuild] {result.summary.result}; errors={result.summary.totalErrors}; size={result.summary.totalSize}");
             if(Application.isBatchMode) EditorApplication.Exit(result.summary.result==BuildResult.Succeeded ? 0 : 1);

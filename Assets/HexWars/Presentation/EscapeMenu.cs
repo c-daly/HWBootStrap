@@ -62,7 +62,7 @@ namespace HexWars.Presentation
             var prt = panel.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0.5f);
             bool online = _game.Networked;
-            prt.sizeDelta = new Vector2(340f, online ? 306f : 256f);
+            prt.sizeDelta = new Vector2(340f, online ? 406f : 356f);
 
             UiKit.Label(panel.transform, "MENU", 0f, -18f, 300f, 30f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
 
@@ -88,8 +88,18 @@ namespace HexWars.Presentation
             _volText = volText;
             _muteText = muteText;
 
-            UiKit.Button(panel.transform, "Resume", 0f, -120f, 280f, 44f, Close, UiKit.ButtonStyle.Cta);
-            UiKit.Button(panel.transform, "Leave game", 0f, -174f, 280f, 44f, () =>
+            Text motion = null;
+            motion = UiKit.Button(panel.transform, MotionLabel(), 0f, -114f, 280f, 36f, () =>
+            {
+                MotionSettings.Reduced = !MotionSettings.Reduced;
+                if (MotionSettings.Reduced) _game.Presenter?.FastForward();
+                motion.text = MotionLabel();
+            }, UiKit.ButtonStyle.Secondary, UiKit.SizeCaption).GetComponentInChildren<Text>();
+            UiKit.Button(panel.transform, "How to play", -73f, -160f, 134f, 36f,
+                () => GameRules.Show(_overlay.transform, UiKit.Font(), UiKit.OrderEscape+10), UiKit.ButtonStyle.Secondary, UiKit.SizeCaption);
+            TipsService.BuildToggle(panel.transform, 70f, -160f);
+            UiKit.Button(panel.transform, "Resume", 0f, -220f, 280f, 44f, Close, UiKit.ButtonStyle.Cta);
+            UiKit.Button(panel.transform, "Leave game", 0f, -274f, 280f, 44f, () =>
             {
                 Close();
                 _game.ReturnToMenu();
@@ -97,11 +107,12 @@ namespace HexWars.Presentation
             if (online)
                 UiKit.Label(panel.transform,
                             "Leaving disconnects you - rejoin from the lobby\nwhile the room is held (about 10 minutes).",
-                            0f, -228f, 320f, 40f, UiKit.SizeCaption, TextAnchor.UpperCenter, UiKit.TextDim);
+                            0f, -328f, 320f, 40f, UiKit.SizeCaption, TextAnchor.UpperCenter, UiKit.TextDim);
         }
 
         Text _volText, _muteText;
 
+        static string MotionLabel() => "Reduced motion: " + (MotionSettings.Reduced ? "On" : "Off");
         static string MuteLabel() => SoundSettings.MuteAll ? "Sound: Off" : "Sound: On";
         static string VolLabel() => Mathf.RoundToInt(SoundSettings.Volume * 100f) + "%";
 

@@ -1,0 +1,132 @@
+{
+  "date": "2026-09-25T15:06:53.552787+00:00",
+  "branch": "codex/gameplay-visual-language-20260925",
+  "unity": "6000.5.0f1",
+  "tests": {
+    "EditMode": {
+      "result": "Passed",
+      "total": "671",
+      "passed": "671",
+      "failed": "0",
+      "skipped": "0",
+      "start-time": "2026-09-25 14:40:58Z",
+      "end-time": "2026-09-25 14:41:07Z"
+    },
+    "PlayMode": {
+      "result": "Passed",
+      "total": "13",
+      "passed": "13",
+      "failed": "0",
+      "skipped": "0",
+      "start-time": "2026-09-25 14:41:34Z",
+      "end-time": "2026-09-25 14:41:36Z"
+    }
+  },
+  "native_build": "Succeeded; errors=0; size=114935810",
+  "webgl_build": "Succeeded sizeBytes=26110431 time=00:04:41.1683819 errors=0 out=C:\\Users\\cddal\\HexWars\\.worktrees\\player-polish-20260924\\Build\\WebGL",
+  "native_files": [
+    {
+      "path": "Build/TacticalPreview/HexWars.exe",
+      "bytes": 667648,
+      "sha256": "e113b0d76537e3c1e41aa2623ae145e5869afb9095cf1771c10b43afc0e2918e"
+    },
+    {
+      "path": "Build/TacticalPreview/HexWars_Data/Managed/HexWars.Presentation.dll",
+      "bytes": 411136,
+      "sha256": "dcfddf23c7a8fb5475c066fbbcea5a1379600c74b6fb036e65289a5e70de396d"
+    }
+  ],
+  "webgl_files": [
+    {
+      "path": "engine/HexWars.NetServer/wwwroot/Build/WebGL.data.unityweb",
+      "bytes": 9312900,
+      "sha256": "183ea4f1a903efccfdf1938df0228b58025249cef30034bb8d62c9729d8328d5"
+    },
+    {
+      "path": "engine/HexWars.NetServer/wwwroot/Build/WebGL.framework.js.unityweb",
+      "bytes": 80528,
+      "sha256": "5d635eba081b1babebd957b23e413680d270bfed9b9e58ec94e2cd712c75cd82"
+    },
+    {
+      "path": "engine/HexWars.NetServer/wwwroot/Build/WebGL.loader.js",
+      "bytes": 48105,
+      "sha256": "e4e2e746d6970af68eb6af446fd9362cc7e17fc9606d678ef077b29c1e272eab"
+    },
+    {
+      "path": "engine/HexWars.NetServer/wwwroot/Build/WebGL.wasm.unityweb",
+      "bytes": 16663731,
+      "sha256": "2f37fed6877baeeef7412b0e3c46c98109bfc3c19c35facfc814baabf6b28105"
+    }
+  ],
+  "browser": {
+    "date": "2026-09-25T15:05:30.532Z",
+    "browser": "149.0.7827.53",
+    "errors": [],
+    "warnings": [
+      "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+      "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+      "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n"
+    ],
+    "failed": [],
+    "screens": [
+      "title",
+      "board",
+      "move",
+      "cancel-preview",
+      "after-move",
+      "attack",
+      "details",
+      "after-fire",
+      "turn-dialog",
+      "menu",
+      "saved-design",
+      "deployed",
+      "1280",
+      "390"
+    ],
+    "method": "Real canvas clicks and keyboard events; screenshots visually inspected alongside Unity state assertions.",
+    "cacheKey": "183ea4f1",
+    "viewports": [
+      {
+        "width": 1600,
+        "height": 900
+      },
+      {
+        "width": 1280,
+        "height": 720
+      },
+      {
+        "width": 390,
+        "height": 844
+      }
+    ],
+    "canvas": {
+      "x": 0,
+      "y": 0,
+      "width": 390,
+      "height": 844
+    }
+  },
+  "scope": [
+    "Desktop Windows and WebGL presentation; engine rules and network formats unchanged.",
+    "No live multiplayer acceptance session or production deployment in this pass.",
+    "Narrow layout inspected at 390x844; desktop-scale text and secondary army tools still need a dedicated touch pass."
+  ],
+  "resolved_findings": [
+    "Missing CanvasRenderer on tactical glyphs caught by PlayMode and corrected.",
+    "Partial camera viewport left stale pixels around changing text; opaque surrounding surfaces now repaint that area.",
+    "Camera framing excludes transient cue meshes.",
+    "Scene-wide selection could attach to a pending-destruction demo token; current TokenStore resolves the view, covered by a regression.",
+    "Browser font omitted arrow/minus/multiply glyphs; forecast and affected controls use plain text."
+  ],
+  "reviewed_behavior": [
+    "Preview cancellation spends no action.",
+    "Confirmed move updates position and remaining movement/climb.",
+    "4 damage forecast matches the observed reduction of the enemy Brute from 7 to 3 hull.",
+    "Expanding details preserves the preview; firing marks attack used and movement closed.",
+    "End-turn dialog can be cancelled without passing.",
+    "Reduced motion can be enabled from Menu.",
+    "Signal Rig saves and deploys with Halo appearance, Damage 2, Health 1, cost 3; points fall from 200 to 197.",
+    "H logo visible; compact squad and optional detail panel visible at desktop sizes."
+  ]
+}

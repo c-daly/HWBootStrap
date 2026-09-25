@@ -1,17 +1,16 @@
-# Latest: gameplay and visual language
+# Current: cleaner tactical interface and machine units
 
-The [new tactical interface study](gameplay-visual-language.md) responds to the request for
-clearer gameplay cues, a more attractive UI and less abstract units. Open the
-[interactive preview](concept/tactical.html) or the
-[Windows launcher](<concept/Open Tactical Study.cmd>). It explores a focused unit panel,
-movement/attack forecasts and eight recognizable machine forms. This is a browser design
-study; the current playable Unity build below is unchanged.
+The [implemented tactical interface](gameplay-visual-language.md) gives the board more space,
+keeps the squad compact, and places full stats and combat arithmetic behind **Unit details**.
+Destinations and attacks require confirmation. The eight existing appearances now use recognizable
+machine forms, and the dark palette and H-in-hex mark remain.
 
-# Playable graphite update
+Open the [WebGL player instructions](webgl-preview.md) or the
+[Windows game launcher](<Open Tactical Game.cmd>). The [Windows build notes](windows-preview.md)
+and [validation receipt](evidence/tactical-implementation-checks.json) describe what was tested.
 
-The graphite direction is now implemented in Unity. Start with the [WebGL build](webgl-preview.md)
-or [Windows preview](windows-preview.md) for the playable art picker and validation boundaries.
-The studies below document the earlier exploration.
+The [original tactical study](concept/tactical.html) remains an illustrative browser fixture.
+The material below records earlier explorations and does not override the current direction.
 
 # HexWars player polish study
 

@@ -30,6 +30,9 @@ namespace HexWars.Presentation
         int _placeholderIdx;
         bool _lastTipsEnabled;
 
+        public bool Expanded { get; private set; } = true;
+        public void SetExpanded(bool open) { Expanded = open; if (_canvasGo != null) _canvasGo.SetActive(open && _game != null && !_game.DemoMode && _game.State != null); }
+
         void Start()
         {
             _stats[0] = 1; // Health >= 1
@@ -65,7 +68,7 @@ namespace HexWars.Presentation
                     return;
                 }
             }
-            bool hidden = _game.DemoMode || _game.State == null;
+            bool hidden = !Expanded || _game.DemoMode || _game.State == null;
             if (_canvasGo.activeSelf == hidden)
             {
                 _canvasGo.SetActive(!hidden);
@@ -166,6 +169,8 @@ namespace HexWars.Presentation
         /// no-op click handler.</summary>
         public void Highlight()
         {
+            if (_game != null) _game.GetComponent<TacticalHud>()?.SetWorkshop(true);
+            SetExpanded(true);
             if (_canvasGo == null || !_canvasGo.activeSelf) return;
             StopAllCoroutines();
             StartCoroutine(PulseRoutine());

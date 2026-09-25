@@ -25,6 +25,12 @@ namespace HexWars.Presentation
         readonly List<Button> _rows = new List<Button>();
 
         public bool IsDeploying => _deployIndex >= 0;
+        public bool Expanded { get; private set; } = true;
+        public void SetExpanded(bool open)
+        {
+            Expanded = open; if (!open) _deployIndex = -1;
+            if (_canvasGo != null) Rebuild();
+        }
 
         /// <summary>Spectator mode: still shows the active player's barracks, but the human can't deploy
         /// (the AI is playing). Set by <see cref="SpectatorDriver"/>.</summary>
@@ -126,7 +132,7 @@ namespace HexWars.Presentation
             if (_game == null) return;
 
             // hidden during the title demo and the connecting window (no state yet)
-            if (_game.DemoMode || _game.State == null)
+            if (!Expanded || _game.DemoMode || _game.State == null)
             {
                 if (_canvasGo != null) _canvasGo.SetActive(false);
                 return;
@@ -187,7 +193,7 @@ namespace HexWars.Presentation
                                         UiKit.ButtonStyle.Secondary, 13);
                 _rows.Add(info);
 
-                var del = UiKit.Button(_list, "✕", 100f, -(4f + i * 52f), 32f, 30f,
+                var del = UiKit.Button(_list, "x", 100f, -(4f + i * 52f), 32f, 30f,
                                        () => DeleteAt(idx), UiKit.ButtonStyle.Danger, 14);
                 del.interactable = isActiveHuman;
                 _rows.Add(del);

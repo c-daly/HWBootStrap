@@ -223,6 +223,7 @@ namespace HexWars.Presentation
             markRenderer.shadowCastingMode = ShadowCastingMode.Off;
             mark.SetActive(false);
 
+            TacticalTerrain.Add(col.transform, tile.Terrain, htot, R);
             if (!Outlines) return;
 
             for (int i = 0; i <= levels; i++)
