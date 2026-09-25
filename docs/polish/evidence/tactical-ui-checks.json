@@ -1,0 +1,63 @@
+{
+  "date": "2026-09-25T13:18:23.026Z",
+  "browser": "149.0.7827.53",
+  "scope": "Interactive HTML/CSS/SVG design study, not a Unity or engine integration",
+  "checks": [
+    "Initial position offers a 3-damage preview without applying damage.",
+    "Desktop and mobile layouts have no horizontal overflow and retain the H mark.",
+    "Movement preview leaves position untouched; commit moves to D4, spends one step and changes the height-dependent forecast.",
+    "Changing selection preserves the previous unit’s remaining actions.",
+    "Firing spends the attack once; keyboard shortcuts cannot repeat it and movement stays available.",
+    "A lethal forecast removes only the chosen opponent and updates the army count.",
+    "End turn allows cancellation; confirmation refreshes actions without pretending to simulate an opponent.",
+    "All eight appearance choices agree across board, portrait and squad while preserving stats and forecast.",
+    "Dismissing the appearance editor discards an unapplied choice.",
+    "Keyboard selection restores a target after clearing the preview.",
+    "Motion control and the accessible visual guide work.",
+    "On mobile the appearance grid scrolls to all eight choices and its apply button remains usable.",
+    "Direct file opening initializes the study without a server or external assets.",
+    "No page errors or failed requests during the interaction run."
+  ],
+  "layouts": [
+    {
+      "width": 1600,
+      "height": 900,
+      "scrollWidth": 1600,
+      "scrollHeight": 900,
+      "confirmBottom": 696.109375,
+      "endTurnBottom": 784.109375,
+      "logoWidth": 30
+    },
+    {
+      "width": 1280,
+      "height": 720,
+      "scrollWidth": 1280,
+      "scrollHeight": 736,
+      "confirmBottom": 597.96875,
+      "endTurnBottom": 670.96875,
+      "logoWidth": 30
+    },
+    {
+      "width": 1920,
+      "height": 1080,
+      "scrollWidth": 1920,
+      "scrollHeight": 1089,
+      "confirmBottom": 900.109375,
+      "endTurnBottom": 999.109375,
+      "logoWidth": 30
+    },
+    {
+      "width": 390,
+      "height": 844,
+      "scrollWidth": 390,
+      "scrollHeight": 1570,
+      "confirmBottom": 1356.828125,
+      "endTurnBottom": 1455.828125,
+      "logoWidth": 25
+    }
+  ],
+  "errors": [],
+  "failedRequests": [],
+  "layoutRefreshedAt": "2026-09-25T13:21:42.819Z",
+  "desktopActionControlsWithinViewport": true
+}

@@ -92,13 +92,19 @@ namespace HexWars.Presentation
 
         /// <summary>Raised after the state changes (new game or applied command) so HUD can refresh.</summary>
         public event System.Action StateChanged;
+        public event System.Action CommandRejected;
 
         public ActionPresenter Presenter { get; private set; }
 
         void Start()
         {
+            if (GetComponent<TacticalHud>() == null) gameObject.AddComponent<TacticalHud>();
             if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-graphite-workshop") >= 0)
                 gameObject.AddComponent<GraphitePreviewLaunch>();
+#if UNITY_STANDALONE_WIN || UNITY_EDITOR
+            if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-tactical-capture") >= 0)
+                gameObject.AddComponent<TacticalPreviewCapture>();
+#endif
             Presenter = GetComponent<ActionPresenter>() ?? gameObject.AddComponent<ActionPresenter>();
 
             bool isWebGl = false;
@@ -230,12 +236,12 @@ namespace HexWars.Presentation
         /// a seat this human controls fires the tip once per game, CTA drawing attention to the Designer.</summary>
         void CheckFirstBounty(GameState prev, Command cmd)
         {
+            if (State.IsGameOver) { TipsService.EndGame(); return; }
             if (!(cmd is AttackUnit atk) || !IsLocalCommand(cmd)) return;
             int gained = State.Player(atk.Issuer).Points - prev.Player(atk.Issuer).Points;
             if (gained <= 0) return;
             TipsService.Show("first-bounty",
-                $"You earned {gained} points. A wall? A sniper? Eyes that see everything? Design your answer.",
-                cta: "Design your answer", onCta: OpenDesigner);
+                $"Unit destroyed. +{gained} points for your army.");
         }
 
         void OpenDesigner() => FindAnyObjectByType<DesignPanel>()?.Highlight();
@@ -306,7 +312,15 @@ namespace HexWars.Presentation
                     setup, p0Barracks, p1Barracks)
                 : GameFactory.Build(setup, p0Barracks, p1Barracks);
             if (vsAi && level == AiLevel.TrainedModel)
-                _ = new PlayableModelAdapter(nextState, PlayerId.Player1);
+            {
+                var preflight = nextState;
+                if (preflight.PlacingStartingUnits)
+                {
+                    preflight = GameEngine.Apply(preflight, new FinishPlacement(PlayerId.Player0)).NewState;
+                    preflight = GameEngine.Apply(preflight, new FinishPlacement(PlayerId.Player1)).NewState;
+                }
+                _ = new PlayableModelAdapter(preflight, PlayerId.Player1);
+            }
 
             // Do not tear down the title demo or publish a partial match until every model-specific
             // rule/table capacity has passed the exact observation preflight above.
@@ -351,7 +365,7 @@ namespace HexWars.Presentation
             var s = LastLocalSetup.Value;
             var reseeded = new GameSetup(s.Mode, s.Width, s.Height, s.StartingPoints,
                                          UnityEngine.Random.Range(1, 99999), s.ArmySize, s.Brutes, s.Strikers,
-                                         s.Snipers, s.TurnActions, s.Fog);
+                                         s.Snipers, s.TurnActions, s.Fog, s.ManualPlacement);
             StartLocalGame(reseeded, true, LastLocalAi);
         }
 
@@ -413,6 +427,7 @@ namespace HexWars.Presentation
         /// a null state is what lets it come back). The next created game rebuilds everything.</summary>
         public void ReturnToMenu()
         {
+            TipsService.EndGame(); // Coaching stays ended until the next real match starts.
             Presenter?.ResetQueue();
             GameOverBanner.Dismiss();
             // a lobby coordinator kept alive as the credential broker must not outlive the match
@@ -604,6 +619,7 @@ namespace HexWars.Presentation
 
         internal void OnNetReject(string reason)
         {
+            CommandRejected?.Invoke();
             Debug.Log("[Net] move rejected: " + reason);
             Toast.Show(Friendly(reason));
             if (State != null) GetComponent<BoardRenderer>().RenderEntities(State, FogViewer()); // snap optimistic UI back to truth

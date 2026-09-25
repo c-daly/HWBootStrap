@@ -36,23 +36,22 @@
     <script>
       var canvas = document.querySelector("#unity-canvas");
       var config = {
-        dataUrl: "Build/WebGL.data.unityweb?v=ff3139db",
-        frameworkUrl: "Build/WebGL.framework.js.unityweb?v=ff3139db",
-        codeUrl: "Build/WebGL.wasm.unityweb?v=ff3139db",
+        dataUrl: "Build/WebGL.data.unityweb?v=5eeb69d9",
+        frameworkUrl: "Build/WebGL.framework.js.unityweb?v=5eeb69d9",
+        codeUrl: "Build/WebGL.wasm.unityweb?v=5eeb69d9",
         streamingAssetsUrl: "StreamingAssets",
         companyName: "DefaultCompany",
         productName: "HexWars",
         productVersion: "0.1.0",
       };
       var script = document.createElement("script");
-      script.src = "Build/WebGL.loader.js?v=ff3139db";
+      script.src = "Build/WebGL.loader.js?v=5eeb69d9";
       script.onload = () => {
         createUnityInstance(canvas, config, (p) => {
           document.querySelector("#fill").style.width = (100 * p) + "%";
         }).then((unityInstance) => {
           document.querySelector("#unity-loading").style.display = "none";
-          // double-click toggles real fullscreen; the canvas already fills the window either way
-          canvas.addEventListener("dblclick", () => unityInstance.SetFullscreen(1));
+          // Board double-clicks confirm gameplay actions. Fullscreen remains available via the browser.
         }).catch((message) => { document.querySelector("#unity-loading").textContent = message; });
       };
       document.body.appendChild(script);

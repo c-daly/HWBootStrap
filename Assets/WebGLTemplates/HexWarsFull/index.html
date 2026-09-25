@@ -39,8 +39,7 @@
           document.querySelector("#fill").style.width = (100 * p) + "%";
         }).then((unityInstance) => {
           document.querySelector("#unity-loading").style.display = "none";
-          // double-click toggles real fullscreen; the canvas already fills the window either way
-          canvas.addEventListener("dblclick", () => unityInstance.SetFullscreen(1));
+          // Board double-clicks confirm gameplay actions. Fullscreen remains available via the browser.
         }).catch((message) => { document.querySelector("#unity-loading").textContent = message; });
       };
       document.body.appendChild(script);

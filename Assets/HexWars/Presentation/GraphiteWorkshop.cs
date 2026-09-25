@@ -11,7 +11,7 @@ namespace HexWars.Presentation
         bool _offerNewMatch;
         GameObject _canvas; RawImage _hero; Text _name, _description;
         readonly Button[] _choices=new Button[8];
-        static readonly string[] Descriptions={"A balanced core. Suggested for a generalist.","Broad shoulders and a planted stance. Suggested for high health.","A single leaning blade. Suggested for high damage.","Paired shields with an open center. Suggested for high defense.","Low swept runners. Suggested for movement.","A raised arch with separated feet. Suggested for climbing.","A low turret and a long barrel. Suggested for range.","An open ring on a slender stem. Suggested for vision."};
+        static readonly string[] Descriptions={"Utility rover with a cab and articulated tool arm.","Armored crawler with a broad, sloped hull.","Assault carrier with a twin-barrel turret.","Shield carrier on a planted tracked chassis.","Recon buggy with exposed wheels and a light cab.","Four-legged walker with jointed climbing feet.","Tracked long-range gun with a recoil sleeve.","Sensor rover with a radar dish and mast."};
         public static void Open(GameBootstrap game, bool offerNewMatch = false)
         {
             if (game.GetComponent<GraphiteWorkshop>() != null) return;
@@ -34,7 +34,7 @@ namespace HexWars.Presentation
             _description=UiKit.Label(panel.transform,"",-290,-580,410,56,16,TextAnchor.UpperCenter,UiKit.TextDim);
             _description.horizontalOverflow=HorizontalWrapMode.Wrap;
             UiKit.Label(panel.transform,"Choose your unit’s appearance.",267,-130,486,35,27,TextAnchor.MiddleLeft);
-            UiKit.Label(panel.transform,"Choose a silhouette in the unit designer.\nYour stats still determine what the unit can do.",267,-181,486,48,17,TextAnchor.UpperLeft,UiKit.TextDim);
+            UiKit.Label(panel.transform,"Choose a machine in the unit designer.\nYour stats still determine what the unit can do.",267,-181,486,48,17,TextAnchor.UpperLeft,UiKit.TextDim);
             for(int i=0;i<8;i++)
             {
                 int idx=i;float x=87+(i%4)*120,y=-261-(i/4)*139;
@@ -42,8 +42,8 @@ namespace HexWars.Presentation
                 Portrait(button.transform,i,0,-4,95);
                 UiKit.Label(button.transform,UnitArt.Names[i],0,-98,105,24,14,TextAnchor.MiddleCenter);
             }
-            UiKit.Label(panel.transform,"MINT / YOUR ARMY     ·     AMBER / OPPONENT",267,-564,486,26,12,TextAnchor.MiddleLeft,UiKit.Accent);
-            UiKit.Label(panel.transform,"The opponent's rim is broken, so team identity\nremains readable without relying on color alone.",267,-599,486,44,15,TextAnchor.UpperLeft,UiKit.TextDim);
+            UiKit.Label(panel.transform,"MINT / PLAYER 1     ·     AMBER / PLAYER 2",267,-564,486,26,12,TextAnchor.MiddleLeft,UiKit.Accent);
+            UiKit.Label(panel.transform,"Team color covers the hull and health bar.\nPlayer 1: solid rim. Player 2: broken rim.",267,-599,486,44,15,TextAnchor.UpperLeft,UiKit.TextDim);
             var currentGame = GetComponent<GameBootstrap>();
             bool startMatch = _offerNewMatch || currentGame.State == null || currentGame.DemoMode;
             UiKit.Button(panel.transform,startMatch ? "Try on the battlefield" : "Return to match",267,-660,486,46,()=>
@@ -54,11 +54,11 @@ namespace HexWars.Presentation
             },UiKit.ButtonStyle.Cta,21);
             Select(0);
         }
-        internal static RawImage Portrait(Transform parent,int index,float x,float y,float size)
+        internal static RawImage Portrait(Transform parent,int index,float x,float y,float size, HexWars.Engine.PlayerId owner = HexWars.Engine.PlayerId.Player0)
         {
             var go=new GameObject("Portrait "+UnitArt.Names[index]);go.transform.SetParent(parent,false);
             var image=go.AddComponent<RawImage>();image.raycastTarget=false;
-            go.AddComponent<UnitPortrait>().SetArt(index, size > 128);
+            go.AddComponent<UnitPortrait>().SetArt(index, size > 128, owner);
             UiKit.SetRect(image.rectTransform,x,y,size,size);return image;
         }
         void Select(int i)
@@ -66,6 +66,7 @@ namespace HexWars.Presentation
             _hero.GetComponent<UnitPortrait>().SetArt(i, true);_name.text=UnitArt.Names[i];_description.text=Descriptions[i];
             for(int j=0;j<8;j++) UiKit.SetToggled(_choices[j],i==j);
         }
+        public void Close(){ if(_canvas!=null)_canvas.SetActive(false);IsOpen=false;Destroy(this); }
         void OnDestroy(){IsOpen=false;if(_canvas!=null)Destroy(_canvas);}
     }
 }

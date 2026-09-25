@@ -1,0 +1,145 @@
+{
+  "date": "2026-09-25T18:12:22.724569+00:00",
+  "source_commit": "d183d22959c3d3582f15197c960a0d2166bb4093",
+  "integration_target": "steam-hosting/integration",
+  "unity": "6000.5.0f1",
+  "tests": {
+    "editmode": {
+      "result": "Passed",
+      "total": "671",
+      "passed": "671",
+      "failed": "0",
+      "receipt_sha256": "cb369be9b462a5962c29e003ef46ce65f4efbdadd8fcac32f2dd06fe316e0b42"
+    },
+    "playmode": {
+      "result": "Passed",
+      "total": "41",
+      "passed": "41",
+      "failed": "0",
+      "receipt_sha256": "30549b05f9c5f5a862e34b0e4a03f675df0ad6db25bdf2fe894023107fb46c96"
+    },
+    "new_review_regressions": 10,
+    "review_cases": [
+      {
+        "name": "HexWars.Presentation.PlayModeTests.DeferredCoachingTests.DisablingTipsCancelsPendingCoaching",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.DeferredCoachingTests.FirstBountyWaitsForOpenHelpAndShowsOnceWithoutAnotherKill",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.DeferredCoachingTests.MatchResultCancelsCoachingUntilTheNextGameEvenAfterBannerDismissal",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.DeferredCoachingTests.NewGameDiscardsBountyFromThePreviousMatch",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.SoundPolishTests.FastForwardKeepsOneConclusionAcrossQueuedDeaths",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.SoundPolishTests.FastForwardKeepsOneDeathCueWithoutStackingTheQueue",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.SoundPolishTests.HiddenQueuedMoveStaysSilentWhenItAutomaticallyEndsTheTurn",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.SoundPolishTests.VisibleQueuedMoveKeepsItsAutomaticTurnCue",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.WorkshopCancelTests.BrowserEscapeCancelsExactlyOnceBeforeDismissingDesigner",
+        "result": "Passed"
+      },
+      {
+        "name": "HexWars.Presentation.PlayModeTests.WorkshopCancelTests.DesktopEscapeCancelsTheEditAndImmediatelyDismissesDesigner",
+        "result": "Passed"
+      }
+    ]
+  },
+  "native": {
+    "result": "Succeeded",
+    "build_errors": 0,
+    "size_bytes": 115701214,
+    "smoke": "TacticalCapture completed; no runtime exceptions",
+    "exe_sha256": "e113b0d76537e3c1e41aa2623ae145e5869afb9095cf1771c10b43afc0e2918e",
+    "presentation_assembly_sha256": "09c509a3b06519c19c75a290f5fc4d11df2c1b5fb1ef4e62021175690ac456cb",
+    "capture_count": 8,
+    "build_log_sha256": "f42551c2b9b6c15d468c95217b5d87c2f46016100e9e966d7740240946e6db66",
+    "player_log_sha256": "b2bfe912faf361c92944860b67aea2b3abd6fbbc5a757e0dab68eeb91e7c9c3c"
+  },
+  "reviews": {
+    "4107017918": "Fixed: one highest-priority result for fast-forwarded batch, with per-item visibility.",
+    "4106646803": "Fixed: restore focused text before immediate designer dismissal.",
+    "4106646807": "Fixed: defer the first bounty once, clear on opt-out and match exit/reset.",
+    "4106646799": "No code change: negative height calculation confused physical pixels with canvas coordinates. Actual 900x480 browser capture confirms visible decision controls.",
+    "4107181854": "Fixed: automatic turn cues require a presented action. Hidden and visible one-action-policy controls both pass.",
+    "4107181866": "Fixed: match results and menu exit cancel pending coaching; late hints stay suppressed until the next match."
+  },
+  "prior_receipts": [
+    "battlefield-clarity-checks.json",
+    "sound-polish-checks.json"
+  ],
+  "retained_failure": {
+    "path": "Library/PolishIntegration/play-tests-opening-round-fixture.xml",
+    "passed": 37,
+    "failed": 1,
+    "cause": "New terminal test ran in round1, where WinCheck deliberately disables annihilation. Corrected fixture to round2 and reran fullPlayMode suite; no engine rule changes."
+  },
+  "limits": [
+    "No live multiplayer acceptance, production deployment or Steam release certification.",
+    "The earlier full research/Gym engine suite remains incomplete as recorded in the battlefield-clarity receipt; this presentation-only pass did not rerun it.",
+    "Audio focus loss is covered by Unity tests; headless Chrome did not reproduce actual browser focus loss in the sound pass."
+  ],
+  "webgl": {
+    "result": "Succeeded",
+    "errors": 0,
+    "build_size_bytes": 26356222,
+    "cache_key": "5eeb69d9",
+    "payloads": {
+      "WebGL.data.unityweb": {
+        "sha256": "ad220d0bbe69a82f0ff21d0d738320fd17baf75df1f8260473f02f1dfa41f0d0",
+        "bytes": 9527871
+      },
+      "WebGL.framework.js.unityweb": {
+        "sha256": "bc753653a376039d6addfd7f1938c0726c8c1098def3ce8da0882eb5dd5fbb4e",
+        "bytes": 80570
+      },
+      "WebGL.loader.js": {
+        "sha256": "f3ff4dab81509a9c53f88d61f8ed553c2a5ad2ba8bb1e8e4cb25bd97120bc74e",
+        "bytes": 48105
+      },
+      "WebGL.wasm.unityweb": {
+        "sha256": "a8957e32823f101ee1e37b8d108ad96d07325062fec8c65c372e39ae4e32a301",
+        "bytes": 16694587
+      }
+    },
+    "staged_payloads_match_successful_build": true,
+    "build_log_sha256": "49fc5f32a39e6ab2c8d38a89ed7d2174b0f1df51c768f5205f313d405a254eee"
+  },
+  "review_summary": {
+    "source_commit": "d183d22959c3d3582f15197c960a0d2166bb4093",
+    "greptile_check": "SUCCESS",
+    "outstanding_actionable_findings": 0,
+    "summary_url": "https://github.com/c-daly/HWBootStrap/pull/25#issuecomment-5836656895",
+    "coderabbit": "Skipped automatic review; reported success status is not an independent code review."
+  },
+  "browser": {
+    "cache_key": "5eeb69d9",
+    "errors": 0,
+    "failed_requests": 0,
+    "receipt": "integration-browser-checks.json",
+    "sha256": "29ee4ab6a00fc7187dfd386a7f299c79a02d0fbbee5d79cf4911addcefc00671",
+    "checks": [
+      "900x480 territory layout",
+      "Escape restores focused designer draft and closes immediately",
+      "Confirmed turn handover with short audio feedback",
+      "Visible title and match H logos"
+    ]
+  }
+}

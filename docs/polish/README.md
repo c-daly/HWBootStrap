@@ -1,8 +1,27 @@
-# Playable graphite update
+# Current: cleaner tactical interface and machine units
 
-The graphite direction is now implemented in Unity. Start with the [WebGL build](webgl-preview.md)
-or [Windows preview](windows-preview.md) for the playable art picker and validation boundaries.
-The studies below document the earlier exploration.
+The [implemented tactical interface](gameplay-visual-language.md) gives the board more space,
+keeps the squad compact, and places full stats and combat arithmetic behind **Unit details**.
+A single click previews destinations and attacks; a double-click or the panel button confirms. The eight existing appearances now use recognizable
+machine forms, and the dark palette and H-in-hex mark remain.
+
+The latest pass adds distinct team hulls and portraits, mirrored backline starts, and automatic
+range markers. Biome colors and decoration are hidden while biome rules are disabled.
+Enable **Place starting units** in setup to arrange each army anywhere in its starting area before
+pressing **Ready**. Escape immediately dismisses help and the designer; coaching is smaller and brief.
+
+The [sound pass](sound-direction.md) adds quiet mechanical cues, shorter weapon tails and separate
+effects, ambience and music controls. With the preview server running,
+[audition the changes](http://localhost:8196/sound-study/).
+
+Open the [WebGL player instructions](webgl-preview.md) or the
+[Windows game launcher](<Open Tactical Game.cmd>). The [Windows build notes](windows-preview.md)
+and [latest validation receipt](evidence/polish-integration-checks.json) describe what was tested.
+
+The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.
+
+The [original tactical study](concept/tactical.html) remains an illustrative browser fixture.
+The material below records earlier explorations and does not override the current direction.
 
 # HexWars player polish study
 

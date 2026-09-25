@@ -5,7 +5,7 @@ using UnityEngine.Rendering;
 
 namespace HexWars.Presentation
 {
-    /// <summary>Renders compact circular halos around targetable enemy units.</summary>
+    /// <summary>Renders readable target brackets and labels before an enemy is selected.</summary>
     [RequireComponent(typeof(BoardRenderer))]
     public sealed class AttackTargetHighlightController : MonoBehaviour
     {
@@ -15,15 +15,16 @@ namespace HexWars.Presentation
         Mesh _haloMesh;
         Material _haloMaterial;
         int _used;
+        LineRenderer _shot;
 
         void Awake() => _board = GetComponent<BoardRenderer>();
 
-        public void Show(IReadOnlyList<AttackPreviewTarget> targets)
+        public void Show(IReadOnlyList<AttackPreviewTarget> targets, bool afterMove = false)
         {
             EnsureResources();
             Clear();
             for (int i = 0; i < targets.Count; i++)
-                AddHalo(targets[i]);
+                AddHalo(targets[i], afterMove);
         }
 
         public void Clear()
@@ -31,6 +32,23 @@ namespace HexWars.Presentation
             for (int i = 0; i < _pool.Count; i++)
                 if (_pool[i] != null) _pool[i].SetActive(false);
             _used = 0;
+            if (_shot != null) _shot.gameObject.SetActive(false);
+        }
+
+        public void ShowShot(Unit from,Unit target,bool direct)
+        {
+            EnsureResources();
+            if(_shot==null)
+            {
+                var go=new GameObject("Attack preview line");go.transform.SetParent(_root,false);_shot=go.AddComponent<LineRenderer>();
+                _shot.sharedMaterial=_haloMaterial;_shot.useWorldSpace=false;_shot.startWidth=.025f;_shot.endWidth=.025f;
+                _shot.shadowCastingMode=ShadowCastingMode.Off;
+            }
+            Vector3 Point(Unit u){var p=HexLayout.ToWorld(u.Cell,_board.HexSize);return new Vector3((float)p.x,(u.Elevation+1)*_board.LevelHeight+.50f,(float)p.z);}
+            var a=Point(from);var b=Point(target);_shot.positionCount=25;
+            float arc=direct?.25f:Mathf.Max(2.5f,Vector3.Distance(a,b)*.35f);
+            for(int i=0;i<25;i++){float t=i/24f;_shot.SetPosition(i,Vector3.Lerp(a,b,t)+Vector3.up*(Mathf.Sin(t*Mathf.PI)*arc));}
+            _shot.gameObject.SetActive(true);
         }
 
         void EnsureResources()
@@ -50,15 +68,15 @@ namespace HexWars.Presentation
 
             if (_haloMesh == null)
             {
-                float radius = _board.HexSize * 0.60f;
-                _haloMesh = CircleRing(radius, radius * 0.72f, 40);
+                float radius = _board.HexSize * 0.85f;
+                _haloMesh = CircleRing(radius, radius * 0.87f, 40);
             }
             if (_haloMaterial == null)
             {
                 var shader = Shader.Find("Universal Render Pipeline/Unlit");
                 if (shader == null) shader = Shader.Find("Unlit/Color");
                 _haloMaterial = new Material(shader);
-                var blue = new Color(0.10f, 0.68f, 1.00f);
+                var blue = new Color(1f, .90f, .61f); // Distinct from either team hull.
                 if (_haloMaterial.HasProperty("_BaseColor"))
                     _haloMaterial.SetColor("_BaseColor", blue);
                 _haloMaterial.color = blue;
@@ -66,7 +84,7 @@ namespace HexWars.Presentation
             }
         }
 
-        void AddHalo(AttackPreviewTarget target)
+        void AddHalo(AttackPreviewTarget target, bool afterMove)
         {
             GameObject halo;
             if (_used < _pool.Count) halo = _pool[_used];
@@ -78,6 +96,14 @@ namespace HexWars.Presentation
                 var renderer = halo.AddComponent<MeshRenderer>();
                 renderer.shadowCastingMode = ShadowCastingMode.Off;
                 renderer.receiveShadows = false;
+                var badge = new GameObject("Range marker");
+                badge.transform.SetParent(halo.transform, false);
+                badge.transform.localPosition = new Vector3(0, _board.HexSize * 1.86f, 0);
+                badge.AddComponent<Billboard>();
+                var label = badge.AddComponent<TextMesh>();
+                label.font = UiKit.Font(); label.fontSize = 48; label.characterSize = .065f * _board.HexSize;
+                label.anchor = TextAnchor.MiddleCenter; label.color = new Color(1f, .94f, .76f);
+                badge.GetComponent<MeshRenderer>().sharedMaterial = label.font.material;
                 _pool.Add(halo);
             }
             _used++;
@@ -87,7 +113,8 @@ namespace HexWars.Presentation
             halo.GetComponent<MeshRenderer>().sharedMaterial = _haloMaterial;
             var world = HexLayout.ToWorld(target.Cell, _board.HexSize);
             float top = (target.Elevation + 1) * _board.LevelHeight;
-            halo.transform.localPosition = new Vector3((float)world.x, top + 0.72f, (float)world.z);
+            halo.transform.localPosition = new Vector3((float)world.x, top + 0.075f, (float)world.z);
+            halo.GetComponentInChildren<TextMesh>(true).text = afterMove ? "AFTER MOVE" : "IN RANGE";
             halo.SetActive(true);
         }
 
@@ -103,6 +130,8 @@ namespace HexWars.Presentation
                 vertices[i * 2] = new Vector3(x * outerRadius, 0f, z * outerRadius);
                 vertices[i * 2 + 1] = new Vector3(x * innerRadius, 0f, z * innerRadius);
 
+                // Four separated arcs carry target identity without covering the machine.
+                if (i % 10 >= 5) continue;
                 int next = (i + 1) % segments;
                 int triangle = i * 6;
                 triangles[triangle] = i * 2;

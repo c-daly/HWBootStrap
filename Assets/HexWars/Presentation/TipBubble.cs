@@ -25,6 +25,7 @@ namespace HexWars.Presentation
     public static class TipBubble
     {
         public const string RootName = "TipBubbleCanvas";
+        public static bool IsOpen => GameObject.Find(RootName) != null;
 
         const float Width = 360f;
         const float NoCtaPad = 32f;   // 16px top + 16px bottom around the label when there's no CTA
@@ -44,6 +45,7 @@ namespace HexWars.Presentation
         public static void Show(string text, Vector2 screenPos, string cta = null, System.Action onCta = null, bool modal = true)
         {
             Dismiss();
+            float width = modal ? Width : 320f;
 
             var root = UiKit.Canvas(RootName, UiKit.OrderTooltip + 1, null);
             var canvasRt = root.GetComponent<RectTransform>();
@@ -68,8 +70,8 @@ namespace HexWars.Presentation
 
             // measure first: Text.preferredHeight only depends on the label's OWN rect WIDTH (already set
             // below to Width - 32), never on the height passed here — so this placeholder height is moot.
-            var label = UiKit.Label(card.transform, text, 0f, -16f, Width - 32f, MinLabelH,
-                                    UiKit.SizeBody, TextAnchor.UpperLeft, UiKit.TextMain);
+            var label = UiKit.Label(card.transform, text, 0f, -16f, width - 32f, MinLabelH,
+                                    modal ? UiKit.SizeBody : 15, TextAnchor.UpperLeft, UiKit.TextMain);
             label.horizontalOverflow = HorizontalWrapMode.Wrap;
             label.verticalOverflow = VerticalWrapMode.Overflow;
 
@@ -78,17 +80,17 @@ namespace HexWars.Presentation
             float textH = Mathf.Max(MinLabelH, label.preferredHeight) + SlackH;
             float h = Mathf.Min(textH + pad, maxH);
 
-            crt.sizeDelta = new Vector2(Width, h);
-            crt.anchoredPosition = ClampToCanvas(localAnchor, canvasRt, Width, h);
+            crt.sizeDelta = new Vector2(width, h);
+            crt.anchoredPosition = ClampToCanvas(localAnchor, canvasRt, width, h);
 
             var labelRt = label.GetComponent<RectTransform>();
-            UiKit.SetRect(labelRt, 0f, -16f, Width - 32f, h - pad); // resync now h is known — matters
+            UiKit.SetRect(labelRt, 0f, -16f, width - 32f, h - pad); // resync now h is known — matters
                                                                      // whenever the clamp above shrank it
 
             card.AddComponent<Button>().onClick.AddListener(Dismiss); // tap the card's own body → dismiss
 
             if (cta != null)
-                UiKit.Button(card.transform, cta, 0f, -(h - 46f), Width - 60f, 38f,
+                UiKit.Button(card.transform, cta, 0f, -(h - 46f), width - 60f, 38f,
                             () => { Dismiss(); onCta?.Invoke(); }, UiKit.ButtonStyle.Cta);
 
             if (!modal) card.AddComponent<OutsideTapDismiss>().Init(crt);
@@ -97,7 +99,7 @@ namespace HexWars.Presentation
         public static void Dismiss()
         {
             var old = GameObject.Find(RootName);
-            if (old != null) Object.Destroy(old);
+            if (old != null) { old.SetActive(false); Object.Destroy(old); }
         }
 
         /// <summary>Keeps the bubble fully on-canvas even when anchored near a screen edge (a stat label
@@ -119,6 +121,7 @@ namespace HexWars.Presentation
         sealed class OutsideTapDismiss : MonoBehaviour
         {
             RectTransform _card;
+            float _expiresAt;
             int _armedFrame; // ignore the frame this bubble was created on (defensive — Update doesn't
                               // start firing until the next frame anyway, but this costs nothing)
 
@@ -126,11 +129,13 @@ namespace HexWars.Presentation
             {
                 _card = card;
                 _armedFrame = Time.frameCount;
+                _expiresAt = Time.unscaledTime + 6f;
             }
 
             void Update()
             {
                 if (_card == null || Time.frameCount <= _armedFrame) return;
+                if (Time.unscaledTime >= _expiresAt) { Dismiss(); return; }
                 var pointer = DeviceInput.Allowed ? Pointer.current : null;
                 if (pointer == null || !pointer.press.wasPressedThisFrame) return;
                 Vector2 pos = pointer.position.ReadValue();

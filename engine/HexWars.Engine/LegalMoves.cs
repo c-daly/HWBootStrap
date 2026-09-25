@@ -15,6 +15,14 @@ namespace HexWars.Engine
             var moves = new List<Command>();
             if (state.IsGameOver) return moves;
 
+            if (state.PlacingStartingUnits)
+            {
+                foreach (var unit in state.Player(state.ActivePlayer).UnitsOnBoard)
+                    foreach (var cell in StartingPlacement.Cells(state, unit))
+                        moves.Add(new PlaceStartingUnit(state.ActivePlayer, unit.Id, cell));
+                moves.Add(new FinishPlacement(state.ActivePlayer));
+                return moves;
+            }
             var me = state.ActivePlayer;
             var player = state.Player(me);
             var enemy = state.Opponent(me);

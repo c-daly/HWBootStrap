@@ -117,8 +117,9 @@ namespace HexWars.Presentation
         void Refresh()
         {
             if (_game == null || _game.State == null) return;
-            if (_canvasGo != null && _canvasGo.activeSelf == _game.DemoMode)
-                _canvasGo.SetActive(!_game.DemoMode);
+            bool showLegacy = !_game.DemoMode && _game.GetComponent<TacticalHud>() == null;
+            if (_canvasGo != null && _canvasGo.activeSelf != showLegacy)
+                _canvasGo.SetActive(showLegacy);
             if (_game.DemoMode) return;
             var s = _game.State;
 

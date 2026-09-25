@@ -69,16 +69,9 @@ namespace HexWars.Presentation
                     ClearSelection();
                     break;
                 case "cancel":
-                    MarkNativeFinished();
-                    UiKit.MarkInputEscapeHandled();
-                    if (CancelRequested != null)
-                        CancelRequested.Invoke();
-                    else
-                    {
-                        Field.SetTextWithoutNotify(_textAtFocus);
-                        Field.DeactivateInputField();
-                    }
-                    ClearSelection();
+                    // Restore before hiding: InputField.OnDisable can otherwise commit the draft.
+                    CancelEdit();
+                    FindAnyObjectByType<EscapeMenu>()?.TryDismissContext();
                     break;
                 case "blur":
                     Field.text = Normalize(value);
@@ -87,6 +80,24 @@ namespace HexWars.Presentation
                     ClearSelection();
                     break;
             }
+        }
+
+        internal static void CancelFocusedEdit(Transform scope)
+        {
+            var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
+            var selected = eventSystem != null ? eventSystem.currentSelectedGameObject : null;
+            var bridge = selected != null ? selected.GetComponentInParent<WebGlInputBridge>() : null;
+            if (bridge != null && bridge.transform.IsChildOf(scope)) bridge.CancelEdit();
+        }
+
+        void CancelEdit()
+        {
+            EndNativeInput();
+            UiKit.MarkInputEscapeHandled();
+            if (CancelRequested != null) CancelRequested.Invoke();
+            else Field.SetTextWithoutNotify(_textAtFocus);
+            Field.DeactivateInputField();
+            ClearSelection();
         }
 
         void EnsureRegistered()

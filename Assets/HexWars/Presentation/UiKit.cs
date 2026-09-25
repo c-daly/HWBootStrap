@@ -303,6 +303,8 @@ namespace HexWars.Presentation
             return eventSystem != null && eventSystem.currentSelectedGameObject == field.gameObject;
         }
 
+        internal static bool EscapeHandledThisFrame => _inputEscapeHandledFrame == Time.frameCount;
+
         internal static void MarkInputEscapeHandled() => _inputEscapeHandledFrame = Time.frameCount;
 
         internal static bool AnyInputOwnsFocus()

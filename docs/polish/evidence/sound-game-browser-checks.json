@@ -1,0 +1,1151 @@
+{
+  "date": "2026-09-25T17:15:48.906Z",
+  "browser": "149.0.7827.53",
+  "errors": [],
+  "warnings": [
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n"
+  ],
+  "failed": [],
+  "navigationAborts": [
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.data.unityweb?v=e3fe15a8",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.data.unityweb?v=e3fe15a8",
+      "error": "net::ERR_ABORTED"
+    }
+  ],
+  "actions": [
+    {
+      "action": "click",
+      "x": 800,
+      "y": 250
+    },
+    {
+      "action": "probe",
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.06209997087717056,
+          "sum": 21.52798230305661,
+          "samples": 73728,
+          "activeFrames": 72,
+          "rms": 0.017087771869668773
+        }
+      ]
+    },
+    {
+      "action": "setup"
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/game-board.png"
+    },
+    {
+      "action": "probe",
+      "ms": 2000,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.026067495346069336,
+          "sum": 4.7003187234817245,
+          "samples": 100352,
+          "activeFrames": 98,
+          "rms": 0.006843852450281619
+        }
+      ]
+    },
+    {
+      "action": "click",
+      "x": 1534,
+      "y": 29
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-default.png"
+    },
+    {
+      "action": "click",
+      "x": 800,
+      "y": 282
+    },
+    {
+      "action": "probe",
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0,
+          "sum": 0,
+          "samples": 74752,
+          "activeFrames": 0,
+          "rms": 0
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-muted.png"
+    },
+    {
+      "action": "click",
+      "x": 800,
+      "y": 282
+    },
+    {
+      "action": "probe",
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.025980276986956596,
+          "sum": 3.4898867303670054,
+          "samples": 75776,
+          "activeFrames": 74,
+          "rms": 0.006786405837471352
+        }
+      ]
+    },
+    {
+      "action": "focus-cycle",
+      "result": {
+        "blurred": {
+          "focused": true,
+          "signal": [
+            {
+              "state": "running",
+              "peak": 0.026067495346069336,
+              "sum": 3.686260332474008,
+              "samples": 75776,
+              "activeFrames": 74,
+              "rms": 0.0069747261943077605
+            }
+          ]
+        },
+        "returned": {
+          "focused": true,
+          "signal": [
+            {
+              "state": "running",
+              "peak": 0.026067495346069336,
+              "sum": 3.5576554524327206,
+              "samples": 74752,
+              "activeFrames": 73,
+              "rms": 0.006898752024094627
+            }
+          ]
+        }
+      }
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "wait",
+      "ms": 2000
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-buses-off.png"
+    },
+    {
+      "action": "probe",
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 7.782122724009355e-10,
+          "sum": 3.2317318809198053e-15,
+          "samples": 75776,
+          "activeFrames": 0,
+          "rms": 2.065151052966484e-10
+        }
+      ]
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 4772.399999976158,
+          "duration": 134.42031746031745,
+          "loop": false
+        },
+        {
+          "at": 4773.099999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 29758.599999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 29759.099999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 30987.099999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 30988.599999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 31437.299999952316,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 31438.5,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 31742.099999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 31743.099999904633,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 32066.899999976158,
+          "duration": 1.555736961451247,
+          "loop": false
+        },
+        {
+          "at": 32067.099999904633,
+          "duration": 1.555736961451247,
+          "loop": true
+        },
+        {
+          "at": 60101,
+          "duration": 1.555736961451247,
+          "loop": true
+        },
+        {
+          "at": 60101.39999997616,
+          "duration": 1.555736961451247,
+          "loop": true
+        },
+        {
+          "at": 98177.09999990463,
+          "duration": 0.09287981859410431,
+          "loop": true
+        },
+        {
+          "at": 98177.09999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 98307.39999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 98308.19999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 98622.29999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 98622.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 98858.59999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 98859.59999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99088.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99089.79999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99315.19999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99316.09999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99568.59999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99569.5,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99813.29999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 99813.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 100056.19999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 100056.79999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "probe-click",
+      "x": 500,
+      "y": 841,
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 7.768747867231696e-10,
+          "sum": 3.0021856138465942e-15,
+          "samples": 70656,
+          "activeFrames": 0,
+          "rms": 2.0613144422290653e-10
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": []
+    },
+    {
+      "action": "click",
+      "x": 1534,
+      "y": 29
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "probe",
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 7.76872011165608e-10,
+          "sum": 3.144479081666549e-15,
+          "samples": 75776,
+          "activeFrames": 0,
+          "rms": 2.0370820258365817e-10
+        }
+      ]
+    },
+    {
+      "action": "record-start",
+      "result": {
+        "state": "recording",
+        "mimeType": ""
+      }
+    },
+    {
+      "action": "probe-click",
+      "x": 300,
+      "y": 841,
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.01951557770371437,
+          "sum": 0.06504171048967121,
+          "samples": 72704,
+          "activeFrames": 4,
+          "rms": 0.000945838143852941
+        }
+      ]
+    },
+    {
+      "action": "probe-click",
+      "x": 500,
+      "y": 841,
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.01951557770371437,
+          "sum": 0.05684067067473094,
+          "samples": 71680,
+          "activeFrames": 4,
+          "rms": 0.0008904931816197771
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 107681.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 107682.5,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 107889,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 107889.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108121.79999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108122.59999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108367.09999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108367.79999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108564,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108564.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108878.19999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 108878.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109156.5,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109157.29999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109412.79999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109413.69999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109655.89999997616,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109656.5,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109988.19999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 109988.69999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 112279.69999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 112290.59999990463,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 113789.19999992847,
+          "duration": 0.09287981859410431,
+          "loop": false
+        },
+        {
+          "at": 113794.79999995232,
+          "duration": 0.09287981859410431,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "probe-click",
+      "x": 609,
+      "y": 381,
+      "double": true,
+      "ms": 2000,
+      "result": [
+        {
+          "state": "running",
+          "peak": 7.766897680561158e-10,
+          "sum": 3.935603272109028e-15,
+          "samples": 93184,
+          "activeFrames": 0,
+          "rms": 2.0551095718011636e-10
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": []
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-game-moved.png"
+    },
+    {
+      "action": "probe-click",
+      "x": 725,
+      "y": 500,
+      "double": true,
+      "ms": 2500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 7.766897125449646e-10,
+          "sum": 5.196829827679587e-15,
+          "samples": 121856,
+          "activeFrames": 0,
+          "rms": 2.065122359610315e-10
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": []
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-game-attack.png"
+    },
+    {
+      "action": "record-stop",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/game-effects.webm",
+      "result": {
+        "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/game-effects.webm"
+      }
+    },
+    {
+      "action": "key",
+      "key": "m"
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/move-key-preview.png"
+    },
+    {
+      "action": "record-start",
+      "result": {
+        "state": "recording",
+        "mimeType": ""
+      }
+    },
+    {
+      "action": "probe-click",
+      "x": 612,
+      "y": 421,
+      "double": true,
+      "ms": 2200,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.0747455358505249,
+          "sum": 0.9776722136255177,
+          "samples": 101376,
+          "activeFrames": 9,
+          "rms": 0.003105482316056573
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 156780.79999995232,
+          "duration": 0.18575963718820862,
+          "loop": false
+        },
+        {
+          "at": 156780.89999997616,
+          "duration": 0.18575963718820862,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-game-move-confirmed.png"
+    },
+    {
+      "action": "probe-click",
+      "x": 748,
+      "y": 417,
+      "double": true,
+      "ms": 2500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.11439710855484009,
+          "sum": 12.184550898487743,
+          "samples": 118784,
+          "activeFrames": 33,
+          "rms": 0.010128048918041675
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 159694.69999992847,
+          "duration": 0.301859410430839,
+          "loop": false
+        },
+        {
+          "at": 159694.69999992847,
+          "duration": 0.301859410430839,
+          "loop": false
+        },
+        {
+          "at": 160447.29999995232,
+          "duration": 0.3947392290249433,
+          "loop": false
+        },
+        {
+          "at": 160447.29999995232,
+          "duration": 0.3947392290249433,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-game-attack-confirmed.png"
+    },
+    {
+      "action": "record-stop",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/game-combat.webm",
+      "result": {
+        "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/game-combat.webm"
+      }
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "click",
+      "x": 1534,
+      "y": 29
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 431,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 323,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 395,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 431,
+      "wait": 100
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 323,
+      "wait": 100
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-custom.png"
+    },
+    {
+      "action": "reload"
+    },
+    {
+      "action": "click",
+      "x": 800,
+      "y": 250
+    },
+    {
+      "action": "probe",
+      "ms": 1500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.07090994715690613,
+          "sum": 26.46917887300494,
+          "samples": 75776,
+          "activeFrames": 74,
+          "rms": 0.018689788906436237
+        }
+      ]
+    },
+    {
+      "action": "setup"
+    },
+    {
+      "action": "click",
+      "x": 1534,
+      "y": 29
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-reloaded.png"
+    },
+    {
+      "action": "receipt",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/game-sound-checks.json",
+      "result": {
+        "errors": [],
+        "failed": []
+      }
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 359,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 395,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 431,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 323,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 905,
+      "y": 395,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 431,
+      "wait": 180
+    },
+    {
+      "action": "click",
+      "x": 795,
+      "y": 323,
+      "wait": 180
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-custom-confirmed.png"
+    },
+    {
+      "action": "reload"
+    },
+    {
+      "action": "setup"
+    },
+    {
+      "action": "click",
+      "x": 1534,
+      "y": 29
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/sound-menu-persisted.png"
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "click",
+      "x": 1494,
+      "y": 846
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/turn-dialog.png"
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 4612.5,
+          "duration": 134.42031746031745,
+          "loop": false
+        },
+        {
+          "at": 4613.100000023842,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 8040.400000095367,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 8899.700000047684,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 8900,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 9366.200000047684,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 9366.600000023842,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 9768.300000071526,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 9769,
+          "duration": 134.42031746031745,
+          "loop": true
+        },
+        {
+          "at": 10085.800000071526,
+          "duration": 1.555736961451247,
+          "loop": false
+        },
+        {
+          "at": 10085.900000095367,
+          "duration": 1.555736961451247,
+          "loop": true
+        }
+      ]
+    },
+    {
+      "action": "probe-click",
+      "x": 912,
+      "y": 522,
+      "ms": 2500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.03219091519713402,
+          "sum": 2.3397107086124853,
+          "samples": 120832,
+          "activeFrames": 118,
+          "rms": 0.004400379162090949
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 16087.600000023842,
+          "duration": 0.37151927437641724,
+          "loop": true
+        },
+        {
+          "at": 16087.600000023842,
+          "duration": 0.37151927437641724,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/SoundPolish/browser/turn-complete.png"
+    }
+  ],
+  "cacheKey": "e3fe15a8"
+}

@@ -26,7 +26,7 @@ namespace HexWars.Presentation
         void Update()
         {
             if (_game == null || _canvasGo == null) return;
-            bool hidden = _game.DemoMode || _game.State == null;
+            bool hidden = _game.DemoMode || _game.State == null || _game.GetComponent<TacticalHud>() != null;
             if (_canvasGo.activeSelf == hidden)
                 _canvasGo.SetActive(!hidden);
         }

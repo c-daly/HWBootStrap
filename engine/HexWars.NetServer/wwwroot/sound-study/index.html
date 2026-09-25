@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#121719">
+<title>HexWars — Sound study</title>
+<link rel="icon" type="image/svg+xml" href="../hexwars-mark.svg">
+<style>
+:root{color-scheme:dark;font-family:system-ui,-apple-system,sans-serif;background:#121719;color:#e4e8e5;--line:#303a3b;--muted:#a0aeaa;--accent:#a5d8c6}
+*{box-sizing:border-box}body{margin:0}main{max-width:920px;margin:auto;padding:36px 28px 64px}header{display:flex;align-items:center;justify-content:space-between;margin-bottom:64px}a{color:var(--accent);text-underline-offset:5px}.brand{display:flex;align-items:center;gap:12px;font-weight:650;letter-spacing:.06em;text-decoration:none;color:inherit}.brand img{width:36px;height:40px}h1{font-size:clamp(32px,6vw,48px);letter-spacing:-.04em;font-weight:550;margin:0 0 16px}h2{font-size:20px;font-weight:550;margin:0}p{color:var(--muted);line-height:1.65;margin:12px 0}.intro{max-width:620px}.lead{font-size:18px}.player{border:1px solid var(--line);border-radius:12px;background:#1a2223;padding:24px;margin:32px 0 40px}.controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap}button{font:inherit;border:1px solid #455554;border-radius:6px;padding:10px 15px;background:#263230;color:#e5ede9;cursor:pointer;min-height:44px}button:hover{background:#334440}button:focus-visible,a:focus-visible,input:focus-visible{outline:2px solid var(--accent);outline-offset:4px}button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:#142620}.primary{background:var(--accent);color:#142620;border-color:var(--accent);font-weight:600}.primary:hover{background:#bee8d8}.volume{display:flex;align-items:center;gap:10px;margin-left:auto;font-size:14px;color:var(--muted)}input{accent-color:var(--accent);width:105px}progress{width:100%;height:4px;accent-color:var(--accent);display:block;margin:24px 0 14px}#now{font-size:14px;min-height:22px;margin:0}.section-title{margin:32px 0 8px}.note{font-size:14px}.row{display:flex;align-items:center;gap:20px;padding:20px 0;border-bottom:1px solid var(--line)}.row .description{flex:1}.row h3{font-size:16px;font-weight:550;margin:0}.row p{font-size:14px;margin:5px 0 0}.row .buttons{display:flex;gap:8px}.row button{min-width:102px;font-size:14px}.secondary{background:transparent;color:#c2ceca}.small-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:20px}.small-grid button{text-align:left;display:flex;justify-content:space-between;align-items:center}.small-grid span{font-size:13px;color:var(--muted)}.small-grid button[aria-pressed=true] span{color:#29483d}footer{border-top:1px solid var(--line);margin-top:40px;padding-top:16px;font-size:13px;color:var(--muted)}#error{color:#efb795}button:disabled{opacity:.5;cursor:wait}
+@media(max-width:580px){main{padding:24px 20px 40px}header{margin-bottom:40px}.row{align-items:flex-start;flex-direction:column;gap:12px}.row .buttons{width:100%}.row button{flex:1}.volume{margin-left:0;width:100%;margin-top:12px}.volume input{flex:1}.small-grid{grid-template-columns:1fr}.player{padding:20px}.brand{font-size:14px}header>a{font-size:14px}}
+</style>
+</head>
+<body><main>
+<header><a class="brand" href="../"><img src="../hexwars-mark.svg" alt="H in a hexagon">HEXWARS</a><a href="../">Play game ↗</a></header>
+<div class="intro"><h1>A quieter HexWars.</h1><p class="lead">Soft contacts. Brief, weighted shots. A little warmth between turns.</p><p>The board should stay calm while each action feels deliberate. Hear a short passage, then compare the details.</p></div>
+<section class="player" aria-label="Sound preview">
+<div class="controls"><button id="sequence" class="primary" disabled>Play 20-second sequence</button><button id="stop" class="secondary">Stop</button><label class="volume">Playback level <input id="volume" type="range" min="0" max="1" step="0.05" value="0.7" aria-label="Playback level"><output id="level">70%</output></label></div>
+<progress id="progress" value="0" max="1" aria-label="Playback progress"></progress><p id="now" role="status" aria-live="polite">Nothing plays until you choose it.</p><p id="error" role="alert" hidden></p>
+</section>
+<section aria-labelledby="compare-title"><h2 id="compare-title">The difference, sound by sound</h2><p class="note">Both versions use the same playback level. The proposed mix includes the quieter mastering.</p><div id="comparisons"></div></section>
+<section aria-labelledby="details-title"><h2 class="section-title" id="details-title">Small moments</h2><p class="note">Selection stays barely audible; placement and resolution carry a little more weight.</p><div id="details" class="small-grid"></div></section>
+<section aria-labelledby="space-title"><h2 class="section-title" id="space-title">Behind the board</h2><p class="note">The existing recordings, at the new default levels. Music and ambience have separate controls in the game menu.</p><div id="beds" class="small-grid"></div></section>
+<footer>Effects here are the exact samples used by the game. The sequence is a composed example; background excerpts are 12 seconds long. Original recordings are preserved.</footer>
+</main>
+<script type="module">
+const $=id=>document.getElementById(id), audio=new Audio();audio.preload='none';audio.volume=.7;
+let active=null, label='', sequence=false, manifest, frame, generation=0;
+const labels={Select:'Select unit',Move:'Move',AttackLight_0:'Light shot',AttackMid_0:'Medium shot',Death:'Unit destroyed',Deploy:'Deploy',Design:'Design saved',EndTurn:'Turn change'};
+function reset(){cancelAnimationFrame(frame);if(active)active.setAttribute('aria-pressed','false');active=null;sequence=false;$('progress').value=0;}
+function stop(){generation++;audio.pause();audio.removeAttribute('src');audio.load();reset();$('now').textContent='Stopped.';}
+function update(){if(!audio.duration)return;const t=audio.currentTime;$('progress').value=t/audio.duration;if(sequence){const event=manifest.sequence.filter(e=>e.seconds<=t).at(-1);$('now').textContent=`${Math.floor(t)} / 20 seconds${event?' · '+labels[event.cue]:''}`;}frame=requestAnimationFrame(update);}
+async function play(file,button,title,isSequence=false){stop();const ticket=generation;$('error').hidden=true;active=button;label=title;sequence=isSequence;button.setAttribute('aria-pressed','true');audio.src=file;$('now').textContent='Loading '+title.toLowerCase()+'…';try{await audio.play();if(ticket!==generation)return;$('now').textContent=title;update();}catch(e){if(ticket!==generation)return;reset();$('now').textContent='Playback stopped.';if(e.name!=='AbortError'){$('error').textContent='This sound could not be played. Please try again.';$('error').hidden=false;}}}
+function button(text,file,title,extra=''){const b=document.createElement('button');b.textContent=text;b.type='button';b.className=extra;b.setAttribute('aria-label',title);b.setAttribute('aria-pressed','false');b.addEventListener('click',()=>play(file,b,title));return b;}
+audio.addEventListener('ended',()=>{reset();$('now').textContent=label+' · finished';});
+$('stop').addEventListener('click',stop);document.addEventListener('keydown',e=>{if(e.key==='Escape')stop();});document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+$('volume').addEventListener('input',e=>{audio.volume=Number(e.target.value);$('level').value=Math.round(audio.volume*100)+'%';});
+try{const response=await fetch('palette.json');if(!response.ok)throw Error(response.status);manifest=await response.json();
+ for(const c of manifest.comparison){const row=document.createElement('div');row.className='row';const d=document.createElement('div');d.className='description';const h=document.createElement('h3');h.textContent=c.label;const p=document.createElement('p');p.textContent=c.description;d.append(h,p);const buttons=document.createElement('div');buttons.className='buttons';buttons.append(button('Current',c.before,c.label+' — current','secondary'),button('Proposed',c.after,c.label+' — proposed'));row.append(d,buttons);$('comparisons').append(row);}
+ for(const [name,title] of [['Select','Select unit'],['Place','Place unit'],['Death','Unit destroyed'],['Win','Match complete']])$('details').append(button(title,name+'.wav',title));
+ for(const [name,title] of [['TitleMusic','Title music'],['AmbientBed','Board ambience'],['DesignerHum','Workshop']])$('beds').append(button(title,name+'.wav',title+' · default mix'));
+ $('sequence').disabled=false;$('sequence').setAttribute('aria-pressed','false');$('sequence').addEventListener('click',()=>play('sequence.wav',$('sequence'),'A short passage',true));
+}catch(e){$('error').textContent='The sound collection could not load. Refresh to try again.';$('error').hidden=false;}
+</script></body></html>

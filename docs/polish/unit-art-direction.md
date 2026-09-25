@@ -1,5 +1,10 @@
 # Dark direction: simple, sculpted units
 
+**Superseded direction — 2026-09-25:** The user requested more recognizable machines and less
+abstract artwork. The current implementation and screenshots are in
+[gameplay-visual-language.md](gameplay-visual-language.md). The sculpted-form exploration below is
+retained as historical context.
+
 **Implementation update:** The user selected graphite. The Unity implementation and native Windows
 preview are described in [windows-preview.md](windows-preview.md). The remainder of this document
 records the preceding browser study and its original integration proposal; its prototype-only

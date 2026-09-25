@@ -15,6 +15,10 @@ namespace HexWars.Engine
             if (state.IsGameOver) return Result.Reject(state, RejectionReason.GameAlreadyOver);
             if (command.Issuer != state.ActivePlayer) return Result.Reject(state, RejectionReason.NotYourTurn);
 
+            if (state.PlacingStartingUnits) return StartingPlacement.Apply(state, command);
+            if (command is PlaceStartingUnit || command is FinishPlacement)
+                return Result.Reject(state, RejectionReason.PlacementAlreadyFinished);
+
             var result = Dispatch(state, command);
             if (!result.Success) return result;
 

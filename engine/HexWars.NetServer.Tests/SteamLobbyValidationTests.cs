@@ -344,7 +344,8 @@ namespace HexWars.NetServer.Tests
 
         [TestCase("garbage", TestName = "MalformedSetup_Garbage")]
         [TestCase("0 9 7 0 4242 3 1 1 1 3", TestName = "MalformedSetup_TenTokens")]
-        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 0", TestName = "MalformedSetup_TwelveTokens")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 1 0", TestName = "MalformedSetup_ThirteenTokens")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 2", TestName = "MalformedSetup_PlacementOutOfRange")]
         [TestCase("2 9 7 0 4242 3 1 1 1 3 0", TestName = "MalformedSetup_ModeOutOfRange")]
         [TestCase("0 9 7 0 4242 3 1 1 1 3 7", TestName = "MalformedSetup_FogOutOfRange")]
         [TestCase("0 9 7 0 4242 3 1 1 1 3 x", TestName = "MalformedSetup_NonNumericToken")]
@@ -373,7 +374,8 @@ namespace HexWars.NetServer.Tests
         [TestCase("", TestName = "TryParseSetupStrict_RejectsEmpty")]
         [TestCase("garbage", TestName = "TryParseSetupStrict_RejectsGarbage")]
         [TestCase("0 9 7 0 4242 3 1 1 1 3", TestName = "TryParseSetupStrict_RejectsTenTokens")]
-        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 0", TestName = "TryParseSetupStrict_RejectsTwelveTokens")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 1 0", TestName = "TryParseSetupStrict_RejectsThirteenTokens")]
+        [TestCase("0 9 7 0 4242 3 1 1 1 3 0 -1", TestName = "TryParseSetupStrict_RejectsUnknownPlacement")]
         [TestCase("2 9 7 0 4242 3 1 1 1 3 0", TestName = "TryParseSetupStrict_RejectsUnknownMode")]
         [TestCase("-1 9 7 0 4242 3 1 1 1 3 0", TestName = "TryParseSetupStrict_RejectsNegativeMode")]
         [TestCase("0 9 7 0 4242 3 1 1 1 3 7", TestName = "TryParseSetupStrict_RejectsUnknownFog")]
@@ -388,6 +390,24 @@ namespace HexWars.NetServer.Tests
             var result = Validator().ValidateForMatchCreation(Lobby().Snapshot(), Identity(OwnerId));
 
             Assert.That(result.Setup.ToWire(), Is.EqualTo(SteamLobbyRules.QuickMatchSetup(Seed).ToWire()));
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public void CustomLobbyPreservesOptionalPlacementAndQuickMatchKeepsAutomaticSetup(bool manual)
+        {
+            string wire = SteamLobbyRules.QuickMatchSetup(Seed).ToWire() + (manual ? " 1" : " 0");
+            var result = Validator().ValidateForMatchCreation(
+                Lobby().WithMeta(SteamLobbyKeys.Ruleset, SteamLobbyRules.CustomRuleset)
+                       .WithMeta(SteamLobbyKeys.Setup, wire).Snapshot(), Identity(OwnerId));
+            Assert.That(result.Setup.ManualPlacement, Is.EqualTo(manual));
+            Assert.That(GameFactory.Build(result.Setup).PlacingStartingUnits, Is.EqualTo(manual));
+            if (manual)
+                AssertRejected(SteamFailure.LobbyChanged, "setup does not match quick ruleset",
+                    Lobby().WithMeta(SteamLobbyKeys.Setup, wire));
+            else
+                Assert.That(Validator().ValidateForMatchCreation(
+                    Lobby().WithMeta(SteamLobbyKeys.Setup, wire).Snapshot(), Identity(OwnerId)).Setup.ManualPlacement, Is.False);
         }
 
         // ---- rule 11: quick-v1 setup equality ---------------------------------

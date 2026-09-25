@@ -41,16 +41,17 @@ namespace HexWars.NetServer.Steam
         public static bool IsQuickMatchSetup(GameSetup setup) =>
             setup.Seed is >= MinSeed and <= MaxSeed && SetupEquals(setup, QuickMatchSetup(setup.Seed));
 
-        /// <summary>The exact number of fields GameSetup.ToWire writes.</summary>
+        /// <summary>The legacy fields; manual placement adds one optional boolean.</summary>
         const int SetupFieldCount = 11;
 
         /// <summary>Index of the two enumerated fields, which have a range rather than a clamp.</summary>
         const int ModeIndex = 0;
         const int FogIndex = 10;
+        const int PlacementIndex = 11;
 
         /// <summary>
-        /// Reads an hw_setup the way a lobby is allowed to write one: exactly the eleven fields ToWire
-        /// emits, every one an invariant integer, with the two enumerated fields inside their range. On
+        /// Reads the eleven legacy fields and optional placement flag, every one an invariant integer,
+        /// with enumerated fields inside their range. On
         /// success <paramref name="setup"/> is already Sanitized and can go straight to GameFactory.
         ///
         /// This exists because GameSetup.Parse is deliberately lenient - it substitutes a default for
@@ -64,7 +65,7 @@ namespace HexWars.NetServer.Steam
             if (string.IsNullOrEmpty(wire)) return false;
 
             var tokens = wire.Split(SetupSeparator, StringSplitOptions.None);
-            if (tokens.Length != SetupFieldCount) return false;
+            if (tokens.Length != SetupFieldCount && tokens.Length != SetupFieldCount + 1) return false;
 
             for (var i = 0; i < tokens.Length; i++)
             {
@@ -76,7 +77,7 @@ namespace HexWars.NetServer.Steam
 
                 // Mode and fog are enumerations, not clamped numbers: the engine clamp would silently
                 // turn a mode of 2 into Territory, which is not the game the lobby advertised.
-                if ((i == ModeIndex || i == FogIndex) && value is not (0 or 1)) return false;
+                if ((i == ModeIndex || i == FogIndex || i == PlacementIndex) && value is not (0 or 1)) return false;
             }
 
             setup = GameSetup.Parse(wire).Sanitized();

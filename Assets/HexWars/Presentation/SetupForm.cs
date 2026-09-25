@@ -35,6 +35,7 @@ namespace HexWars.Presentation
         int _turnActions = 3;
         bool _fog = false;
         bool _private = false;
+        bool _manualPlacement;
         AiLevel _ai = AiLevel.Hard;
 
         readonly System.Collections.Generic.List<(Button btn, Func<bool> selected)> _toggles
@@ -177,6 +178,9 @@ namespace HexWars.Presentation
             }
             y -= 54f;
 
+            ToggleBtn("Place starting units", 0f, y, 340f, 38f, () => _manualPlacement,
+                () => { _manualPlacement = !_manualPlacement; RefreshToggles(); });
+            y -= 48f;
             string cta = _mode == SetupMode.Host ? "Create Game" : "Start Game";
             UiKit.Button(_form.transform, cta, 0f, y, 340f, 50f, OnCreate, UiKit.ButtonStyle.Cta);
 
@@ -288,7 +292,7 @@ namespace HexWars.Presentation
 
             bool fog = _mode != SetupMode.Hotseat && _fog;
             var setup = new GameSetup(_gameMode, _w, _h, _pts, _seed,
-                                      _armySize, _brutes, _strikers, _snipers, _turnActions, fog);
+                                      _armySize, _brutes, _strikers, _snipers, _turnActions, fog, _manualPlacement);
             if (_mode == SetupMode.VsAi)
             {
                 if (_ai == AiLevel.TrainedModel &&

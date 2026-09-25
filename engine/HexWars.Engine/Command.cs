@@ -6,6 +6,10 @@ namespace HexWars.Engine
     /// </summary>
     public abstract record Command(PlayerId Issuer);
 
+    /// <summary>Arrange an existing starting unit within its home zone, before battle begins.</summary>
+    public sealed record PlaceStartingUnit(PlayerId Issuer, int UnitId, HexCoord Cell) : Command(Issuer);
+    public sealed record FinishPlacement(PlayerId Issuer) : Command(Issuer);
+
     /// <summary>Design and pay for a unit; it goes to the issuer's reserve (off-board). Name is
     /// sanitized at the engine boundary (UnitTemplate.Sanitize); an empty/omitted name is legal — the
     /// dominant-role fallback happens on the deployed Unit's DisplayName, not here.</summary>

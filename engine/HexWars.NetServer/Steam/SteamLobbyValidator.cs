@@ -146,7 +146,7 @@ namespace HexWars.NetServer.Steam
             //     rather than on the sanitized one, so the engine clamp cannot launder an out-of-range
             //     seed into a match that our own client would never have offered. Re-parsing is safe
             //     here and nowhere else: the strict parse above has already proved this string is the
-            //     eleven integers ToWire emits, so Parse can no longer invent anything.
+            //     integer fields ToWire emits, so Parse can no longer invent anything.
             var requested = GameSetup.Parse(setupRaw);
             if (string.Equals(ruleset, SteamLobbyRules.QuickRuleset, StringComparison.Ordinal) &&
                 !SteamLobbyRules.IsQuickMatchSetup(requested))
