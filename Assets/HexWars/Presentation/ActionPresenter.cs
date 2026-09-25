@@ -546,7 +546,7 @@ namespace HexWars.Presentation
             // stacking a turn chime on top makes fast or reduced-motion combat needlessly noisy.
             SoundKind? cue = item.Next.IsGameOver && !item.Prev.IsGameOver ? SoundKind.Win :
                 lostUnit ? SoundKind.Death :
-                !(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer ? SoundKind.EndTurn :
+                _presented && !(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer ? SoundKind.EndTurn :
                 (SoundKind?)null;
             if (emitAudio && cue.HasValue) SoundManager.Play(cue.Value);
             ItemCommitted?.Invoke(item.Prev, item.Cmd, item.Next);

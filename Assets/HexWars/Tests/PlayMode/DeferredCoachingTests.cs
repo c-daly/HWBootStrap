@@ -19,6 +19,7 @@ namespace HexWars.Presentation.PlayModeTests
         [UnityTearDown]
         public IEnumerator TearDown()
         {
+            GameOverBanner.Dismiss();
             TipsService.NewGame(); TipBubble.Dismiss(); TipsService.Enabled = _enabled;
             yield return null;
         }
@@ -63,6 +64,29 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(TipBubble.IsOpen, Is.False);
             TipsService.Show("first-bounty", "New match bounty");
             AssertText("New match bounty");
+        }
+
+        [UnityTest]
+        public IEnumerator MatchResultCancelsCoachingUntilTheNextGameEvenAfterBannerDismissal()
+        {
+            QueueBounty(); yield return null;
+            GameOverBanner.Show("Match complete", "Annihilation", Color.gray);
+            Assert.That(GameObject.Find(GameOverBanner.RootName), Is.Not.Null);
+            Assert.That(TipBubble.IsOpen, Is.False, "The result must immediately dismiss current coaching.");
+            yield return new WaitForSecondsRealtime(1.2f);
+            Assert.That(TipBubble.IsOpen, Is.False, "A pending bounty must not appear over the result.");
+
+            GameOverBanner.Dismiss();
+            Assert.That(GameObject.Find(GameOverBanner.RootName), Is.Null);
+            TipsService.Enabled = false; TipsService.Enabled = true;
+            TipsService.Show("first-bounty", "Late bounty from the finished match");
+            TipsService.Show("first-select", "Inspecting the final board must stay quiet");
+            yield return new WaitForSecondsRealtime(1.2f);
+            Assert.That(TipBubble.IsOpen, Is.False, "Dismissal and preference changes must not reopen match coaching.");
+
+            TipsService.NewGame();
+            TipsService.Show("first-bounty", "Bounty from the next match");
+            AssertText("Bounty from the next match");
         }
 
         static void QueueBounty()

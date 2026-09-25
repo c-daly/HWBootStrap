@@ -120,6 +120,76 @@ namespace HexWars.Presentation.PlayModeTests
         }
 
         [UnityTest]
+        public IEnumerator HiddenQueuedMoveStaysSilentWhenItAutomaticallyEndsTheTurn()
+        {
+            yield return CheckQueuedAutomaticTurn(true);
+        }
+
+        [UnityTest]
+        public IEnumerator VisibleQueuedMoveKeepsItsAutomaticTurnCue()
+        {
+            yield return CheckQueuedAutomaticTurn(false);
+        }
+
+        IEnumerator CheckQueuedAutomaticTurn(bool hidden)
+        {
+            bool reduced = MotionSettings.Reduced;
+            bool hadReduced = PlayerPrefs.HasKey("HexWars.ReducedMotion");
+            try
+            {
+                MotionSettings.Reduced = false;
+                var host = new GameObject("Queued fog turn", typeof(BoardRenderer), typeof(TokenStore), typeof(GameBootstrap));
+                host.transform.SetParent(_host.transform);
+                var game = host.GetComponent<GameBootstrap>(); game.enabled = false;
+                typeof(GameBootstrap).GetProperty("Seat").SetValue(game, PlayerId.Player0);
+                var presenter = host.AddComponent<ActionPresenter>();
+                var tiles = Enumerable.Range(0, 10).SelectMany(q => Enumerable.Range(0, 3)
+                    .Select(r => new Tile(new HexCoord(q, r), 0, TerrainType.Plains))).ToArray();
+                var stats = new UnitStats(4,1,0,1,1,1,1,1,1);
+                var state = new GameState(new Board(tiles),
+                    GameConfig.Default(turnPolicy: new OneActionPolicy(), fogOfWar: hidden), new[] {
+                        new PlayerState(PlayerId.Player0, 0, unitsOnBoard: new[] { new Unit(10, PlayerId.Player0, stats, new HexCoord(0,1), 0) }),
+                        new PlayerState(PlayerId.Player1, 0, unitsOnBoard: new[] { new Unit(20, PlayerId.Player1, stats, new HexCoord(8,1), 0) })
+                    }, PlayerId.Player0, 2, 21);
+                typeof(GameBootstrap).GetProperty("State").SetValue(game, state);
+                host.GetComponent<BoardRenderer>().Render(state.Board);
+                host.GetComponent<BoardRenderer>().RenderEntities(state);
+                int committed = 0; GameState presented = null;
+                presenter.ItemCommitted += (prev, cmd, next) => { committed++; presented = next; };
+                // Mute the current explicit turn cue without entering its cooldown. This isolates the
+                // queued move's resolution and ensures the visible positive control can still sound.
+                SoundManager.Muted = true;
+                var end = new EndTurn(PlayerId.Player0);
+                var afterEnd = GameEngine.Apply(state, end);
+                Assert.That(afterEnd.Success, Is.True);
+                presenter.Enqueue(state, end, afterEnd.NewState, false);
+                var move = new MoveUnit(PlayerId.Player1, 20, new HexCoord(7,1));
+                var afterMove = GameEngine.Apply(afterEnd.NewState, move);
+                Assert.That(afterMove.Success, Is.True);
+                Assert.That(afterMove.NewState.ActivePlayer, Is.EqualTo(PlayerId.Player0));
+                var span = FogPresentation.VisibleSpan(afterMove.NewState, game.FogViewerFor(afterMove.NewState),
+                    new[] { new HexCoord(8,1), new HexCoord(7,1) });
+                Assert.That(span.First < 0, Is.EqualTo(hidden), "Control the queued move's actual visibility.");
+                presenter.Enqueue(afterEnd.NewState, move, afterMove.NewState, false);
+                Assert.That(presenter.IsBusy, Is.True);
+                SoundManager.Muted = false;
+                MotionSettings.Reduced = true;
+                presenter.FastForward();
+                Assert.That(presenter.IsBusy, Is.False);
+                Assert.That(committed, Is.EqualTo(2)); Assert.That(presented, Is.SameAs(afterMove.NewState));
+                var audible = _host.GetComponentsInChildren<AudioSource>().Where(s => !s.loop && s.isPlaying).ToArray();
+                Assert.That(audible.Length, Is.EqualTo(hidden ? 0 : 1));
+                if (!hidden) Assert.That(audible[0].clip.name, Is.EqualTo(SoundKind.EndTurn.ToString()));
+                yield return null;
+            }
+            finally
+            {
+                if (hadReduced) MotionSettings.Reduced = reduced;
+                else { PlayerPrefs.DeleteKey("HexWars.ReducedMotion"); PlayerPrefs.Save(); }
+            }
+        }
+
+        [UnityTest]
         public IEnumerator RepeatedClicksAndFullVoicePoolsStayBounded()
         {
             Assert.That(_driver.Play("select",_longClip,1,.1f,0),Is.True);

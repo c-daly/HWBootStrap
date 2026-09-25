@@ -18,6 +18,7 @@ namespace HexWars.Presentation
         static bool? _enabled;
         static readonly HashSet<string> _firedThisGame = new HashSet<string>();
         static DeferredBounty _pendingBounty;
+        static bool _gameEnded;
 
         /// <summary>Defaults ON for a first-ever visit (no key written yet); persists after that.</summary>
         public static bool Enabled
@@ -39,7 +40,15 @@ namespace HexWars.Presentation
 
         /// <summary>Clear the once-per-game registry. Called by GameBootstrap on every real new-game
         /// entry point (NOT on a Task 6 reconnect's START re-deal — that's the same game continuing).</summary>
-        public static void NewGame() { _firedThisGame.Clear(); ClearPendingBounty(); }
+        public static void NewGame() { _gameEnded = false; _firedThisGame.Clear(); ClearPendingBounty(); }
+
+        /// <summary>End coaching for this match, including late events after the result is dismissed.</summary>
+        public static void EndGame()
+        {
+            _gameEnded = true;
+            ClearPendingBounty();
+            TipBubble.Dismiss();
+        }
 
         /// <summary>Show a tip at most once per game per <paramref name="id"/>, only while Tips is on.
         /// A no-op otherwise (off, or already fired this game) — callers never branch on Enabled. Always
@@ -47,7 +56,7 @@ namespace HexWars.Presentation
         /// blocks input"), unlike the stat-reference popups callers reach directly via TipBubble.Show.</summary>
         public static void Show(string id, string text, Vector2? screenPos = null, string cta = null, System.Action onCta = null)
         {
-            if (!Enabled || _firedThisGame.Contains(id)) return;
+            if (_gameEnded || !Enabled || _firedThisGame.Contains(id)) return;
             if (TipBubble.IsOpen)
             {
                 // A bounty is a one-time event; keep it until the existing help closes. Selection,
@@ -84,7 +93,7 @@ namespace HexWars.Presentation
 
             void Update()
             {
-                if (_pendingBounty != this || !Enabled) return;
+                if (_pendingBounty != this || _gameEnded || !Enabled) return;
                 if (TipBubble.IsOpen) { _quietSince = -1; return; }
                 if (_quietSince < 0) _quietSince = Time.unscaledTime;
                 // Dismissing help must clear it immediately, with a quiet interval before coaching.
