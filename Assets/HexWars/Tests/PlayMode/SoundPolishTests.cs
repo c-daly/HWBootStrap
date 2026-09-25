@@ -44,6 +44,30 @@ namespace HexWars.Presentation.PlayModeTests
         AudioSource Source(string name)=>_host.transform.Find(name).GetComponent<AudioSource>();
 
         [UnityTest]
+        public IEnumerator MovementUsesDifferentRecordedTakesWithoutChangingGameplayRandomness()
+        {
+            SoundManager.Muted = false;
+            string previous = null;
+            var heard = new HashSet<string>();
+            for (int i = 0; i < 12; i++)
+            {
+                foreach (var source in _host.GetComponentsInChildren<AudioSource>()) source.Stop();
+                var randomBefore = Random.state;
+                SoundManager.Play(SoundKind.Move);
+                var voice = _host.GetComponentsInChildren<AudioSource>().Single(s => !s.loop && s.isPlaying);
+                Assert.That(voice.clip.name, Does.StartWith("Move"));
+                Assert.That(voice.clip.name, Is.Not.EqualTo(previous), "Consecutive moves must use different takes.");
+                heard.Add(voice.clip.name); previous = voice.clip.name;
+                SoundManager.Play(SoundKind.Move);
+                Assert.That(_host.GetComponentsInChildren<AudioSource>().Count(s => !s.loop && s.isPlaying), Is.EqualTo(1),
+                    "A same-frame repeated call must still respect the shared movement cooldown.");
+                Assert.That(Random.state, Is.EqualTo(randomBefore));
+                yield return new WaitForSecondsRealtime(.09f);
+            }
+            Assert.That(heard.Count, Is.GreaterThan(1));
+        }
+
+        [UnityTest]
         public IEnumerator FastForwardKeepsOneConclusionAcrossQueuedDeaths()
         {
             yield return CheckQueuedResolution(true, SoundKind.Win);
@@ -212,6 +236,7 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(SoundSettings.Effects,Is.EqualTo(1));Assert.That(SoundSettings.Music,Is.EqualTo(.5f));
             SoundSettings.Atmosphere=.5f;_driver.Title(true);Tick(.25f);yield return null;
             Assert.That(Source("Music").clip,Is.Not.Null);
+            Assert.That(Source("Music").clip.name,Is.EqualTo("TitleTheme"),"Title playback must use the new piano arrangement.");
             Assert.That(bed.isPlaying,Is.False,"Opening the title must not restart ambience.");
             SoundSettings.MuteAll=true;Tick(3);
             Assert.That(Source("Music").isPlaying,Is.False);
@@ -238,7 +263,7 @@ namespace HexWars.Presentation.PlayModeTests
         public IEnumerator PreparedClipsHaveHeadroomAndAudioDoesNotConsumeGameplayRandomness()
         {
             var clips = Resources.LoadAll<AudioClip>("Audio/Soft");
-            Assert.That(clips.Length, Is.EqualTo(22), "The complete mastered palette must be imported.");
+            Assert.That(clips.Length, Is.EqualTo(25), "The complete palette, including four movement takes, must be imported.");
             foreach(var clip in clips)
             {
                 var samples=new float[clip.samples*clip.channels];Assert.That(clip.GetData(samples,0),Is.True);

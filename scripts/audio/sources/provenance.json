@@ -1,0 +1,57 @@
+{
+  "previous_commit": "cf4adbeda618216ae711cb6e93aedbd9693290e1",
+  "sources": {
+    "impact": {
+      "url": "https://kenney.nl/assets/impact-sounds",
+      "license": "CC0-1.0",
+      "author": "Kenney"
+    },
+    "casino": {
+      "url": "https://kenney.nl/assets/casino-audio",
+      "license": "CC0-1.0",
+      "author": "Kenney"
+    },
+    "upright": {
+      "url": "https://freepats.zenvoid.org/Piano/acoustic-grand-piano.html#UprightKW",
+      "license": "CC0-1.0",
+      "author": "Gonzalo and Roberto / FreePats",
+      "version": "2022-02-21"
+    }
+  },
+  "files": {
+    "impact/impactWood_light_000.ogg": "eb45e35b4bed784d3f120de4afec4b0d6ac09d9e143cce8cfcb7d739e1b1f3c3",
+    "impact/impactWood_light_001.ogg": "4b76bf3ccc8e60d19188f3165b778a7817786faa6887c55d9049bcbeef3b425f",
+    "impact/impactWood_light_002.ogg": "b183cf7a5bd783817e0e4b82af34ac6658fa1927049089dadc8b15c2ecc771dc",
+    "impact/impactWood_light_003.ogg": "cdfbe8af2fe7ff9ee28f337a0a989deee0f327620da456c8413644880e9d0004",
+    "impact/impactWood_medium_000.ogg": "1723a9fd25103ed41af06054814e84e65f4a772bac86ab2dc927da93d9592ff5",
+    "impact/impactWood_medium_001.ogg": "15271dbe8e2872dbb0ff1aeb7b12b2d2b92b7c1951c88532b9ab9158c36dfc73",
+    "impact/impactWood_medium_002.ogg": "3f3f1917428b828f733a963167833c707bf88296ff158e1559c57c5cb813d799",
+    "impact/impactWood_medium_003.ogg": "635c37cfcd854b187d643d450ff0397798dcc29ae94da32192b814fae6bd854c",
+    "impact/impactWood_heavy_000.ogg": "15ff82332f342c30e469215539e1cc57e11b221aa2cf7e11e811d313a9927f3d",
+    "impact/impactWood_heavy_001.ogg": "f1b07a53ac10c615fff9ba470511fdeb722b5902e1a8520759fc20ad6f546015",
+    "impact/impactWood_heavy_002.ogg": "ce1e06f2a05f2634c645cb72f6a1623e64bc2d92be34917430a61031fb6597d4",
+    "impact/impactWood_heavy_003.ogg": "af07511902b309b3f6d8f0e1fafbe93869127fb88099ebdc0aa6a00a98dc3cb0",
+    "impact/impactSoft_heavy_000.ogg": "49e7ca88743fca974bb8676ea138b751cfd8f9033b5e7af8736c2a215d6edbc1",
+    "impact/impactSoft_heavy_001.ogg": "4d0096364ba9e46119d2ff6df493fdc101bd2e1efae061da5e5f77a53b3fdcb6",
+    "impact/impactSoft_heavy_002.ogg": "d130ae541951243d3f6ed963d0057450a445ffe117fbf9a084d34eb1635cb563",
+    "impact/impactSoft_heavy_003.ogg": "d00286a2dc62ee5cb4d42bf56120e7050a855f69e655fc1294410aadd337eba3",
+    "casino/chip-lay-1.ogg": "4b2111252ccb64eed67f171e061053849cfbb29873536c03948646f244a3905c",
+    "casino/chip-lay-2.ogg": "8ca8b2d450741c04ed7b4ba51ed3f73c2400c8b3dbe83b974be4fe4774a76712",
+    "casino/chip-lay-3.ogg": "bf24ebb417b6279568800dffdb0205d3ec8854c7efe179e8964755a6341727aa",
+    "casino/card-slide-1.ogg": "006cf9822d15d7063f8899e56041f41646df30adb6fbd8b974ee5d5420012690",
+    "upright/F#2vL.flac": "d5f7f5b399982e8aab0db2fc419c4e6ab39dd8bf3b4a67acac13bd5a473b7b4b",
+    "upright/A2vL.flac": "91d8f90471403494595211ac05e0e1bab92cbdeefea38ea4513466d016e39ce6",
+    "upright/C3vL.flac": "501f7703e1006f1afd37f8dcc438906057e6f7dc84c0952237cf84d8ebaec6cb",
+    "upright/D#3vL.flac": "c34359c5561bc71a53bce1c24ebd62fa335be5098feb63ab9eaa57af51b57521",
+    "upright/F#3vL.flac": "5a39e7f31344425491c439847a009d0859aaeaf51737dbe952d47bd86d0d4998",
+    "upright/A3vL.flac": "498682c53eb222dd88692a21ffdf48641873df63287d93dd43cd814544874372",
+    "upright/C4vL.flac": "4382a54ffbb731cc8c7d8d88e322b1d669d6d44ccdca71eb17860d3c81967b4f",
+    "upright/D#4vL.flac": "105074540a60b82228cc6d9defb84b37aaab2a18d7526ccbf197500529040ff7",
+    "upright/F#4vL.flac": "157fa02c06d4cc768f059ae1954c11f8dabf0dae65da1f94f120570d7d6a50e5",
+    "upright/A4vL.flac": "1eb7f53be83b4fb86a5fb5f2e8b2cebd6e1da3c1a7e8c3305b20533e6ac63d86",
+    "upright/C5vL.flac": "b6c6948fdc8b4f0a35d260229de051d912077123ce4a4c19e2a41edca9d4214d",
+    "upright/D#5vL.flac": "6730be1a4ccc3747d46535fc64b6bfccd725a433ef10c122a688cf643ef0eb17",
+    "upright/F#5vL.flac": "2df9d8a44724bb7c2c9bbbd05d6b459c76ce9c7af35eac925bba1b0ab7878ca7",
+    "upright/A5vL.flac": "1f68815ff745a1968a706916586a5d4a96b39aeca1c444a8d75dc2b6a5555ef3"
+  }
+}

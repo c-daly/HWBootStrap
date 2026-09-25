@@ -1,233 +1,764 @@
 {
+  "revision": "tabletop-v2",
   "sample_rate": 44100,
-  "seed": 25419,
-  "original_recordings_unchanged": true,
-  "clips": {
-    "AttackLight_0": {
-      "seconds": 0.3,
-      "peak_dbfs": -20.29,
-      "rms_dbfs": -31.37,
-      "sha256": "09782ed4984c5d94a4b4586632ff93d4f9a828d5177e2665ed22cbf374e59e13"
-    },
-    "AttackLight_1": {
-      "seconds": 0.3,
-      "peak_dbfs": -21.31,
-      "rms_dbfs": -31.37,
-      "sha256": "10760d3a5b03664b9273009b1985b9cbec3de7ed24047d15bea4371477800a95"
-    },
-    "AttackLight_2": {
-      "seconds": 0.3,
-      "peak_dbfs": -21.68,
-      "rms_dbfs": -31.37,
-      "sha256": "75c4094d30faf65b1300d78213cfe9aceccc99a74e3764920b1a2a26522b0a9a"
-    },
-    "AttackLight_3": {
-      "seconds": 0.3,
-      "peak_dbfs": -20.29,
-      "rms_dbfs": -31.37,
-      "sha256": "44ce4f6cd417f3483d038773a526e403021d0585a2c7fc68575026b3cef20339"
-    },
-    "AttackMid_0": {
-      "seconds": 0.43,
-      "peak_dbfs": -14.42,
-      "rms_dbfs": -28.85,
-      "sha256": "75982034394054b535f74de9ee00061c81878724b056b5f04cf95e0168ca3683"
-    },
-    "AttackMid_1": {
-      "seconds": 0.43,
-      "peak_dbfs": -14.42,
-      "rms_dbfs": -28.81,
-      "sha256": "158106029ba3ab47e7eb0ab31b599a9a5e85950a8e89e5278d416991df3862cc"
-    },
-    "AttackMid_2": {
-      "seconds": 0.43,
-      "peak_dbfs": -14.45,
-      "rms_dbfs": -28.4,
-      "sha256": "9d29b3905b135642e65ab1af1471c75e79e6d92ce030f3b3da7d0bde48124bdf"
-    },
-    "AttackMid_3": {
-      "seconds": 0.43,
-      "peak_dbfs": -14.42,
-      "rms_dbfs": -28.53,
-      "sha256": "0a8f4bb3a99b1c41c3956c09a3805418b0d618f0a22e077b9ea33c30910af539"
-    },
-    "AttackHeavy_0": {
-      "seconds": 0.6,
-      "peak_dbfs": -15.96,
-      "rms_dbfs": -26.94,
-      "sha256": "f484af24b0276de2ec6cd064f91d18bac6300c6129edd747d83cb78c0a28abb7"
-    },
-    "AttackHeavy_1": {
-      "seconds": 0.6,
-      "peak_dbfs": -14.58,
-      "rms_dbfs": -26.94,
-      "sha256": "ce015b45f4ebb1c4adac5f392641d6ee46daf42429220a5a7a08f1b6ffcba3db"
-    },
-    "AttackHeavy_2": {
-      "seconds": 0.6,
-      "peak_dbfs": -14.06,
-      "rms_dbfs": -26.94,
-      "sha256": "e60108053ecf0f9a10200cf1f7a37ad1ff916e691820645b3bb6fd4b3e910c7a"
-    },
-    "AttackHeavy_3": {
-      "seconds": 0.6,
-      "peak_dbfs": -13.15,
-      "rms_dbfs": -27.33,
-      "sha256": "92002686b2cf52d2b923070488f80abd7739f40304b1e775a53de861a6fdd643"
-    },
-    "Deploy": {
-      "seconds": 0.44,
-      "peak_dbfs": -17.5,
-      "rms_dbfs": -31.37,
-      "sha256": "b0064ecb35e36cc1de717a5d30ef50b8f361ece4dae7764e749cf365e4763a90"
-    },
-    "Design": {
-      "seconds": 0.25,
-      "peak_dbfs": -16.48,
-      "rms_dbfs": -40.28,
-      "sha256": "dc9cb9945cd5ae7673729171531da2fc291a2d18c25c4be57fec0f40a2fba0c6"
-    },
-    "Select": {
-      "seconds": 0.075,
-      "peak_dbfs": -31.6,
-      "rms_dbfs": -44.44,
-      "sha256": "5642f14b1e91306b6d89935a8fade4ee0b55aadea7502890e494bd4b26330c80"
-    },
-    "Move": {
-      "seconds": 0.18,
-      "peak_dbfs": -20.92,
-      "rms_dbfs": -37.03,
-      "sha256": "8bd73a560cc6dd1fb0de85140594943e2467f202baeb942cfce4b31031a5002e"
-    },
-    "Place": {
-      "seconds": 0.14,
-      "peak_dbfs": -20.45,
-      "rms_dbfs": -34.8,
-      "sha256": "a4365c5dcf2b70ff357b1ec29955db2ee059ffc4e79317e8c08577a273d81791"
-    },
-    "Build": {
-      "seconds": 0.24,
-      "peak_dbfs": -17.72,
-      "rms_dbfs": -36.95,
-      "sha256": "7558c54db488bfd969bb1a57508ce1cabdd8fd7a68daee5cafbb0aba0b1d90c6"
-    },
-    "Claim": {
-      "seconds": 0.29,
-      "peak_dbfs": -25.72,
-      "rms_dbfs": -35.39,
-      "sha256": "66aad9810cf25f505219128908e3589113a619031a3426e5d90cd637bf4f9c9f"
-    },
-    "EndTurn": {
-      "seconds": 0.36,
-      "peak_dbfs": -24.95,
-      "rms_dbfs": -34.89,
-      "sha256": "ccf8396cff4708215eba0e93368a02c18102aec885ba7a7655c298a191aed807"
-    },
-    "Win": {
-      "seconds": 0.72,
-      "peak_dbfs": -22.69,
-      "rms_dbfs": -33.15,
-      "sha256": "c45269352e267d5916b6738567ef0676685e0fa0a2a8b364e49a2a41c001d95e"
-    },
-    "Death": {
-      "seconds": 0.38,
-      "peak_dbfs": -14.89,
-      "rms_dbfs": -36.4,
-      "sha256": "062b33d68c39b463e0b5187e98a95e129b9b176f25c9654f27aa18ff473eae20"
-    }
-  },
+  "seed": 250926,
+  "previous_commit": "cf4adbeda618216ae711cb6e93aedbd9693290e1",
   "comparison": [
     {
       "name": "Move",
-      "label": "Move",
-      "description": "A soft contact instead of a high beep.",
+      "label": "Move a piece",
+      "description": "A small contact and a rounded wooden body, in four takes.",
       "before": "Move-before.wav",
       "after": "Move.wav"
     },
     {
       "name": "AttackLight_0",
       "label": "Light shot",
-      "description": "Shorter, rounded transients and room for the impact.",
+      "description": "A dry wooden pop.",
       "before": "AttackLight_0-before.wav",
       "after": "AttackLight_0.wav"
     },
     {
       "name": "AttackMid_0",
       "label": "Medium shot",
-      "description": "Tamed peak and a shorter tail.",
+      "description": "A soft, compact knock.",
       "before": "AttackMid_0-before.wav",
       "after": "AttackMid_0.wav"
     },
     {
       "name": "AttackHeavy_0",
       "label": "Heavy shot",
-      "description": "More weight, without a long low rumble.",
+      "description": "A deeper wooden thump with a cushioned tail.",
       "before": "AttackHeavy_0-before.wav",
       "after": "AttackHeavy_0.wav"
     },
     {
       "name": "Deploy",
-      "label": "Deployment",
-      "description": "A brief mechanical latch.",
+      "label": "Place from barracks",
+      "description": "A firm set-down with a tiny settling contact.",
       "before": "Deploy-before.wav",
       "after": "Deploy.wav"
     },
     {
-      "name": "Design",
-      "label": "Design saved",
-      "description": "A small confirmation, with no fanfare.",
-      "before": "Design-before.wav",
-      "after": "Design.wav"
+      "name": "Death",
+      "label": "Remove a piece",
+      "description": "A low contact and a small tumble.",
+      "before": "Death-before.wav",
+      "after": "Death.wav"
     },
     {
       "name": "EndTurn",
       "label": "Turn change",
-      "description": "A quiet two-note handover.",
+      "description": "Two quiet piano notes.",
       "before": "EndTurn-before.wav",
       "after": "EndTurn.wav"
     }
   ],
   "sequence": [
     {
-      "seconds": 0.4,
+      "seconds": 0.45,
       "cue": "Select"
     },
     {
-      "seconds": 1.2,
+      "seconds": 1.15,
       "cue": "Move"
     },
     {
-      "seconds": 3.3,
-      "cue": "Select"
+      "seconds": 2.9,
+      "cue": "Move_1"
     },
     {
-      "seconds": 4.1,
+      "seconds": 4.8,
+      "cue": "Place"
+    },
+    {
+      "seconds": 6.8,
       "cue": "AttackLight_0"
     },
     {
-      "seconds": 6.7,
-      "cue": "AttackMid_0"
+      "seconds": 9.2,
+      "cue": "AttackMid_1"
     },
     {
-      "seconds": 7.6,
+      "seconds": 11.7,
+      "cue": "AttackHeavy_2"
+    },
+    {
+      "seconds": 12.3,
       "cue": "Death"
     },
     {
-      "seconds": 10.8,
+      "seconds": 15.1,
       "cue": "Deploy"
     },
     {
-      "seconds": 13.6,
-      "cue": "Design"
-    },
-    {
-      "seconds": 16.8,
+      "seconds": 17.3,
       "cue": "EndTurn"
     }
   ],
-  "default_loop_gains": {
-    "TitleMusic": 0.12,
-    "AmbientBed": 0.05,
-    "DesignerHum": 0.09
+  "clips": {
+    "Move": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.01743642770635267,
+      "sha256": "8c1d9f710096d987140f09e37ca54a8df5bcbe48868c2d13caa2ec448aadcd51"
+    },
+    "Move_1": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.017848921117810713,
+      "sha256": "d3d4addea93544afa738a093dab0c78726a701caaaa51f7dfb7bad23ca554aeb"
+    },
+    "Move_2": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.014776560668233336,
+      "sha256": "b3213b4aa6d454972e65fb9c8aa0e24d606bdd58254250afef06951d6f2a8788"
+    },
+    "Move_3": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.015844584453935946,
+      "sha256": "522fe127dd7a16188eecaaefe4c18f5f24fb604c2c79a2fd2e8416b743babb86"
+    },
+    "Select": {
+      "seconds": 0.13,
+      "peak": 0.045013427734375,
+      "rms": 0.0027906148520525404,
+      "sha256": "63b8da9d9db66a441b1c723aa28676e0ff17c30e6161279ec38c75ec39671377"
+    },
+    "Place": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.017737283477861642,
+      "sha256": "e88367a45825ef37bca851db3259b11d8329738b198e9ae6c2505d41af24a52f"
+    },
+    "AttackLight_0": {
+      "seconds": 0.21,
+      "peak": 0.115020751953125,
+      "rms": 0.015673305319381117,
+      "sha256": "98f7e93a76d8a936308e9290cf0f382aa12faa41a488b643a1d198b48d36b0c9"
+    },
+    "AttackLight_1": {
+      "seconds": 0.21,
+      "peak": 0.114990234375,
+      "rms": 0.012462066655485817,
+      "sha256": "e937ea6239777c5b5a15ec97b2230188d806781315668fdf4d36e6db466dabcf"
+    },
+    "AttackLight_2": {
+      "seconds": 0.21,
+      "peak": 0.115020751953125,
+      "rms": 0.0156920066229177,
+      "sha256": "83ccead4924f9580180415dbb05855e3b2b2b8e6b746d26624bb9cc1c53146ca"
+    },
+    "AttackLight_3": {
+      "seconds": 0.21,
+      "peak": 0.114990234375,
+      "rms": 0.012958288764786127,
+      "sha256": "2a809317f244cec5bed03d00a25583b9ecdd8fdb7016721e70c132ad9c25473f"
+    },
+    "AttackMid_0": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.0221113285309262,
+      "sha256": "2b5c2d235edddb0925c8fc6494ed24e33349a3aac36932246490a87d8b687915"
+    },
+    "AttackMid_1": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.022580037724278475,
+      "sha256": "db78848d45f08a8c949d44d2e79aee427ecfb3895159e2f9f26e5e1c6d0a34b7"
+    },
+    "AttackMid_2": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.022041545138834554,
+      "sha256": "087bbdc8db9042f98a79591617d14a2b037172fdaffb16dab59c1a5d85a44a23"
+    },
+    "AttackMid_3": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.02255630333342611,
+      "sha256": "ca8ffea5a753e3801ddd9b7e0fffea0c3305f142f1ad6619184347fd26479a78"
+    },
+    "AttackHeavy_0": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.031128146578641314,
+      "sha256": "a8a4c5638af924d97fdff8dedb8f18395d50d367b992fb1da6544157a1907057"
+    },
+    "AttackHeavy_1": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.028485710492965836,
+      "sha256": "8dd9dd843798140e070941fdb24b498e5bf6563e74ab1d1f5ce008b7c44d19b0"
+    },
+    "AttackHeavy_2": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.027491841536179125,
+      "sha256": "c1bf43a0a8cb9b12522e5925401c495f4690c5aa6146e819e158a262e5e61b34"
+    },
+    "AttackHeavy_3": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.024435135400766066,
+      "sha256": "d1eba7757f8e3ce2a663413a6e2750f98be19edd4b1a80b6f948a5d8ca591bbf"
+    },
+    "Death": {
+      "seconds": 0.36,
+      "peak": 0.149169921875,
+      "rms": 0.026398643331965253,
+      "sha256": "1517e166ab7e5eac8cd629a76fb5d281e104a196b9b0783250381c175a2d64d2"
+    },
+    "Deploy": {
+      "seconds": 0.28,
+      "peak": 0.1300048828125,
+      "rms": 0.015637947591766996,
+      "sha256": "1049620ac8a4f912bbc37e9b9c1451fa38107549106b11015bfa78589da18cad"
+    },
+    "Design": {
+      "seconds": 0.22,
+      "peak": 0.08502197265625,
+      "rms": 0.004979853890645236,
+      "sha256": "6af129a3425268ca62ccff25abc5e6726626f97ce06bfd6dae989734414e2e77"
+    },
+    "Build": {
+      "seconds": 0.29,
+      "peak": 0.1400146484375,
+      "rms": 0.016302589618989304,
+      "sha256": "276d8768edfb402ef037998fac11ebdfe102cd0311be6d15166e9ce39d0238d6"
+    },
+    "EndTurn": {
+      "seconds": 0.54,
+      "peak": 0.05596923828125,
+      "rms": 0.01539593595476183,
+      "sha256": "2a4a485ea485aa586f7942bb9586b89f162f2fa1e046349d0c2ff4be722ac215"
+    },
+    "Claim": {
+      "seconds": 0.48,
+      "peak": 0.064544677734375,
+      "rms": 0.015318905662982123,
+      "sha256": "1e23c2cc54c0a225d21dcc8b9b91290fd99da80442ed80af4af84bb1ef153d2b"
+    },
+    "Win": {
+      "seconds": 1.19,
+      "peak": 0.104644775390625,
+      "rms": 0.021627074324231006,
+      "sha256": "3b40c695a8107eee26d79d22d0d4eb9adfe0de29ea7ac8a7fc82d42575a913cb"
+    }
+  },
+  "music": {
+    "seconds": 61.935488,
+    "peak": 0.613189697265625,
+    "rms": 0.07500000210932475,
+    "sha256": "44f08903063954b941cb6cf36073709fdf421fbb2e02cc6790a340a8473ee759"
+  },
+  "music_score": [
+    {
+      "beat": 0.04,
+      "note": 50,
+      "hold_beats": 2.3,
+      "velocity": 0.55
+    },
+    {
+      "beat": 1.35,
+      "note": 57,
+      "hold_beats": 1.6,
+      "velocity": 0.35
+    },
+    {
+      "beat": 2.75,
+      "note": 66,
+      "hold_beats": 1.1,
+      "velocity": 0.28
+    },
+    {
+      "beat": 0.5,
+      "note": 66,
+      "hold_beats": 1.0,
+      "velocity": 0.59
+    },
+    {
+      "beat": 2.0,
+      "note": 69,
+      "hold_beats": 1.3,
+      "velocity": 0.59
+    },
+    {
+      "beat": 4.04,
+      "note": 49,
+      "hold_beats": 2.3,
+      "velocity": 0.563
+    },
+    {
+      "beat": 5.35,
+      "note": 57,
+      "hold_beats": 1.6,
+      "velocity": 0.358
+    },
+    {
+      "beat": 6.75,
+      "note": 64,
+      "hold_beats": 1.1,
+      "velocity": 0.286
+    },
+    {
+      "beat": 4.25,
+      "note": 68,
+      "hold_beats": 0.8,
+      "velocity": 0.604
+    },
+    {
+      "beat": 5.5,
+      "note": 64,
+      "hold_beats": 1.5,
+      "velocity": 0.604
+    },
+    {
+      "beat": 8.04,
+      "note": 47,
+      "hold_beats": 2.3,
+      "velocity": 0.573
+    },
+    {
+      "beat": 9.35,
+      "note": 54,
+      "hold_beats": 1.6,
+      "velocity": 0.365
+    },
+    {
+      "beat": 10.75,
+      "note": 62,
+      "hold_beats": 1.1,
+      "velocity": 0.292
+    },
+    {
+      "beat": 8.5,
+      "note": 66,
+      "hold_beats": 0.9,
+      "velocity": 0.615
+    },
+    {
+      "beat": 10.0,
+      "note": 62,
+      "hold_beats": 1.4,
+      "velocity": 0.615
+    },
+    {
+      "beat": 12.04,
+      "note": 43,
+      "hold_beats": 2.3,
+      "velocity": 0.58
+    },
+    {
+      "beat": 13.35,
+      "note": 50,
+      "hold_beats": 1.6,
+      "velocity": 0.369
+    },
+    {
+      "beat": 14.75,
+      "note": 59,
+      "hold_beats": 1.1,
+      "velocity": 0.296
+    },
+    {
+      "beat": 13.0,
+      "note": 64,
+      "hold_beats": 0.8,
+      "velocity": 0.623
+    },
+    {
+      "beat": 14.5,
+      "note": 62,
+      "hold_beats": 1.2,
+      "velocity": 0.623
+    },
+    {
+      "beat": 16.04,
+      "note": 42,
+      "hold_beats": 2.3,
+      "velocity": 0.583
+    },
+    {
+      "beat": 17.35,
+      "note": 50,
+      "hold_beats": 1.6,
+      "velocity": 0.371
+    },
+    {
+      "beat": 18.75,
+      "note": 57,
+      "hold_beats": 1.1,
+      "velocity": 0.297
+    },
+    {
+      "beat": 16.5,
+      "note": 66,
+      "hold_beats": 0.8,
+      "velocity": 0.625
+    },
+    {
+      "beat": 17.75,
+      "note": 69,
+      "hold_beats": 0.8,
+      "velocity": 0.625
+    },
+    {
+      "beat": 18.75,
+      "note": 71,
+      "hold_beats": 1.0,
+      "velocity": 0.625
+    },
+    {
+      "beat": 20.04,
+      "note": 40,
+      "hold_beats": 2.3,
+      "velocity": 0.58
+    },
+    {
+      "beat": 21.35,
+      "note": 47,
+      "hold_beats": 1.6,
+      "velocity": 0.369
+    },
+    {
+      "beat": 22.75,
+      "note": 55,
+      "hold_beats": 1.1,
+      "velocity": 0.296
+    },
+    {
+      "beat": 20.5,
+      "note": 67,
+      "hold_beats": 1.0,
+      "velocity": 0.623
+    },
+    {
+      "beat": 22.0,
+      "note": 66,
+      "hold_beats": 1.2,
+      "velocity": 0.623
+    },
+    {
+      "beat": 24.04,
+      "note": 45,
+      "hold_beats": 2.3,
+      "velocity": 0.573
+    },
+    {
+      "beat": 25.35,
+      "note": 55,
+      "hold_beats": 1.6,
+      "velocity": 0.365
+    },
+    {
+      "beat": 24.75,
+      "note": 64,
+      "hold_beats": 1.2,
+      "velocity": 0.615
+    },
+    {
+      "beat": 28.04,
+      "note": 45,
+      "hold_beats": 2.3,
+      "velocity": 0.563
+    },
+    {
+      "beat": 29.35,
+      "note": 52,
+      "hold_beats": 1.6,
+      "velocity": 0.358
+    },
+    {
+      "beat": 29.0,
+      "note": 61,
+      "hold_beats": 1.2,
+      "velocity": 0.604
+    },
+    {
+      "beat": 32.04,
+      "note": 50,
+      "hold_beats": 2.3,
+      "velocity": 0.55
+    },
+    {
+      "beat": 33.35,
+      "note": 57,
+      "hold_beats": 1.6,
+      "velocity": 0.35
+    },
+    {
+      "beat": 34.75,
+      "note": 66,
+      "hold_beats": 1.1,
+      "velocity": 0.28
+    },
+    {
+      "beat": 32.5,
+      "note": 66,
+      "hold_beats": 0.9,
+      "velocity": 0.59
+    },
+    {
+      "beat": 34.0,
+      "note": 69,
+      "hold_beats": 0.8,
+      "velocity": 0.59
+    },
+    {
+      "beat": 35.0,
+      "note": 74,
+      "hold_beats": 0.9,
+      "velocity": 0.59
+    },
+    {
+      "beat": 36.04,
+      "note": 49,
+      "hold_beats": 2.3,
+      "velocity": 0.537
+    },
+    {
+      "beat": 37.35,
+      "note": 57,
+      "hold_beats": 1.6,
+      "velocity": 0.342
+    },
+    {
+      "beat": 38.75,
+      "note": 64,
+      "hold_beats": 1.1,
+      "velocity": 0.274
+    },
+    {
+      "beat": 36.5,
+      "note": 73,
+      "hold_beats": 1.0,
+      "velocity": 0.576
+    },
+    {
+      "beat": 38.0,
+      "note": 69,
+      "hold_beats": 1.4,
+      "velocity": 0.576
+    },
+    {
+      "beat": 40.04,
+      "note": 47,
+      "hold_beats": 2.3,
+      "velocity": 0.527
+    },
+    {
+      "beat": 41.35,
+      "note": 54,
+      "hold_beats": 1.6,
+      "velocity": 0.335
+    },
+    {
+      "beat": 42.75,
+      "note": 62,
+      "hold_beats": 1.1,
+      "velocity": 0.268
+    },
+    {
+      "beat": 40.5,
+      "note": 71,
+      "hold_beats": 0.8,
+      "velocity": 0.565
+    },
+    {
+      "beat": 41.75,
+      "note": 69,
+      "hold_beats": 0.8,
+      "velocity": 0.565
+    },
+    {
+      "beat": 42.75,
+      "note": 66,
+      "hold_beats": 1.0,
+      "velocity": 0.565
+    },
+    {
+      "beat": 44.04,
+      "note": 43,
+      "hold_beats": 2.3,
+      "velocity": 0.52
+    },
+    {
+      "beat": 45.35,
+      "note": 50,
+      "hold_beats": 1.6,
+      "velocity": 0.331
+    },
+    {
+      "beat": 46.75,
+      "note": 59,
+      "hold_beats": 1.1,
+      "velocity": 0.264
+    },
+    {
+      "beat": 45.0,
+      "note": 67,
+      "hold_beats": 1.0,
+      "velocity": 0.557
+    },
+    {
+      "beat": 46.5,
+      "note": 66,
+      "hold_beats": 0.9,
+      "velocity": 0.557
+    },
+    {
+      "beat": 48.04,
+      "note": 42,
+      "hold_beats": 2.3,
+      "velocity": 0.517
+    },
+    {
+      "beat": 49.35,
+      "note": 50,
+      "hold_beats": 1.6,
+      "velocity": 0.329
+    },
+    {
+      "beat": 50.75,
+      "note": 57,
+      "hold_beats": 1.1,
+      "velocity": 0.263
+    },
+    {
+      "beat": 48.5,
+      "note": 64,
+      "hold_beats": 1.0,
+      "velocity": 0.555
+    },
+    {
+      "beat": 50.0,
+      "note": 62,
+      "hold_beats": 1.4,
+      "velocity": 0.555
+    },
+    {
+      "beat": 52.04,
+      "note": 40,
+      "hold_beats": 2.3,
+      "velocity": 0.52
+    },
+    {
+      "beat": 53.35,
+      "note": 47,
+      "hold_beats": 1.6,
+      "velocity": 0.331
+    },
+    {
+      "beat": 54.75,
+      "note": 55,
+      "hold_beats": 1.1,
+      "velocity": 0.264
+    },
+    {
+      "beat": 53.0,
+      "note": 64,
+      "hold_beats": 1.2,
+      "velocity": 0.557
+    },
+    {
+      "beat": 54.75,
+      "note": 66,
+      "hold_beats": 0.8,
+      "velocity": 0.557
+    },
+    {
+      "beat": 56.04,
+      "note": 45,
+      "hold_beats": 2.3,
+      "velocity": 0.527
+    },
+    {
+      "beat": 57.35,
+      "note": 55,
+      "hold_beats": 1.6,
+      "velocity": 0.335
+    },
+    {
+      "beat": 56.5,
+      "note": 62,
+      "hold_beats": 1.4,
+      "velocity": 0.565
+    },
+    {
+      "beat": 60.04,
+      "note": 45,
+      "hold_beats": 2.3,
+      "velocity": 0.537
+    },
+    {
+      "beat": 61.35,
+      "note": 52,
+      "hold_beats": 1.6,
+      "velocity": 0.342
+    },
+    {
+      "beat": 60.75,
+      "note": 61,
+      "hold_beats": 1.0,
+      "velocity": 0.576
+    },
+    {
+      "beat": 62.5,
+      "note": 64,
+      "hold_beats": 0.7,
+      "velocity": 0.576
+    }
+  ],
+  "music_bpm": 62,
+  "music_bars": 16,
+  "music_default_gain": 0.12,
+  "music_seam_sample_jump": [
+    2.95700826227347e-05,
+    5.936170477250353e-05
+  ],
+  "files": {
+    "AmbientBed.wav": "4285df0cc30185f187c8899c429544d0f5fb92ffe63c181ea97e904b4d199a19",
+    "AttackHeavy_0-before.wav": "f484af24b0276de2ec6cd064f91d18bac6300c6129edd747d83cb78c0a28abb7",
+    "AttackHeavy_0.wav": "a8a4c5638af924d97fdff8dedb8f18395d50d367b992fb1da6544157a1907057",
+    "AttackHeavy_1.wav": "8dd9dd843798140e070941fdb24b498e5bf6563e74ab1d1f5ce008b7c44d19b0",
+    "AttackHeavy_2.wav": "c1bf43a0a8cb9b12522e5925401c495f4690c5aa6146e819e158a262e5e61b34",
+    "AttackHeavy_3.wav": "d1eba7757f8e3ce2a663413a6e2750f98be19edd4b1a80b6f948a5d8ca591bbf",
+    "AttackLight_0-before.wav": "09782ed4984c5d94a4b4586632ff93d4f9a828d5177e2665ed22cbf374e59e13",
+    "AttackLight_0.wav": "98f7e93a76d8a936308e9290cf0f382aa12faa41a488b643a1d198b48d36b0c9",
+    "AttackLight_1.wav": "e937ea6239777c5b5a15ec97b2230188d806781315668fdf4d36e6db466dabcf",
+    "AttackLight_2.wav": "83ccead4924f9580180415dbb05855e3b2b2b8e6b746d26624bb9cc1c53146ca",
+    "AttackLight_3.wav": "2a809317f244cec5bed03d00a25583b9ecdd8fdb7016721e70c132ad9c25473f",
+    "AttackMid_0-before.wav": "75982034394054b535f74de9ee00061c81878724b056b5f04cf95e0168ca3683",
+    "AttackMid_0.wav": "2b5c2d235edddb0925c8fc6494ed24e33349a3aac36932246490a87d8b687915",
+    "AttackMid_1.wav": "db78848d45f08a8c949d44d2e79aee427ecfb3895159e2f9f26e5e1c6d0a34b7",
+    "AttackMid_2.wav": "087bbdc8db9042f98a79591617d14a2b037172fdaffb16dab59c1a5d85a44a23",
+    "AttackMid_3.wav": "ca8ffea5a753e3801ddd9b7e0fffea0c3305f142f1ad6619184347fd26479a78",
+    "Build.wav": "276d8768edfb402ef037998fac11ebdfe102cd0311be6d15166e9ce39d0238d6",
+    "Claim.wav": "1e23c2cc54c0a225d21dcc8b9b91290fd99da80442ed80af4af84bb1ef153d2b",
+    "Death-before.wav": "062b33d68c39b463e0b5187e98a95e129b9b176f25c9654f27aa18ff473eae20",
+    "Death.wav": "1517e166ab7e5eac8cd629a76fb5d281e104a196b9b0783250381c175a2d64d2",
+    "Deploy-before.wav": "b0064ecb35e36cc1de717a5d30ef50b8f361ece4dae7764e749cf365e4763a90",
+    "Deploy.wav": "1049620ac8a4f912bbc37e9b9c1451fa38107549106b11015bfa78589da18cad",
+    "Design-before.wav": "3ae36ddefe79b03e32ec6f6a006e3cf27ae24d579b8804d67b772776cc5d88ab",
+    "Design.wav": "6af129a3425268ca62ccff25abc5e6726626f97ce06bfd6dae989734414e2e77",
+    "DesignerHum.wav": "ea73497c53129a49781a6029c2e26ef45e20f0949c6386f941c845008d4a9e20",
+    "EndTurn-before.wav": "ccf8396cff4708215eba0e93368a02c18102aec885ba7a7655c298a191aed807",
+    "EndTurn.wav": "2a4a485ea485aa586f7942bb9586b89f162f2fa1e046349d0c2ff4be722ac215",
+    "Move-before.wav": "8bd73a560cc6dd1fb0de85140594943e2467f202baeb942cfce4b31031a5002e",
+    "Move.wav": "8c1d9f710096d987140f09e37ca54a8df5bcbe48868c2d13caa2ec448aadcd51",
+    "Move_1.wav": "d3d4addea93544afa738a093dab0c78726a701caaaa51f7dfb7bad23ca554aeb",
+    "Move_2.wav": "b3213b4aa6d454972e65fb9c8aa0e24d606bdd58254250afef06951d6f2a8788",
+    "Move_3.wav": "522fe127dd7a16188eecaaefe4c18f5f24fb604c2c79a2fd2e8416b743babb86",
+    "Place.wav": "e88367a45825ef37bca851db3259b11d8329738b198e9ae6c2505d41af24a52f",
+    "Select.wav": "63b8da9d9db66a441b1c723aa28676e0ff17c30e6161279ec38c75ec39671377",
+    "TitleMusic-before.wav": "31a3f7a37a4f6c9bd7b0a88b5132c70cff1dd80712de67930d2ac0d7f18c7a52",
+    "TitleMusic.wav": "452476e8c2e25d406448c8c765fb614e64aeef8dc110f971af153f9f03291e2c",
+    "Win.wav": "3b40c695a8107eee26d79d22d0d4eb9adfe0de29ea7ac8a7fc82d42575a913cb",
+    "moves.wav": "c9e704d3f64b5373c2e4cbdb0b498c3c0090f5d18ea7b1af5f5762132d4133a7",
+    "music-seam.wav": "db87dd31941837a3a59d8ab562cef36e5c91e9b0295d48d5f3df6e57a9627c92",
+    "sequence.wav": "4dcd43f052e512403f01502e64fec2684a0b9bd95b80433b4bb77048d85d03fe"
   }
 }

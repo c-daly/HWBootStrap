@@ -74,7 +74,7 @@ namespace HexWars.Presentation
             }
             bool audible = _focused && !SoundSettings.MuteAll;
             float duck = Time.unscaledTime < _duckUntil ? .55f : 1f;
-            Fade(_music, "TitleMusic", ref _musicLevel, audible && _titleWanted ? .24f * SoundSettings.Music : 0f, dt, .6f);
+            Fade(_music, "Tabletop/TitleTheme", ref _musicLevel, audible && _titleWanted ? .24f * SoundSettings.Music : 0f, dt, 0f);
             Fade(_ambience, "AmbientBed", ref _ambienceLevel,
                 audible && _ambienceWanted ? .1f * SoundSettings.Atmosphere * duck * (_designerWanted ? .3f : 1f) : 0f, dt, 0f);
             Fade(_hum, "DesignerHum", ref _humLevel, audible && _designerWanted ? .18f * SoundSettings.Atmosphere : 0f, dt, .18f);
@@ -88,7 +88,7 @@ namespace HexWars.Presentation
                 if (source.clip == null) source.clip = Resources.Load<AudioClip>("Audio/" + asset);
                 if (source.clip != null) { source.volume = 0f; source.Play(); }
             }
-            // The supplied title/hum endpoints do not meet. A brief taper prevents a click at each wrap.
+            // The supplied hum endpoints do not meet. The new piano theme already has a continuous loop.
             float edge = source.clip != null && seam > 0f ?
                 Mathf.SmoothStep(0f, 1f, Mathf.Min(source.time, source.clip.length - source.time) / seam) : 1f;
             source.volume = level * edge;
