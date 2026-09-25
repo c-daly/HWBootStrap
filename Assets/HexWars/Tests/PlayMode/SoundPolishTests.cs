@@ -13,7 +13,7 @@ namespace HexWars.Presentation.PlayModeTests
     {
         readonly string[] _keys = { "HexWars.Volume", "HexWars.EffectsVolume", "HexWars.AtmosphereVolume", "HexWars.MusicVolume" };
         readonly Dictionary<string, float?> _before = new Dictionary<string, float?>();
-        bool _hadMute, _wasMuted, _demoMuted; float _listenerVolume;
+        bool _hadMute, _wasMuted, _demoMuted, _hadGameMusic, _gameMusic; float _listenerVolume;
         GameObject _host; SoundMixDriver _driver; AudioClip _longClip;
         SoundMixDriver _previousDriver;
         static readonly FieldInfo DriverField = typeof(SoundManager).GetField("_driver", BindingFlags.Static | BindingFlags.NonPublic);
@@ -22,6 +22,8 @@ namespace HexWars.Presentation.PlayModeTests
         {
             _listenerVolume=AudioListener.volume; _hadMute=PlayerPrefs.HasKey("HexWars.MuteAll");
             _wasMuted=SoundSettings.MuteAll; _demoMuted=SoundManager.Muted;
+            _hadGameMusic=PlayerPrefs.HasKey("HexWars.MusicDuringGame"); _gameMusic=SoundSettings.MusicDuringGame;
+            PlayerPrefs.DeleteKey("HexWars.MusicDuringGame");
             foreach(var key in _keys) _before[key]=PlayerPrefs.HasKey(key)?PlayerPrefs.GetFloat(key):(float?)null;
             SoundSettings.MuteAll=false;SoundSettings.Volume=0;SoundSettings.Effects=1;SoundSettings.Music=.5f;SoundSettings.Atmosphere=.5f;
             _host=new GameObject("Sound mix test");_driver=_host.AddComponent<SoundMixDriver>();
@@ -37,11 +39,59 @@ namespace HexWars.Presentation.PlayModeTests
             Object.Destroy(_host);Object.Destroy(_longClip);
             foreach(var pair in _before)if(pair.Value.HasValue)PlayerPrefs.SetFloat(pair.Key,pair.Value.Value);else PlayerPrefs.DeleteKey(pair.Key);
             if(_hadMute)PlayerPrefs.SetInt("HexWars.MuteAll",_wasMuted?1:0);else PlayerPrefs.DeleteKey("HexWars.MuteAll");
+            if(_hadGameMusic)PlayerPrefs.SetInt("HexWars.MusicDuringGame",_gameMusic?1:0);else PlayerPrefs.DeleteKey("HexWars.MusicDuringGame");
             PlayerPrefs.Save();SoundManager.Muted=_demoMuted;AudioListener.volume=_listenerVolume;
             yield return null;
         }
         void Tick(float dt) => typeof(SoundMixDriver).GetMethod("Tick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(_driver,new object[]{dt});
         AudioSource Source(string name)=>_host.transform.Find(name).GetComponent<AudioSource>();
+
+        [UnityTest]
+        public IEnumerator MusicContinuesAtTheSamePositionAcrossTitleAndMatchWhenEnabled()
+        {
+            SoundSettings.MusicDuringGame = true;
+            SoundManager.StartTitleMusic(); Tick(1); yield return null;
+            var music = Source("Music");
+            Assert.That(music.isPlaying, Is.True);
+            var clip = music.clip;
+            music.time = 8f;
+            SoundManager.StopTitleMusic(); SoundManager.StartAmbience(); Tick(1);
+            Assert.That(music.isPlaying, Is.True);
+            Assert.That(music.clip, Is.SameAs(clip));
+            Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f), "Entering a match must not restart the theme.");
+            Assert.That(Source("Ambience").isPlaying, Is.True);
+            SoundManager.StartTitleMusic(); SoundManager.StopAmbience(); Tick(3);
+            Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f), "Returning to the title must keep the playhead too.");
+            Assert.That(Source("Ambience").isPlaying, Is.False);
+        }
+
+        [UnityTest]
+        public IEnumerator GameMusicIsOptionalAndChangesLiveWithoutChangingOtherBuses()
+        {
+            Assert.That(SoundSettings.MusicDuringGame, Is.False);
+            SoundManager.StartTitleMusic(); Tick(1); yield return null;
+            Assert.That(Source("Music").isPlaying, Is.True, "The existing title default is retained.");
+            SoundManager.StopTitleMusic(); SoundManager.StartAmbience(); Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False, "Music stays title-only until enabled.");
+            SoundSettings.MusicDuringGame = true; Tick(.25f);
+            Assert.That(Source("Music").isPlaying, Is.True);
+            Assert.That(Source("Music").volume, Is.GreaterThan(0));
+            SoundSettings.Music = 0; Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False);
+            Assert.That(Source("Ambience").isPlaying, Is.True);
+            Assert.That(_driver.Play("move", _longClip, 1, 0, 1), Is.True);
+            SoundSettings.Music = .5f; Tick(.25f);
+            SoundSettings.MuteAll = true; Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False);
+            Assert.That(SoundSettings.MusicDuringGame, Is.True);
+            SoundSettings.MuteAll = false; Tick(.25f);
+            Assert.That(Source("Music").isPlaying, Is.True);
+            SoundSettings.MusicDuringGame = false; Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False);
+            Assert.That(Source("Ambience").isPlaying, Is.True);
+            Assert.That(SoundSettings.Music, Is.EqualTo(.5f));
+            Assert.That(SoundSettings.Effects, Is.EqualTo(1));
+        }
 
         [UnityTest]
         public IEnumerator MovementUsesDifferentRecordedTakesWithoutChangingGameplayRandomness()

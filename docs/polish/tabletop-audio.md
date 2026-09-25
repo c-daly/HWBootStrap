@@ -11,6 +11,18 @@ Turn, claim and match-complete cues use quiet piano notes. The title has a new, 
 arrangement: a small melody, open voicings and pauses between phrases, with a continuous one-minute
 loop. Board ambience and the workshop bed retain their existing recordings and levels.
 
+**Music during a match:** open Menu and enable **Music during game** below the music volume.
+The choice is saved, takes effect immediately, and keeps the same track position when moving
+between the title and a match. Music volume and mute still apply independently of effects and
+ambience. The default remains title-only.
+
+The title arrangement is still provisional. The next piano audition should prioritize a rich,
+soft, pleasant instrument tone, with the mood free to vary. User-supplied listening references:
+[Van Gogh](https://music.youtube.com/watch?v=X9PBCSlhaY4),
+[Along the River](https://music.youtube.com/watch?v=1a--sJ_Z9RQ), and
+[La Rive Gauche](https://music.youtube.com/watch?v=0bQkPbV0XmE).
+These are references only; their recordings are not included in the game.
+
 Open [the sound study](http://localhost:8196/sound-study/). Try **Move several pieces**, compare the
 shots with **Previous / New**, then use **Play new theme** and **Hear the loop join**. Previous means
 the last merged sound pass. The effects match the game samples; the title preview includes the
