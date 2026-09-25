@@ -11,10 +11,10 @@ namespace HexWars.Presentation
         static readonly Mesh[] Bodies = new Mesh[8];
         static readonly Mesh[] RunningGear = new Mesh[8], Details = new Mesh[8], Lamps = new Mesh[8];
         static Material _rubber, _trim;
-        static readonly RenderTexture[,] Portraits = new RenderTexture[2, 8];
+        static readonly RenderTexture[,,] Portraits = new RenderTexture[2, 2, 8];
         static int _lastPortraitFrame = -1;
         static Mesh _foot, _rim, _brokenRim;
-        static Material _graphite, _base, _mint, _amber;
+        static Material _mintHull, _amberHull, _base, _mint, _amber;
 
         static Material Material(ref Material cache, Color color)
         {
@@ -27,7 +27,10 @@ namespace HexWars.Presentation
         }
         public static Color Mint => new Color32(128, 217, 196, 255);
         public static Color Amber => new Color32(240, 165, 126, 255);
-        static Material BodyMaterial => Material(ref _graphite, new Color32(132, 153, 165, 255));
+        public static Color TeamColor(PlayerId owner) => owner == PlayerId.Player0 ? Mint : Amber;
+        static Material BodyMaterial(PlayerId owner) => owner == PlayerId.Player0
+            ? Material(ref _mintHull, new Color32(115, 200, 181, 255))
+            : Material(ref _amberHull, new Color32(224, 137, 84, 255));
         static Material FootMaterial => Material(ref _base, new Color32(37, 52, 61, 255));
         static Material TeamMaterial(PlayerId owner) => owner == PlayerId.Player0
             ? Material(ref _mint, Mint) : Material(ref _amber, Amber);
@@ -38,11 +41,11 @@ namespace HexWars.Presentation
             var root = new GameObject("Art_" + UnitArt.Ids[index]);
             root.transform.SetParent(parent, false);
             if (_foot == null) _foot = Lathe(new[] { new Vector2(.48f, .03f), new Vector2(.56f, .08f), new Vector2(.56f, .15f), new Vector2(.48f, .21f) }, 32);
-            if (_rim == null) _rim = Ring(.535f, .022f, 48, false);
-            if (_brokenRim == null) _brokenRim = Ring(.535f, .022f, 48, true);
+            if (_rim == null) _rim = Ring(.57f, .047f, 48, false);
+            if (_brokenRim == null) _brokenRim = Ring(.57f, .047f, 48, true);
             Part(root.transform, "Foot", _foot, FootMaterial, Vector3.zero);
             Part(root.transform, "TeamRim", owner == PlayerId.Player0 ? _rim : _brokenRim, TeamMaterial(owner), new Vector3(0, .17f, 0));
-            Part(root.transform, "Graphite", Body(index), BodyMaterial, Vector3.zero);
+            Part(root.transform, "Graphite", Body(index), BodyMaterial(owner), Vector3.zero);
             Part(root.transform, "RunningGear", RunningGear[index], Material(ref _rubber, new Color32(27, 39, 49, 255)), Vector3.zero);
             Part(root.transform, "MachinedEdges", Details[index], Material(ref _trim, new Color32(178, 193, 198, 255)), Vector3.zero);
             Part(root.transform, "Sensors", Lamps[index], TeamMaterial(owner), Vector3.zero);
@@ -219,22 +222,22 @@ namespace HexWars.Presentation
         static void Dispose(Object o) { if(Application.isPlaying) Object.Destroy(o); else Object.DestroyImmediate(o); }
 
         /// <summary>Visible UI requests portraits lazily; at most one uncached portrait renders per frame.</summary>
-        public static bool TryGetPortrait(int index, bool detailed, out Texture portrait)
+        public static bool TryGetPortrait(int index, bool detailed, out Texture portrait, PlayerId owner = PlayerId.Player0)
         {
             int tier = detailed ? 1 : 0;
-            portrait = Portraits[tier, index];
+            portrait = Portraits[tier, (int)owner, index];
             if (portrait != null) return true;
             if (SystemInfo.graphicsDeviceType == GraphicsDeviceType.Null || _lastPortraitFrame == Time.frameCount)
                 return false;
             _lastPortraitFrame = Time.frameCount;
-            portrait = Portraits[tier, index] = RenderPortrait(index, detailed ? 512 : 128);
+            portrait = Portraits[tier, (int)owner, index] = RenderPortrait(index, detailed ? 512 : 128, owner);
             return true;
         }
 
         // Keep the rendered image on the GPU: RawImage can use it directly without ReadPixels.
-        static RenderTexture RenderPortrait(int index, int size)
+        static RenderTexture RenderPortrait(int index, int size, PlayerId owner)
         {
-            var root = Build(UnitArt.Ids[index], PlayerId.Player0, null);
+            var root = Build(UnitArt.Ids[index], owner, null);
             root.transform.position = new Vector3(10000,10000,10000);
             foreach(var t in root.GetComponentsInChildren<Transform>()) t.gameObject.layer=31;
             var go = new GameObject("Piece portrait camera");
@@ -246,7 +249,7 @@ namespace HexWars.Presentation
             go.transform.position=center+new Vector3(2.5f,2.3f,4);
             go.transform.LookAt(center);
             var rt = new RenderTexture(size, size, 24, RenderTextureFormat.ARGB32)
-            { name = UnitArt.Names[index] + " portrait " + size };
+            { name = UnitArt.Names[index] + " " + owner + " portrait " + size };
             var previous=RenderTexture.active;
             try
             {

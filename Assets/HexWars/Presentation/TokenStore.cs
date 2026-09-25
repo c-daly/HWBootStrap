@@ -198,6 +198,14 @@ namespace HexWars.Presentation
             bar.transform.SetParent(token.transform, false);
             bar.transform.localPosition = new Vector3(0f, 1.42f * _board.HexSize, 0f);
             bar.AddComponent<Billboard>();
+            var badge = new GameObject("Player number");
+            badge.transform.SetParent(bar.transform, false);
+            badge.transform.localPosition = new Vector3(-.57f * _board.HexSize, 0, -.015f);
+            var label = badge.AddComponent<TextMesh>();
+            label.text = ((int)unit.Owner + 1).ToString();
+            label.font = UiKit.Font(); badge.GetComponent<MeshRenderer>().sharedMaterial = label.font.material;
+            label.fontSize = 32; label.characterSize = .085f * _board.HexSize;
+            label.anchor = TextAnchor.MiddleCenter; label.color = GraphitePieces.TeamColor(unit.Owner);
 
             float hpBarW = _board.HexSize * 0.85f;
             _mpb = _mpb ?? new MaterialPropertyBlock();
@@ -217,12 +225,11 @@ namespace HexWars.Presentation
             token.transform.localScale = Vector3.one; // a fast-forward can kill a squash/pop tween mid-scale
             token.GetComponent<UnitView>().Unit = unit; // engine states are immutable: re-point every sync
             token.transform.Find("Disc").GetComponent<MeshRenderer>().sharedMaterial = discMat;
-            foreach (var r in token.GetComponentsInChildren<MeshRenderer>())
-                if (r.name == "TeamRim") r.sharedMaterial = discMat;
-            RefreshHpBar(token.transform.Find("HpBar"), unit.CurrentHp, unit.Stats.Health);
+            // Team hull/rim remain legible on both turns; only the under-disc conveys inactivity.
+            RefreshHpBar(token.transform.Find("HpBar"), unit.CurrentHp, unit.Stats.Health, unit.Owner);
         }
 
-        void RefreshHpBar(Transform bar, int cur, int max)
+        void RefreshHpBar(Transform bar, int cur, int max, PlayerId owner)
         {
             var refs = bar.GetComponent<HpBarRefs>();
             if (refs == null) return; // built by BuildToken; defensive only
@@ -236,7 +243,7 @@ namespace HexWars.Presentation
             refs.Fill.localPosition = new Vector3(fx, 0f, -0.01f);
             refs.Fill.localScale = new Vector3(fw, 0.11f, 1f);
 
-            var color = Color.Lerp(new Color(0.85f, 0.2f, 0.12f), new Color(0.25f, 0.85f, 0.25f), frac);
+            var color = GraphitePieces.TeamColor(owner);
             TintQuad(refs.FillRenderer, color);
         }
 

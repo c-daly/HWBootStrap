@@ -94,7 +94,9 @@ namespace HexWars.Presentation
                 var tv = col.GetComponent<TileView>();
                 var fillT = col.Find("Fill");
                 if (tv == null || fillT == null) continue;
-                var terrain = state.Board.TileAt(tv.Coord).Terrain;
+                var terrain = state.Config.BiomesEnabled ? state.Board.TileAt(tv.Coord).Terrain : TerrainType.Plains;
+                var detail = col.Find("Terrain detail");
+                if (detail != null) detail.gameObject.SetActive(state.Config.BiomesEnabled);
                 var owner = state.Board.Controller(tv.Coord);
                 fillT.GetComponent<MeshRenderer>().sharedMaterial =
                     owner == null ? MaterialFor(terrain) : ControlTintMaterial(terrain, owner.Value);

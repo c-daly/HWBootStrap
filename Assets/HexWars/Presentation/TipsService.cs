@@ -46,9 +46,9 @@ namespace HexWars.Presentation
         /// blocks input"), unlike the stat-reference popups callers reach directly via TipBubble.Show.</summary>
         public static void Show(string id, string text, Vector2? screenPos = null, string cta = null, System.Action onCta = null)
         {
-            if (!Enabled) return;
+            if (!Enabled || TipBubble.IsOpen) return;
             if (!_firedThisGame.Add(id)) return;
-            var pos = screenPos ?? new Vector2(Screen.width / 2f, Screen.height / 2f);
+            var pos = screenPos ?? new Vector2(210f, 150f);
             TipBubble.Show(text, pos, cta, onCta, modal: false);
         }
 

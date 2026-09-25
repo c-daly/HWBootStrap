@@ -10,6 +10,7 @@ namespace HexWars.Presentation
     /// the title via <see cref="GameBootstrap.ReturnToMenu"/>; online that disconnects the socket, and
     /// the seat is token-held server-side, so rejoining from the lobby within the hold window resumes.
     /// </summary>
+    [DefaultExecutionOrder(-1000)]
     public sealed class EscapeMenu : MonoBehaviour
     {
         GameBootstrap _game;
@@ -26,8 +27,35 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            var kb = DeviceInput.Allowed ? Keyboard.current : null;
-            if (kb != null && kb.escapeKey.wasPressedThisFrame && !UiKit.AnyInputOwnsFocus()) Toggle();
+            var kb = DeviceInput.FocusProbe() ? Keyboard.current : null;
+            if (kb != null && kb.escapeKey.wasPressedThisFrame && !UiKit.EscapeHandledThisFrame) HandleEscape();
+        }
+
+        public bool HandleEscape()
+        {
+            if (TryDismissContext()) { UiKit.MarkInputEscapeHandled(); return true; }
+            if (UiKit.AnyInputOwnsFocus()) return false; // Ordinary fields keep their cancel-edit behavior.
+            var input = FindAnyObjectByType<UnitInputController>();
+            if (input != null && (input.Destination.HasValue || input.TargetId >= 0)) input.ClearPreview();
+            else Toggle();
+            UiKit.MarkInputEscapeHandled();
+            return true;
+        }
+
+        public bool TryDismissContext()
+        {
+            // Dismiss exactly the topmost surface, immediately and without also opening the menu.
+            var collection = FindAnyObjectByType<GraphiteWorkshop>();
+            if (collection != null) { collection.Close(); return true; }
+            var hud = _game != null ? _game.GetComponent<TacticalHud>() : FindAnyObjectByType<TacticalHud>();
+            if (TacticalHud.ModalOpen && hud != null) { hud.CloseDialog(); return true; }
+            var rules = GameObject.Find("RulesCanvas");
+            if (rules != null) { rules.SetActive(false); Destroy(rules); return true; }
+            if (_overlay != null) { Close(); return true; }
+            if (GameObject.Find(GameOverBanner.RootName) != null) { GameOverBanner.Dismiss(); return true; }
+            if (TipBubble.IsOpen) { TipBubble.Dismiss(); return true; }
+            if (hud != null && hud.WorkshopOpen) { hud.SetWorkshop(false); return true; }
+            return false;
         }
 
         public void Toggle()
@@ -39,7 +67,7 @@ namespace HexWars.Presentation
 
         void Close()
         {
-            if (_overlay != null) Destroy(_overlay);
+            if (_overlay != null) { _overlay.SetActive(false); Destroy(_overlay); }
             _overlay = null;
         }
 

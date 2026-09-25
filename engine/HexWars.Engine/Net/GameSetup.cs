@@ -23,20 +23,21 @@ namespace HexWars.Engine
         public readonly int Strikers;   // with random roles (so all-zero = a fully random army)
         public readonly int Snipers;
         public readonly int TurnActions; // actions a player commits before auto-passing; 0 = whole army
+        public readonly bool ManualPlacement;
         public readonly bool Fog;        // hide enemy units outside your army's vision
 
         public GameSetup(GameMode mode, int width, int height, int startingPoints, int seed,
                          int armySize = 3, int brutes = 1, int strikers = 1, int snipers = 1, int turnActions = 0,
-                         bool fog = false)
+                         bool fog = false, bool manualPlacement = false)
         {
             Mode = mode; Width = width; Height = height; StartingPoints = startingPoints; Seed = seed;
             ArmySize = armySize; Brutes = brutes; Strikers = strikers; Snipers = snipers; TurnActions = turnActions;
-            Fog = fog;
+            Fog = fog; ManualPlacement = manualPlacement;
         }
 
         public static GameSetup Default => new GameSetup(GameMode.Annihilation, 9, 7, 0, 7);
 
-        public string ToWire() => $"{(int)Mode} {Width} {Height} {StartingPoints} {Seed} {ArmySize} {Brutes} {Strikers} {Snipers} {TurnActions} {(Fog ? 1 : 0)}";
+        public string ToWire() => $"{(int)Mode} {Width} {Height} {StartingPoints} {Seed} {ArmySize} {Brutes} {Strikers} {Snipers} {TurnActions} {(Fog ? 1 : 0)}" + (ManualPlacement ? " 1" : "");
 
         public static GameSetup Parse(string wire)
         {
@@ -44,7 +45,7 @@ namespace HexWars.Engine
             int G(int i, int def) => i < p.Length
                 && int.TryParse(p[i], NumberStyles.Integer, CultureInfo.InvariantCulture, out var v) ? v : def;
             return new GameSetup((GameMode)G(0, 0), G(1, 9), G(2, 7), G(3, 0), G(4, 7),
-                                 G(5, 3), G(6, 1), G(7, 1), G(8, 1), G(9, 0), G(10, 0) != 0);
+                                 G(5, 3), G(6, 1), G(7, 1), G(8, 1), G(9, 0), G(10, 0) != 0, G(11, 0) != 0);
         }
 
         /// <summary>Every field clamped to the lobby form's own ranges. GameFactory.Build calls this,
@@ -61,7 +62,7 @@ namespace HexWars.Engine
             Math.Clamp(Strikers, 0, 12),
             Math.Clamp(Snipers, 0, 12),
             Math.Max(0, TurnActions),
-            Fog);
+            Fog, ManualPlacement);
     }
 
     /// <summary>Builds a fresh <see cref="GameState"/> from a <see cref="GameSetup"/> — the one place that
@@ -81,7 +82,7 @@ namespace HexWars.Engine
                                       IReadOnlyList<UnitTemplate>? p0Barracks,
                                       IReadOnlyList<UnitTemplate>? p1Barracks,
                                       bool beginInDeployment = true) =>
-            BuildCore(setup, p0Barracks, p1Barracks, tacticalV3Compatible: false);
+            BuildCore(setup, p0Barracks, p1Barracks, tacticalV3Compatible: false, beginInDeployment);
 
         /// <summary>
         /// Builds the ordinary configurable annihilation match with the two command families that
@@ -100,7 +101,7 @@ namespace HexWars.Engine
             GameSetup setup,
             IReadOnlyList<UnitTemplate>? p0Barracks,
             IReadOnlyList<UnitTemplate>? p1Barracks,
-            bool tacticalV3Compatible)
+            bool tacticalV3Compatible, bool beginInDeployment = true)
         {
             setup = setup.Sanitized();
             if (tacticalV3Compatible &&
@@ -144,7 +145,8 @@ namespace HexWars.Engine
                                 CopyBarracks(p0Barracks), ref nextId);
             var p1 = SeedPlayer(board, PlayerId.Player1, setup.StartingPoints, army,
                                 CopyBarracks(p1Barracks), ref nextId);
-            return new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId);
+            return new GameState(board, config, new[] { p0, p1 }, PlayerId.Player0, 1, nextId,
+                placingStartingUnits: setup.ManualPlacement && beginInDeployment);
         }
 
         /// <summary>Build a territory game with an explicit ruleset (for balance experiments): same board and
@@ -189,7 +191,10 @@ namespace HexWars.Engine
             var flat = new List<HexCoord>();
             foreach (var c in board.DeploymentZone(id))
                 if (board.TileAt(c).Elevation == 0) flat.Add(c);
-            flat.Sort((x, y) => x.Q != y.Q ? x.Q - y.Q : x.R - y.R);
+            // Work inward from each player's own back edge. Reverse rows too, matching the
+            // board generator's offset-coordinate mirror (including even-width boards).
+            int direction = id == PlayerId.Player0 ? 1 : -1;
+            flat.Sort((x, y) => direction * (x.Q != y.Q ? x.Q.CompareTo(y.Q) : x.R.CompareTo(y.R)));
 
             var units = new List<Unit>();
             for (int i = 0; i < army.Length && i < flat.Count; i++)

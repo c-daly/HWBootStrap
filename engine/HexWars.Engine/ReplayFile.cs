@@ -42,7 +42,8 @@ namespace HexWars.Engine
             sb.Append("META ").Append(s.NextEntityId).Append(' ').Append((int)s.ActivePlayer).Append(' ').Append(s.Round)
               .Append(' ').Append(s.Config.BiomesEnabled ? 1 : 0)
               .Append(' ').Append(s.Config.TurnPolicy.ActionsPerTurn ?? 0)
-              .Append(' ').Append(TurnPolicyKind(s.Config.TurnPolicy)).Append('\n');
+              .Append(' ').Append(TurnPolicyKind(s.Config.TurnPolicy))
+              .Append(s.PlacingStartingUnits ? " 1" : "").Append('\n');
             var tiles = new List<Tile>(s.Board.Tiles);
             WriteConfig(sb, s.Config);
 
@@ -108,7 +109,8 @@ namespace HexWars.Engine
             var p0 = ReadPlayer(Next, PlayerId.Player0, art);
             var p1 = ReadPlayer(Next, PlayerId.Player1, art);
             var start = new GameState(board, BuildConfig(cfgKv, biomes, turnActions, turnPolicyKind),
-                new[] { p0, p1 }, active, round, nextId);
+                new[] { p0, p1 }, active, round, nextId,
+                placingStartingUnits: meta.Length > 7 && I(meta[7]) != 0);
 
             int cmdCount = int.Parse(Next().Split(' ')[1], CultureInfo.InvariantCulture);
             var commands = new List<Command>(cmdCount);

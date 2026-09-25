@@ -43,7 +43,7 @@ namespace HexWars.Presentation
                 UiKit.Label(button.transform,UnitArt.Names[i],0,-98,105,24,14,TextAnchor.MiddleCenter);
             }
             UiKit.Label(panel.transform,"MINT / PLAYER 1     ·     AMBER / PLAYER 2",267,-564,486,26,12,TextAnchor.MiddleLeft,UiKit.Accent);
-            UiKit.Label(panel.transform,"Player 2 uses a broken rim; Player 1 uses a solid rim.\nTeam identity also has a distinct shape.",267,-599,486,44,15,TextAnchor.UpperLeft,UiKit.TextDim);
+            UiKit.Label(panel.transform,"Team color covers the hull and health bar.\nPlayer 1: solid rim. Player 2: broken rim.",267,-599,486,44,15,TextAnchor.UpperLeft,UiKit.TextDim);
             var currentGame = GetComponent<GameBootstrap>();
             bool startMatch = _offerNewMatch || currentGame.State == null || currentGame.DemoMode;
             UiKit.Button(panel.transform,startMatch ? "Try on the battlefield" : "Return to match",267,-660,486,46,()=>
@@ -54,11 +54,11 @@ namespace HexWars.Presentation
             },UiKit.ButtonStyle.Cta,21);
             Select(0);
         }
-        internal static RawImage Portrait(Transform parent,int index,float x,float y,float size)
+        internal static RawImage Portrait(Transform parent,int index,float x,float y,float size, HexWars.Engine.PlayerId owner = HexWars.Engine.PlayerId.Player0)
         {
             var go=new GameObject("Portrait "+UnitArt.Names[index]);go.transform.SetParent(parent,false);
             var image=go.AddComponent<RawImage>();image.raycastTarget=false;
-            go.AddComponent<UnitPortrait>().SetArt(index, size > 128);
+            go.AddComponent<UnitPortrait>().SetArt(index, size > 128, owner);
             UiKit.SetRect(image.rectTransform,x,y,size,size);return image;
         }
         void Select(int i)
@@ -66,6 +66,7 @@ namespace HexWars.Presentation
             _hero.GetComponent<UnitPortrait>().SetArt(i, true);_name.text=UnitArt.Names[i];_description.text=Descriptions[i];
             for(int j=0;j<8;j++) UiKit.SetToggled(_choices[j],i==j);
         }
+        public void Close(){ if(_canvas!=null)_canvas.SetActive(false);IsOpen=false;Destroy(this); }
         void OnDestroy(){IsOpen=false;if(_canvas!=null)Destroy(_canvas);}
     }
 }

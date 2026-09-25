@@ -7,6 +7,18 @@ on the loader, title, collection and match header. Unit stats and damage arithme
 **Unit details**; compact squad cards keep the default view quiet. Material/theme
 descriptors are removed from the game screens; the eight form names remain.
 
+The latest build differentiates the armies with colored hulls and owner-correct portraits, mirrors
+Player 2's backline placement, hides inactive biomes, and marks attackable enemies before target
+selection. Movement previews label future shots separately. Double-clicking the previewed destination
+or enemy confirms the action; a single click still previews. The canvas no longer treats double-click
+as a fullscreen shortcut.
+
+**Place starting units** in setup allows both players to rearrange their army freely within their
+starting area, including raised hexes. Select a unit and double-click a highlighted empty hex, then
+press **Ready** when finished. Round one starts after both armies are ready. The default remains
+automatic placement; AI opponents keep that formation. Escape immediately dismisses help and the
+designer, and automatic tips are smaller and expire after six seconds.
+
 ## Run the committed build
 
 For local AI, hotseat and the unit collection, serve the static files from the repository root:
@@ -24,6 +36,8 @@ To use Browse/Host/room-code multiplayer, run the matching .NET server from
 `ASPNETCORE_ENVIRONMENT=Production` and `LOBBY_PROVIDER=Legacy` in that terminal first. Stop any
 static server already using the port. The .NET server serves the same `wwwroot` folder alongside
 the WebSocket routes. A static file server does not provide the multiplayer backend.
+Manual placement requires the matching updated clients and server because it adds setup commands
+and an optional replay flag. Custom Steam lobbies accept it; quick-v1 keeps automatic placement.
 
 Steam is optional in this mode, including Production: no `STEAM_APP_ID`, publisher key, database,
 public match URL or match build ID is required. `Legacy` is also the default when `LOBBY_PROVIDER`
@@ -36,8 +50,9 @@ This branch has not been deployed to the production site.
 
 ## Tactical implementation validation
 
+The latest [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) covers this revision.
 The [implementation receipt](evidence/tactical-implementation-checks.json) and
-[browser receipt](evidence/tactical-webgl-checks.json) cover this revision. The gameplay/UI walkthrough
+[browser receipt](evidence/tactical-webgl-checks.json) preserve the preceding implementation checks. The gameplay/UI walkthrough
 and actual Unity screenshots are in [gameplay-visual-language.md](gameplay-visual-language.md).
 The historical receipts below describe the earlier build; they are retained as earlier evidence.
 
@@ -56,8 +71,8 @@ The first browser validation found these types had been stripped, despite a succ
 the original build and browser log remain in `Library/GraphiteValidation/` for comparison.
 
 Portraits are requested only by visible UI, with at most one uncached render per frame. Buttons
-share 128×128 GPU textures; a 512×512 portrait is generated only when its form is inspected in the
-collection. RawImage displays the render texture directly, without a CPU pixel readback. This
+share 128×128 GPU textures per form and owner; a 512×512 portrait is generated only when its form
+is inspected. RawImage displays the render texture directly, without a CPU pixel readback. This
 addresses the startup work identified in PR #23's review.
 
 Manual appearance travels through command, catalog, deployment and replay data. Existing automatic

@@ -25,6 +25,7 @@ namespace HexWars.Presentation
         readonly List<int> _targets = new List<int>();
         GameState _lastState, _dialogState; int _lastSelected=-2, _lastArt=-1;
         Vector2 _size; bool _detailsOpen; bool _dirty=true, _lastWaiting; int _statusBits=-1;
+        bool _territoryLayout;
         const float W=348;
         static readonly Color Panel = new Color32(25,38,48,255);
         static readonly Color Line = new Color32(51,70,81,255);
@@ -43,7 +44,7 @@ namespace HexWars.Presentation
         void OnDestroy()
         {
             if(_game!=null){_game.StateChanged-=Dirty;_game.CommandRejected-=Dirty;}
-            if(_input!=null)_input.PresentationChanged-=Dirty;
+            if(_input!=null){_input.PresentationChanged-=Dirty;_input.SetTerritoryActionHost(null);}
             ModalOpen=false;if(_canvas!=null)Destroy(_canvas);if(_dialog!=null)Destroy(_dialog);
             if(Camera.main!=null)Camera.main.rect=new Rect(0,0,1,1);
         }
@@ -56,7 +57,7 @@ namespace HexWars.Presentation
             int status = (_game.Reconnecting?1:0) | (_input!=null&&_input.CanCommand?2:0)
                 | (_input!=null&&_input.AwaitingServer?4:0) | (_game.DemoMode?8:0);
             if(status!=_statusBits){_statusBits=status;_dirty=true;}
-            if(ModalOpen && DeviceInput.FocusProbe() && Keyboard.current!=null && Keyboard.current.escapeKey.wasPressedThisFrame)
+            if(ModalOpen && !UiKit.EscapeHandledThisFrame && DeviceInput.FocusProbe() && Keyboard.current!=null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {UiKit.MarkInputEscapeHandled();CloseDialog();}
             if(_dirty)Refresh();
         }
@@ -80,6 +81,8 @@ namespace HexWars.Presentation
 
         void Build()
         {
+            // Preserve the existing action button when a resize replaces the HUD canvas.
+            if(_input!=null)_input.SetTerritoryActionHost(null);
             if(_canvas!=null){_canvas.SetActive(false);Destroy(_canvas);}
             _squad.Clear();_lastState=null;_lastSelected=-2;_lastArt=-1;
             _canvas=UiKit.Canvas("TacticalHUD",UiKit.OrderPanels-10,transform);
@@ -104,8 +107,10 @@ namespace HexWars.Presentation
             Button(bar.transform,"Game menu","Menu",width-108,13,84,32,()=>FindAnyObjectByType<EscapeMenu>()?.Toggle(),14);
             float panelY=narrow?height*.51f:76,panelH=narrow?height*.49f-16:height-99;
             float panelW=narrow?width-32:W;
+            _territoryLayout=_game.State!=null&&_game.State.Config.TerritoryMode&&!_game.State.PlacingStartingUnits;
+            float territoryHeight=_territoryLayout?64:0;
             _panel=Surface(_canvas.transform,"Selected unit panel",narrow?16:width-W-24,panelY,panelW,panelH,Panel).rectTransform;
-            var viewport=Surface(_panel,"Decision scroll",0,0,panelW,panelH-161,Panel);
+            var viewport=Surface(_panel,"Decision scroll",0,0,panelW,panelH-161-territoryHeight,Panel);
             viewport.gameObject.AddComponent<RectMask2D>();var scroll=viewport.gameObject.AddComponent<ScrollRect>();
             scroll.horizontal=false;scroll.vertical=true;scroll.viewport=viewport.rectTransform;scroll.movementType=ScrollRect.MovementType.Clamped;
             var content=new GameObject("Decision content",typeof(RectTransform));content.transform.SetParent(viewport.transform,false);
@@ -137,8 +142,14 @@ namespace HexWars.Presentation
             _previous=Button(body,"Previous preview","<",20,530+extra,38,30,()=>Cycle(-1),14);
             _cycleLabel=Label(body,"Choose on the board",67,530+extra,panelW-134,30,12,Muted);
             _next=Button(body,"Next preview",">",panelW-58,530+extra,38,30,()=>Cycle(1),14);
-            _confirm=Button(_panel,"Confirm action","Choose a target",20,panelH-146,panelW-40,44,()=>_input?.ConfirmPreview(),17);
-            _note=Label(_panel,"",20,panelH-96,panelW-40,27,12,Muted);_note.alignment=TextAnchor.MiddleCenter;
+            _confirm=Button(_panel,"Confirm action","Choose a target",20,panelH-146-territoryHeight,panelW-40,44,()=>_input?.ConfirmPreview(),17);
+            _note=Label(_panel,"",20,panelH-96-territoryHeight,panelW-40,27,12,Muted);_note.alignment=TextAnchor.MiddleCenter;
+            if(_territoryLayout)
+            {
+                var territory=Surface(_panel,"Territory action",20,panelH-124,panelW-40,56,Panel);
+                territory.raycastTarget=false;
+                if(_input!=null)_input.SetTerritoryActionHost(territory.rectTransform);
+            }
             Surface(_panel,"End divider",20,panelH-59,panelW-40,1,Line);
             _left=Label(_panel,"",20,panelH-50,panelW-160,36,13,Muted);
             _end=Button(_panel,"End turn","End turn",panelW-132,panelH-48,112,35,RequestEndTurn,15);
@@ -173,27 +184,40 @@ namespace HexWars.Presentation
             _input?.ClearPreview();_dirty=true;
         }
 
-        PlayerId Seat => _game.FogViewer()??_game.State.ActivePlayer;
+        PlayerId Seat
+        {
+            get
+            {
+                if(_game.Networked) return _game.Seat??_game.State.ActivePlayer;
+                var ai=_game.GetComponent<AiOpponent>();
+                if(ai!=null) return ai.AiSeat==PlayerId.Player0?PlayerId.Player1:PlayerId.Player0;
+                return _game.State.ActivePlayer;
+            }
+        }
         void Refresh()
         {
             _dirty=false;bool active=_game.State!=null&&!_game.DemoMode;
+            if(active&&_territoryLayout!=(_game.State.Config.TerritoryMode&&!_game.State.PlacingStartingUnits))Build();
             _canvas.SetActive(active);ApplyCamera();if(!active){CloseDialog();return;}
             var s=_game.State;bool changed=!ReferenceEquals(_lastState,s);
+            bool battleStarting=_lastState!=null&&_lastState.PlacingStartingUnits&&!s.PlacingStartingUnits;
             if(_dialog!=null&&!ReferenceEquals(_dialogState,s))CloseDialog();
+            if(s.PlacingStartingUnits&&WorkshopOpen)SetWorkshop(false);
             var viewer=Seat;bool waiting=_game.WaitingHumanSeat()!=null;
-            _turn.text=s.IsGameOver?"Match complete":_game.Reconnecting?"Reconnecting...":waiting?"Opponent's turn":_game.Networked||_game.GetComponent<AiOpponent>()!=null?"Your turn":$"Player {(int)s.ActivePlayer+1}'s turn";
-            _turn.color=waiting?Copper:GraphitePieces.Mint;
+            _turn.text=s.PlacingStartingUnits?$"Player {(int)s.ActivePlayer+1}: starting positions":s.IsGameOver?"Match complete":_game.Reconnecting?"Reconnecting...":waiting?"Opponent's turn":_game.Networked||_game.GetComponent<AiOpponent>()!=null?"Your turn":$"Player {(int)s.ActivePlayer+1}'s turn";
+            _turn.color=GraphitePieces.TeamColor(s.ActivePlayer);
             string pace=s.Config.TurnPolicy.RemainingActions(s)?.ToString();
-            _round.text=$"ROUND {s.Round:00}   /   {s.Player(viewer).Points} points"+(pace!=null?$"   /   {pace} actions left":"");
-            _mission.text=WorkshopOpen?"":s.Config.TerritoryMode?"Territory · control the battlefield":"Annihilation · eliminate the opposing army";
+            _round.text=s.PlacingStartingUnits?$"SETUP   /   {s.Player(viewer).Points} points":$"ROUND {s.Round:00}   /   {s.Player(viewer).Points} points"+(pace!=null?$"   /   {pace} actions left":"");
+            _mission.text=s.PlacingStartingUnits?"Arrange your army inside the highlighted starting area":WorkshopOpen?"":s.Config.TerritoryMode?"Territory · control the battlefield":"Annihilation · eliminate the opposing army";
             _panel.gameObject.SetActive(!WorkshopOpen);
             _workshop.GetComponentInChildren<Text>().text=WorkshopOpen?"Back to battle":"Design army";
-            _end.GetComponentInChildren<Text>().text=s.IsGameOver?"Main menu":"End turn";
+            _workshop.interactable=!s.PlacingStartingUnits;
+            _end.GetComponentInChildren<Text>().text=s.PlacingStartingUnits?"Ready":s.IsGameOver?"Main menu":"End turn";
             _end.interactable=s.IsGameOver||(_input!=null&&_input.CanCommand);
             if(changed||_lastSelected!=(_input?.SelectedId??-1)||_lastWaiting!=waiting)RebuildSquad();
             _lastState=s;_lastSelected=_input?.SelectedId??-1;_lastWaiting=waiting;
             if(_input==null)return;
-            if(changed && _input.SelectedId<0 && !waiting)
+            if(changed && !waiting && (_input.SelectedId<0 || battleStarting || (s.PlacingStartingUnits && _input.SelectedUnit?.Owner!=viewer)))
                 foreach(var first in s.Player(viewer).UnitsOnBoard) if(first.IsAlive){_input.SelectById(first.Id);break;}
             var chosen=_input.SelectedUnit;
             _confirm.interactable=false;_destinations.Clear();_targets.Clear();
@@ -209,11 +233,27 @@ namespace HexWars.Presentation
             }
             var u=chosen.Value;int artIndex=UnitArt.Index(UnitArt.Resolve(u.ArtId,u.Stats));
             _portrait.gameObject.SetActive(true);_health.gameObject.SetActive(true);
-            if(_lastArt!=artIndex){_lastArt=artIndex;_portrait.SetArt(artIndex,true);}
-            _role.text=u.Owner==viewer?"YOUR UNIT":"OPPONENT";
+            if(_lastArt!=artIndex||_portrait.Owner!=u.Owner){_lastArt=artIndex;_portrait.SetArt(artIndex,true,u.Owner);}
+            _role.color=_hp.color=_health.color=GraphitePieces.TeamColor(u.Owner);
+            _role.text=$"PLAYER {(int)u.Owner+1}  /  "+(u.Owner==viewer?"YOUR UNIT":"OPPONENT");
             _name.text=u.DisplayName;_hp.text=$"HULL   {u.CurrentHp} / {u.Stats.Health}";
             _health.rectTransform.sizeDelta=new Vector2((_panel.rect.width-40)*u.CurrentHp/Mathf.Max(1f,u.Stats.Health),4);
             _stats.text=$"{Roles.Dominant(u.Stats)} · Damage {u.Stats.Damage} · Defense {u.Stats.Defense}\nRange {u.Stats.Range} / arc {u.Stats.RangeArc} · Vision {u.Stats.Vision} / arc {u.Stats.VisionArc}\n"+(s.Config.BiomesEnabled?"Terrain bonuses enabled":"Terrain bonuses off");
+            if(s.PlacingStartingUnits)
+            {
+                if(_input.Mode!=UnitInputController.Intent.Move)_input.SetMode(UnitInputController.Intent.Move);
+                bool arrange=_input.CanCommand&&u.Owner==viewer;
+                _destinations.AddRange(_input.PlacementCells);
+                _move.interactable=_attack.interactable=false;_moveText.text="Place unit";_attackText.text="Battle not started";
+                _availability.text=waiting?"Opponent is arranging their army":"Free placement";
+                _decision.text="STARTING POSITION";_result.text="";_math.text="Select a unit, then choose an empty highlighted hex.";
+                _target.text=_input.Destination.HasValue?"Cell "+Cell(_input.Destination.Value):"Choose a starting hex";
+                _confirm.GetComponentInChildren<Text>().text="Place here";_confirm.interactable=arrange&&_input.Destination.HasValue;
+                _note.text="Double-click a hex to place. No movement or points spent.";
+                _context.text="Raised hexes are available too. Select Ready when your army is arranged.";
+                _left.text="Arrange your army";_previous.interactable=_next.interactable=arrange&&_destinations.Count>0;
+                _cycleLabel.text=$"{_destinations.Count} starting hexes";return;
+            }
             bool spent=TacticalForecast.HasAttacked(s,u.Id),mine=u.Owner==viewer,command=_input.CanCommand&&mine;
             var budget=s.MovementSpent.TryGetValue(u.Id,out var used)?used:(H:0,V:0);
             int horizontal=spent?0:Math.Max(0,u.Stats.Movement-budget.H),vertical=spent?0:Math.Max(0,u.Stats.VerticalMovement-budget.V);
@@ -222,7 +262,7 @@ namespace HexWars.Presentation
             if(command)foreach(var candidate in AttackPreviewTargets.Resolve(s,u,null,viewer))
                 if(TacticalForecast.TryCreate(s,viewer,u.Id,candidate.UnitId,out _))_targets.Add(candidate.UnitId);
             _move.interactable=command&&_destinations.Count>0;_attack.interactable=command&&!spent;
-            _moveText.text=$"Move [M]\n{horizontal} move / {vertical} climb";_attackText.text=spent?"Attack [F]\nUsed":"Attack [F]";
+            _moveText.text=$"Move [M]\n{horizontal} move / {vertical} climb";_attackText.text=spent?"Attack [F]\nUsed":$"Attack [F]\n{_targets.Count} in range";
             _availability.text=!mine?"Opponent inspected":_input.AwaitingServer?"Waiting for server confirmation":waiting?"Waiting for your turn":spent?"Actions used":"";
             Tint(_move,_input.Mode==UnitInputController.Intent.Move?new Color(.20f,.38f,.34f):new Color(.15f,.21f,.25f));
             Tint(_attack,_input.Mode==UnitInputController.Intent.Attack?new Color(.39f,.28f,.22f):new Color(.15f,.21f,.25f));
@@ -233,7 +273,7 @@ namespace HexWars.Presentation
             _target.text=moving?"Choose a destination":"Choose a target";_result.text="";
             _math.text=spent?"This unit has already attacked.":"";
             _confirm.GetComponentInChildren<Text>().text=moving?"Choose a destination":spent?"Attack used":"Choose a target";
-            _context.text=$"Cell {Cell(u.Cell)} · Height {u.Elevation} · {s.Board.TileAt(u.Cell).Terrain}";
+            _context.text=$"Cell {Cell(u.Cell)} · Height {u.Elevation}"+(s.Config.BiomesEnabled?$" · {s.Board.TileAt(u.Cell).Terrain}":"");
             if(moving&&_input.LockedRoute!=null&&_input.Destination.HasValue)
             {
                 var route=_input.LockedRoute;string dest=Cell(_input.Destination.Value);
@@ -260,7 +300,9 @@ namespace HexWars.Presentation
 
         void RebuildSquad()
         {
-            foreach(var button in _squad)if(button!=null)Destroy(button.gameObject);_squad.Clear();
+            // Destroy is deferred until frame end; old-seat buttons must stop rendering and
+            // accepting input before their replacements are added in this same refresh.
+            foreach(var button in _squad)if(button!=null){button.gameObject.SetActive(false);Destroy(button.gameObject);}_squad.Clear();
             var s=_game.State;int canAct=0;float x=0;
             foreach(var u in s.Player(Seat).UnitsOnBoard)
             {
@@ -271,7 +313,7 @@ namespace HexWars.Presentation
                 if(canMove||canAttack)canAct++;
                 var b=Button(_squadContent,"Select unit "+id,"",x,0,186,66,()=>_input?.SelectById(id));_squad.Add(b);
                 Tint(b,_input!=null&&_input.SelectedId==id?new Color(.22f,.35f,.35f):Panel);
-                var p=GraphiteWorkshop.Portrait(b.transform,UnitArt.Index(UnitArt.Resolve(u.ArtId,u.Stats)),0,0,58);Place(p.rectTransform,2,2,58,58);
+                var p=GraphiteWorkshop.Portrait(b.transform,UnitArt.Index(UnitArt.Resolve(u.ArtId,u.Stats)),0,0,58,u.Owner);Place(p.rectTransform,2,2,58,58);
                 Label(b.transform,u.DisplayName,65,7,110,22,14);
                 Label(b.transform,$"{u.CurrentHp}/{u.Stats.Health}",65,32,55,22,12,Muted);
                 Glyph(b.transform,TacticalGlyph.Shape.Move,126,37,14,canMove?GraphitePieces.Mint:Line);
@@ -290,6 +332,7 @@ namespace HexWars.Presentation
         }
         void RequestEndTurn()
         {
+            if(_game.State.PlacingStartingUnits){_input?.FinishStartingPlacement();return;}
             if(_game.State.IsGameOver){_game.ReturnToMenu();return;}
             if(_input==null||!_input.CanCommand)return;
             _dialogState=_game.State;ModalOpen=true;
@@ -303,6 +346,6 @@ namespace HexWars.Presentation
             Button(r,"Confirm end turn","End turn",242,171,202,40,()=>
             {var expected=_dialogState;CloseDialog();if(ReferenceEquals(expected,_game.State)&&_input.CanCommand)_game.TryApply(new EndTurn(_game.State.ActivePlayer));},16);
         }
-        void CloseDialog(){ModalOpen=false;if(_dialog!=null){_dialog.SetActive(false);Destroy(_dialog);}_dialog=null;_dialogState=null;}
+        public void CloseDialog(){ModalOpen=false;if(_dialog!=null){_dialog.SetActive(false);Destroy(_dialog);}_dialog=null;_dialogState=null;}
     }
 }

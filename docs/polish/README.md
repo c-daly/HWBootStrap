@@ -2,12 +2,17 @@
 
 The [implemented tactical interface](gameplay-visual-language.md) gives the board more space,
 keeps the squad compact, and places full stats and combat arithmetic behind **Unit details**.
-Destinations and attacks require confirmation. The eight existing appearances now use recognizable
+A single click previews destinations and attacks; a double-click or the panel button confirms. The eight existing appearances now use recognizable
 machine forms, and the dark palette and H-in-hex mark remain.
+
+The latest pass adds distinct team hulls and portraits, mirrored backline starts, and automatic
+range markers. Biome colors and decoration are hidden while biome rules are disabled.
+Enable **Place starting units** in setup to arrange each army anywhere in its starting area before
+pressing **Ready**. Escape immediately dismisses help and the designer; coaching is smaller and brief.
 
 Open the [WebGL player instructions](webgl-preview.md) or the
 [Windows game launcher](<Open Tactical Game.cmd>). The [Windows build notes](windows-preview.md)
-and [validation receipt](evidence/tactical-implementation-checks.json) describe what was tested.
+and [latest validation receipt](evidence/battlefield-clarity-checks.json) describe what was tested.
 
 The [original tactical study](concept/tactical.html) remains an illustrative browser fixture.
 The material below records earlier explorations and does not override the current direction.

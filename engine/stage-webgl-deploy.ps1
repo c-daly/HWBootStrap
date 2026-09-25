@@ -21,7 +21,12 @@ if (Test-Path (Join-Path $src "StreamingAssets")) {
 # keys by URL — after a redeploy a browser can pair an old cached .data with the new .wasm and die
 # at boot ("RuntimeError: memory access out of bounds" in callMain). A per-deploy ?v= makes every
 # build's URLs unique so old and new can never mix.
-$v = (Get-FileHash (Join-Path $dst "Build\WebGL.data.unityweb") -Algorithm SHA256).Hash.Substring(0, 8).ToLower()
+# Code-only builds may leave .data unchanged; bind the cache key to every payload, including wasm.
+$fingerprint = [string]::Join('', @(Get-ChildItem (Join-Path $dst 'Build') -File | Sort-Object Name | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }))
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $v = ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($fingerprint)))).Replace('-', '').Substring(0, 8).ToLower()
+} finally { $sha.Dispose() }
 $idx = Join-Path $dst "index.html"
 # Read/write via System.IO with explicit BOM-less UTF-8: PowerShell 5.1's Get-Content decodes
 # BOM-less files through the SYSTEM CODEPAGE, mojibake-ing the template's own non-ASCII (the

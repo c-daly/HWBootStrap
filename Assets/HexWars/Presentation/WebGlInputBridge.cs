@@ -69,6 +69,11 @@ namespace HexWars.Presentation
                     ClearSelection();
                     break;
                 case "cancel":
+                    var menu = FindAnyObjectByType<EscapeMenu>();
+                    if (menu != null && menu.TryDismissContext())
+                    {
+                        MarkNativeFinished(); UiKit.MarkInputEscapeHandled(); ClearSelection(); break;
+                    }
                     MarkNativeFinished();
                     UiKit.MarkInputEscapeHandled();
                     if (CancelRequested != null)

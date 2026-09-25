@@ -25,6 +25,7 @@ namespace HexWars.Presentation
         Text _appearance;
         string _artId = "";
         readonly Button[] _artButtons = new Button[8];
+        readonly UnitPortrait[] _artPortraits = new UnitPortrait[8];
         InputField _nameField;
         string _name = "";
         int _placeholderIdx;
@@ -51,7 +52,7 @@ namespace HexWars.Presentation
         {
             if (_game == null || _canvasGo == null) return;
             var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
-            if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
+            if (!UiKit.EscapeHandledThisFrame && DeviceInput.Allowed && UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
             {
                 if (Keyboard.current.escapeKey.wasPressedThisFrame)
                 {
@@ -73,6 +74,17 @@ namespace HexWars.Presentation
             {
                 _canvasGo.SetActive(!hidden);
                 if (hidden) SoundManager.StopDesignerHum(); else SoundManager.StartDesignerHum();
+            }
+
+            if (!hidden)
+            {
+                var ai = _game.GetComponent<AiOpponent>();
+                var owner = _game.Networked ? (_game.Seat ?? _game.State.ActivePlayer)
+                    : ai != null ? (ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0)
+                    : _game.State.ActivePlayer;
+                for (int i = 0; i < _artPortraits.Length; i++)
+                    if (_artPortraits[i] != null && _artPortraits[i].Owner != owner)
+                        _artPortraits[i].SetArt(i, false, owner);
             }
 
             if (TipsService.Enabled != _lastTipsEnabled)
@@ -154,7 +166,7 @@ namespace HexWars.Presentation
                 int choice=i; float x=-91.5f+(i%4)*61f, y=sy-78f-(i/4)*67f;
                 var button=UiKit.Button(panel,"",x,y,56f,61f,()=>SelectArt(UnitArt.Ids[choice]),UiKit.ButtonStyle.Secondary,10);
                 button.gameObject.name="Choose "+UnitArt.Names[i]; _artButtons[i]=button;
-                GraphiteWorkshop.Portrait(button.transform,i,0,-1f,43f);
+                _artPortraits[i] = GraphiteWorkshop.Portrait(button.transform,i,0,-1f,43f).GetComponent<UnitPortrait>();
                 UiKit.Label(button.transform,UnitArt.Names[i],0,-43f,56,17,10,TextAnchor.MiddleCenter);
             }
             UiKit.Button(panel,"Match role",-62f,sy-214f,118f,26f,()=>SelectArt(""),UiKit.ButtonStyle.Secondary,12);

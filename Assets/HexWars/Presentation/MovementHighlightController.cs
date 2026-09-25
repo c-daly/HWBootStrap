@@ -71,6 +71,13 @@ namespace HexWars.Presentation
             }
         }
 
+        public void ShowPlacement(GameState state, IReadOnlyList<HexCoord> cells, HexCoord? destination)
+        {
+            EnsureResources(); Clear();
+            foreach (var cell in cells)
+                AddRing(state, cell, destination == cell ? MovementHighlightKind.Destination : MovementHighlightKind.Reachable);
+        }
+
         public void Clear()
         {
             for (int i = 0; i < _pool.Count; i++)

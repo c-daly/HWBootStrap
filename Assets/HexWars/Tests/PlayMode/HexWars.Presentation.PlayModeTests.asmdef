@@ -3,6 +3,7 @@
     "rootNamespace": "HexWars.Presentation.PlayModeTests",
     "references": [
         "HexWars.Presentation",
+        "Unity.InputSystem",
         "UnityEngine.TestRunner",
         "UnityEditor.TestRunner"
     ],

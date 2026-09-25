@@ -240,8 +240,7 @@ namespace HexWars.Presentation
             int gained = State.Player(atk.Issuer).Points - prev.Player(atk.Issuer).Points;
             if (gained <= 0) return;
             TipsService.Show("first-bounty",
-                $"You earned {gained} points. A wall? A sniper? Eyes that see everything? Design your answer.",
-                cta: "Design your answer", onCta: OpenDesigner);
+                $"Unit destroyed. +{gained} points for your army.");
         }
 
         void OpenDesigner() => FindAnyObjectByType<DesignPanel>()?.Highlight();
@@ -312,7 +311,15 @@ namespace HexWars.Presentation
                     setup, p0Barracks, p1Barracks)
                 : GameFactory.Build(setup, p0Barracks, p1Barracks);
             if (vsAi && level == AiLevel.TrainedModel)
-                _ = new PlayableModelAdapter(nextState, PlayerId.Player1);
+            {
+                var preflight = nextState;
+                if (preflight.PlacingStartingUnits)
+                {
+                    preflight = GameEngine.Apply(preflight, new FinishPlacement(PlayerId.Player0)).NewState;
+                    preflight = GameEngine.Apply(preflight, new FinishPlacement(PlayerId.Player1)).NewState;
+                }
+                _ = new PlayableModelAdapter(preflight, PlayerId.Player1);
+            }
 
             // Do not tear down the title demo or publish a partial match until every model-specific
             // rule/table capacity has passed the exact observation preflight above.
@@ -357,7 +364,7 @@ namespace HexWars.Presentation
             var s = LastLocalSetup.Value;
             var reseeded = new GameSetup(s.Mode, s.Width, s.Height, s.StartingPoints,
                                          UnityEngine.Random.Range(1, 99999), s.ArmySize, s.Brutes, s.Strikers,
-                                         s.Snipers, s.TurnActions, s.Fog);
+                                         s.Snipers, s.TurnActions, s.Fog, s.ManualPlacement);
             StartLocalGame(reseeded, true, LastLocalAi);
         }
 

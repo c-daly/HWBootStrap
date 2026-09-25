@@ -36,12 +36,34 @@ namespace HexWars.Presentation
             game.StartLocalGame(new GameSetup(GameMode.Annihilation,5,5,200,7),false);
             yield return null;
             var attack=LegalMoves.For(game.State).OfType<AttackUnit>().FirstOrDefault();
-            if(attack!=null){input.SelectById(attack.AttackerId);input.PreviewAttack(attack.TargetId);yield return Capture(folder,"tactical-native-attack");}
-            else Debug.LogWarning("[TacticalCapture] No legal attack in capture seed.");
+            if(attack==null)
+            {
+                // Correctly mirrored backlines can start beyond range. Advance with a legal move.
+                foreach(var move in LegalMoves.For(game.State).OfType<MoveUnit>())
+                {
+                    var next=GameEngine.Apply(game.State,move);
+                    if(!next.Success)continue;
+                    attack=LegalMoves.For(next.NewState).OfType<AttackUnit>().FirstOrDefault();
+                    if(attack==null)continue;
+                    game.TryApply(move);game.Presenter.FastForward();break;
+                }
+            }
+            if(attack==null)throw new InvalidOperationException("Capture fixture has no reachable attack.");
+            input.SelectById(attack.AttackerId);input.SetMode(UnitInputController.Intent.Attack);
+            yield return Capture(folder,"tactical-native-range");
+            input.PreviewAttack(attack.TargetId);yield return Capture(folder,"tactical-native-attack");
+            input.ClearPreview();game.TryApply(new EndTurn(game.State.ActivePlayer));game.Presenter.FastForward();
+            input.SelectById(game.State.Player(PlayerId.Player1).UnitsOnBoard[0].Id);
+            yield return Capture(folder,"tactical-native-player2");
             GetComponent<TacticalHud>().SetWorkshop(true);
             FindAnyObjectByType<DesignPanel>().SelectArt("halo-01");TipBubble.Dismiss();
             yield return Capture(folder,"tactical-native-designer");
             GetComponent<TacticalHud>().SetWorkshop(false);
+            game.StartLocalGame(new GameSetup(GameMode.Annihilation,9,7,40,7,manualPlacement:true),false);
+            TipBubble.Dismiss();yield return null;
+            input.SelectById(game.State.Players[0].UnitsOnBoard[0].Id);
+            input.PreviewMove(input.PlacementCells.OrderByDescending(c=>game.State.Board.TileAt(c).Elevation).First());
+            yield return Capture(folder,"tactical-native-placement");
             GraphiteWorkshop.Open(game,false);yield return Capture(folder,"tactical-native-machines");
             Debug.Log("[TacticalCapture] Native evidence complete.");Application.Quit();
         }

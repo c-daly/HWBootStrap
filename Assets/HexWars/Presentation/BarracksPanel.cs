@@ -178,7 +178,7 @@ namespace HexWars.Presentation
                 rowText.alignment = TextAnchor.MiddleLeft;
                 UiKit.SetRect(rowText.rectTransform, 20f, -2f, 101f, 22f); // 9px side insets inside the button
                 int art = UnitArt.Index(UnitArt.Resolve(template.ArtId, template.Stats));
-                GraphiteWorkshop.Portrait(row.transform, art, -52f, -3f, 43f);
+                GraphiteWorkshop.Portrait(row.transform, art, -52f, -3f, 43f, seat);
                 UiKit.Label(row.transform, $"{UnitArt.Names[art]} · {cost} pt", 20f, -25f, 101f, 18f, 10,
                             TextAnchor.MiddleLeft, UiKit.TextDim);
                 UiKit.SetToggled(row, selected);

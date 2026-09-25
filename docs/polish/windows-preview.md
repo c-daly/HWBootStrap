@@ -5,6 +5,11 @@ Open [Open Tactical Game.cmd](<Open Tactical Game.cmd>) or
 This contains the new machine meshes and cleaner tactical interface. Use **Unit details** for full
 stats and attack arithmetic, **Design army** for creating/deploying units, and **Menu** for help,
 sound and Reduced motion. See [the walkthrough and screenshots](gameplay-visual-language.md).
+The latest build includes mint/copper team hulls and portraits, mirrored backlines, optional manual
+starting placement, gold range cues, direct double-click actions and immediate Escape dismissal.
+Biome decoration is hidden while its rules are off. Enable **Place starting units** in setup, arrange
+each army on empty highlighted hexes, then choose **Ready**. See the
+[latest validation receipt](evidence/battlefield-clarity-checks.json).
 
 Build it in Unity with **HexWars → Build Tactical Windows Preview**. This standalone preview does
 not require Steam; native Steam integration remains a separate configured build path.
