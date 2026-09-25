@@ -1,0 +1,108 @@
+{
+  "date": "2026-09-25T18:53:43.441488+00:00",
+  "source_commit": "9e796b8bcf209d2ba7d0b4a0e9a1c6cf8bd8f54a",
+  "base_commit": "cf4adbeda618216ae711cb6e93aedbd9693290e1",
+  "unity": "6000.5.0f1",
+  "tests": {
+    "edit-tests": {
+      "result": "Passed",
+      "total": "671",
+      "passed": "671",
+      "failed": "0",
+      "xml_sha256": "870c9ee067bfb33adc6c22d7216abbc01c38c7da425a0e654099767500975ae8"
+    },
+    "play-tests": {
+      "result": "Passed",
+      "total": "42",
+      "passed": "42",
+      "failed": "0",
+      "xml_sha256": "f31c934af3a5a9f7ac534f3b3316cad9a317f126d5d2492bfcf1fe0f5c639fb9"
+    }
+  },
+  "native": {
+    "result": "Succeeded",
+    "errors": 0,
+    "bytes": 116662350,
+    "build_log_sha256": "05b60745d6d916ffa79a75d50dd39f6b7933ec4c57b4ba49b9c7222c018683ef",
+    "gameplay_smoke": "Completed",
+    "player_log_sha256": "a15e998009f1ee4cdf8c877172561077a192c62295e589bb36a06c2ccc344797",
+    "exe_sha256": "e113b0d76537e3c1e41aa2623ae145e5869afb9095cf1771c10b43afc0e2918e",
+    "presentation_dll_sha256": "59a206a664945ba772d89acc8c8fb246827a7e199609fa88604b579162494bc2"
+  },
+  "webgl": {
+    "result": "Succeeded",
+    "errors": 0,
+    "bytes": 27577517,
+    "build_log_sha256": "94aa7e3fe3254ce5ff53d790fdb75548586dbce23e229473f1ed294af7a86fcd",
+    "cache_key": "c3d53aea",
+    "payloads": {
+      "WebGL.data.unityweb": {
+        "sha256": "e95b4649d4873b5ac088502014dd01f57c3d90466e329b515ea1d8c72b4eebc3",
+        "bytes": 10746879
+      },
+      "WebGL.framework.js.unityweb": {
+        "sha256": "139aafb87c8c9ff317899f934afa3ca134e1bb5ce143c54968c6229b6ac01a08",
+        "bytes": 80570
+      },
+      "WebGL.loader.js": {
+        "sha256": "80acf06701354ae9383e857f267d84fb7326fed74874e9f8fe6300641315d656",
+        "bytes": 48105
+      },
+      "WebGL.wasm.unityweb": {
+        "sha256": "a3f8639a746edfea7ac019bc8d6c23379b53a52f02b65dd5905a8bac73069bcc",
+        "bytes": 16696874
+      }
+    },
+    "staged_payloads_match_build": true
+  },
+  "retained_initial_findings": [
+    {
+      "receipt": "Library/TabletopAudio/first-import-play-tests.xml",
+      "passed": 41,
+      "failed": 1,
+      "finding": "Unity-decoded AttackHeavy_0 first sample was 0.00103759766, above the existing 0.0001 boundary limit.",
+      "resolution": "Correct the finite clip baseline and add 16ms/24ms silent guards; all 42 PlayMode tests then pass without changing the limit."
+    },
+    {
+      "receipt": "Library/TabletopAudio/first-audition-readiness.json",
+      "finding": "A fixed 80ms browser wait read currentTime=0 before the media clock advanced.",
+      "resolution": "Wait for actual playback progress; the complete audition run passes."
+    }
+  ],
+  "limits": [
+    "Subjective sound balance remains for user audition.",
+    "No live multiplayer acceptance or production deployment.",
+    "Earlier research/Gym suite remains outside this presentation-only validation."
+  ],
+  "samples": {
+    "receipt": "tabletop-sample-checks.json",
+    "effects": 25,
+    "movement_takes": 4,
+    "original_recordings_preserved": 17,
+    "repeated_render_identical": true
+  },
+  "audition": {
+    "receipt": "tabletop-audition-checks.json",
+    "errors": 0,
+    "failed_requests": 0,
+    "intentional_media_abort_on_escape": 1
+  },
+  "browser": {
+    "cache_key": "c3d53aea",
+    "errors": 0,
+    "failed_requests": 0,
+    "receipt": "tabletop-game-checks.json",
+    "new_title_buffer_seconds": 61.95083900226757,
+    "accepted_attack_and_move": true
+  },
+  "evidence_sha256": {
+    "tabletop-sample-checks.json": "02544935c5af55e9d960721405a63efbc14607025a0bcb47ce7919305c288e34",
+    "tabletop-audition-checks.json": "1088c6abd7f40bd8bcb480b75dabf613818a3e6d5f458e180cb619f94df7d889",
+    "tabletop-audition.png": "314cf8a9536ea48772cf65f6e7a9c61088aecde2e87020c53c5bd4a132ebeb4f",
+    "tabletop-game-checks.json": "1ae702f1c478058adf8973693c9f12d4f7320b942fed7807b99d3935365d3f88",
+    "tabletop-title-game.webm": "57f9269f45b696e0a1ce16f21c9ec98ab4b2d6569f278fe47ac2e6bc132fc1e4",
+    "tabletop-shot-game.webm": "73d4491376136bc1eef050302fc901b398978f903e963fb008d1991da66db269",
+    "tabletop-move-game.webm": "ba573684389534826e0308e1d5c4d0f09199a091d51f42133db27954f38b22f0",
+    "tabletop-game-move.png": "51ca3bff4342908bc4f43f2068cca3d6eafae88c8340abdab91adb92c8e9eb96"
+  }
+}

@@ -19,7 +19,7 @@ press **Ready** when finished. Round one starts after both armies are ready. The
 automatic placement; AI opponents keep that formation. Escape immediately dismisses help and the
 designer, and automatic tips are smaller and expire after six seconds.
 
-The [sound pass](sound-direction.md) is included: shorter and quieter effects, fading background
+The [tabletop sound pass](tabletop-audio.md) is included: shorter and quieter effects, fading background
 audio, and separate Master / Effects / Ambience / Music controls in **Menu**. The comparison page
 is served at `/sound-study/`.
 
