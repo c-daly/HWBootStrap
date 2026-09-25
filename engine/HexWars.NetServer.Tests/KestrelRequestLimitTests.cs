@@ -1,12 +1,16 @@
 using System.Net;
+using System.Diagnostics;
 using System.Net.Http.Headers;
 using System.Net.WebSockets;
 using System.Net.Sockets;
 using System.Text;
 using HexWars.NetServer.Hosting;
+using HexWars.NetServer.Tests.Fakes;
 using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Hosting;
 using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using NUnit.Framework;
@@ -27,9 +31,19 @@ namespace HexWars.NetServer.Tests
         WebApplication _app = null!;
         HttpClient _client = null!;
         Uri _origin = null!;
+        FakeTimeProvider _clock = null!;
+        int _initialTimers;
 
         [SetUp]
         public async Task StartOnALoopbackPort()
+        {
+            _clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+            await StartServer(_clock);
+            // Kestrel already owns timers; wait for the additional request-body deadline.
+            _initialTimers = _clock.ScheduledTimers;
+        }
+
+        async Task StartServer(TimeProvider time)
         {
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
             {
@@ -49,8 +63,13 @@ namespace HexWars.NetServer.Tests
             });
 
             builder.AddHexWarsServer();
+            builder.Services.AddSingleton(time);
             _app = builder.Build();
             _app.UseHexWarsServer();
+            _app.MapPost("/body-test", async (HttpRequest request) =>
+                Results.Bytes(Encoding.UTF8.GetBytes(await new StreamReader(request.Body).ReadToEndAsync())))
+                .WithHexWarsRequestBody();
+            _app.MapPost("/bodyless-test", () => "No body consumer");
 
             await _app.StartAsync();
 
@@ -71,7 +90,7 @@ namespace HexWars.NetServer.Tests
 
         static HttpRequestMessage Chunked(int bytes)
         {
-            var request = new HttpRequestMessage(HttpMethod.Post, "/games")
+            var request = new HttpRequestMessage(HttpMethod.Post, "/body-test")
             {
                 Content = new StreamContent(new UndeclaredLengthStream(new byte[bytes])),
             };
@@ -81,22 +100,140 @@ namespace HexWars.NetServer.Tests
             return request;
         }
 
-        [TestCase("GET", "/healthz")]
-        [TestCase("POST", "/games")]
-        public async Task AnUnfinishedChunkedBodyHasAnIndependentDeadline(string method, string path)
+        async Task<TcpClient> OpenUnfinishedBody(string method, string path)
         {
-            using var socket = new TcpClient();
+            var socket = new TcpClient();
             await socket.ConnectAsync(_origin.Host, _origin.Port);
-            await using NetworkStream stream = socket.GetStream();
+            NetworkStream stream = socket.GetStream();
             // A large enough first chunk to avoid the transport's minimum-rate deadline. The
             // application must stop waiting even though the client never sends the final chunk.
             string request = $"{method} {path} HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
                 + "Transfer-Encoding: chunked\r\n\r\n1000\r\n" + new string('x', 4096) + "\r\n";
             await stream.WriteAsync(Encoding.ASCII.GetBytes(request));
-            using var deadline = new CancellationTokenSource(RequestLimits.BodyReadTimeout + TimeSpan.FromSeconds(3));
-            using var reader = new StreamReader(stream);
+            return socket;
+        }
+
+        async Task WaitForBodyDeadline()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            while (_clock.ScheduledTimers <= _initialTimers) await Task.Delay(5, deadline.Token);
+        }
+
+        [TestCase("GET", "/healthz")]
+        [TestCase("POST", "/healthz")]
+        [TestCase("POST", "/no-such-route")]
+        [TestCase("POST", "/bodyless-test")]
+        [TestCase("PUT", "/body-test")]
+        public async Task AnUnfinishedBodyWithoutAConsumerIsRejectedImmediately(string method, string path)
+        {
+            using TcpClient socket = await OpenUnfinishedBody(method, path);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(socket.GetStream());
+            Assert.That(await reader.ReadLineAsync(deadline.Token), Does.Contain("400"));
+        }
+
+        [Test]
+        public async Task AnUnfinishedChunkedPostHasAnIndependentDeadline()
+        {
+            using TcpClient socket = await OpenUnfinishedBody("POST", "/body-test");
+            await WaitForBodyDeadline();
+            _clock.Advance(RequestLimits.BodyReadTimeout);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(socket.GetStream());
             string? response = await reader.ReadLineAsync(deadline.Token);
             Assert.That(response, Does.Contain("408"));
+        }
+
+        [Test]
+        public async Task AMaximumSizeUploadCanFinishJustBeforeItsApplicationDeadline()
+        {
+            using TcpClient socket = await OpenUnfinishedBody("POST", "/body-test");
+            await WaitForBodyDeadline();
+            _clock.Advance(RequestLimits.BodyReadTimeout - TimeSpan.FromMilliseconds(500));
+            int remaining = (int)RequestLimits.MaxRequestBodyBytes - 4096;
+            await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes(
+                $"{remaining:x}\r\n{new string('x', remaining)}\r\n0\r\n\r\n"));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(socket.GetStream());
+            Assert.That(await reader.ReadLineAsync(deadline.Token), Does.Contain("200"));
+        }
+
+        [Test]
+        public async Task AMaximumSizeUploadAtTheMinimumRateCompletes()
+        {
+            // Use elapsed wall time for both Kestrel's transport rate and the application's deadline.
+            // The controlled-clock tests above exercise cancellation without this deliberate wait.
+            await Stop();
+            await StartServer(TimeProvider.System);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port, deadline.Token);
+            NetworkStream stream = socket.GetStream();
+            var elapsed = Stopwatch.StartNew();
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                $"POST /body-test HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"), deadline.Token);
+
+            // Deliver 240 bytes per second for the full 16 KiB. Kestrel's grace period delays its
+            // first rate check; it does not exclude that time from the average. Absolute targets
+            // avoid accumulating timer overhead across the 69 writes.
+            int sent = 0;
+            while (sent < RequestLimits.MaxRequestBodyBytes)
+            {
+                TimeSpan target = TimeSpan.FromSeconds((double)sent / RequestLimits.MinimumBodyBytesPerSecond);
+                TimeSpan wait = target - elapsed.Elapsed;
+                if (wait > TimeSpan.Zero) await Task.Delay(wait, deadline.Token);
+                int take = (int)Math.Min(RequestLimits.MinimumBodyBytesPerSecond,
+                    RequestLimits.MaxRequestBodyBytes - sent);
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                    $"{take:x}\r\n{new string('x', take)}\r\n"), deadline.Token);
+                sent += take;
+            }
+            await stream.WriteAsync(Encoding.ASCII.GetBytes("0\r\n\r\n"), deadline.Token);
+
+            using var reader = new StreamReader(stream);
+            string response = await reader.ReadToEndAsync(deadline.Token);
+            Assert.That(response, Does.StartWith("HTTP/1.1 200"));
+            Assert.That(response, Does.EndWith(new string('x', (int)RequestLimits.MaxRequestBodyBytes)),
+                "the endpoint must receive every byte, including the final partial chunk");
+            Assert.That(elapsed.Elapsed, Is.GreaterThan(TimeSpan.FromSeconds(67)));
+        }
+
+        [TestCase(1)]
+        [TestCase(240)]
+        public async Task ChunkFramingDoesNotReduceThePayloadLimit(int chunkBytes)
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port, deadline.Token);
+            var wire = new StringBuilder(
+                $"POST /body-test HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+            for (int sent = 0; sent < RequestLimits.MaxRequestBodyBytes; sent += chunkBytes)
+            {
+                int take = (int)Math.Min(chunkBytes, RequestLimits.MaxRequestBodyBytes - sent);
+                wire.Append($"{take:x}\r\n{new string('x', take)}\r\n");
+            }
+            wire.Append("0\r\n\r\n");
+            await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes(wire.ToString()), deadline.Token);
+            using var reader = new StreamReader(socket.GetStream());
+            string response = await reader.ReadToEndAsync(deadline.Token);
+            Assert.That(response, Does.StartWith("HTTP/1.1 200"));
+            Assert.That(response, Does.EndWith(new string('x', (int)RequestLimits.MaxRequestBodyBytes)));
+        }
+
+        [Test]
+        public async Task ChunkFramingHasItsOwnTransportLimit()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port, deadline.Token);
+            string wire = $"POST /body-test HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n1;pad="
+                + new string('x', (int)RequestLimits.MaxChunkedRequestBytes) + "\r\nx\r\n0\r\n\r\n";
+            await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes(wire), deadline.Token);
+            using var reader = new StreamReader(socket.GetStream());
+            Assert.That(await reader.ReadLineAsync(deadline.Token), Does.Contain("413"));
         }
 
         [Test]
