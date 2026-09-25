@@ -354,35 +354,45 @@ namespace HexWars.NetServer.Configuration
                 }
             }
 
-            // The Steam stack needs real credentials; so does anything calling itself Production, even while
-            // it still only serves the legacy WebGL lobby.
-            bool requiresProductionStack = match.LobbyProvider.HasFlag(LobbyProviders.Steam) || env.IsProduction();
-            if (requiresProductionStack)
+            // Steam is optional for WebGL-only hosts, including Production. Enabling the Steam
+            // provider still requires its complete stack; Production validates optional deployment
+            // settings when supplied, without requiring unused services for the legacy lobby.
+            bool requiresSteamStack = match.LobbyProvider.HasFlag(LobbyProviders.Steam);
+            if (requiresSteamStack)
             {
                 if (IsPlaceholder(appIdRaw)) errors.Add(SteamAppIdKey + ": placeholder value");
                 else if (steam.AppId == 0) errors.Add(SteamAppIdKey + ": missing");
 
                 if (publisherKey is null) errors.Add(SteamPublisherWebApiKeyKey + ": missing");
                 else if (IsPlaceholder(publisherKey)) errors.Add(SteamPublisherWebApiKeyKey + ": placeholder value");
+            }
 
+            if (requiresSteamStack || (env.IsProduction() && databaseUrlRaw is not null))
+            {
                 if (databaseUrlRaw is null) errors.Add(DatabaseUrlKey + ": missing");
                 else if (IsPlaceholder(databaseUrlRaw)) errors.Add(DatabaseUrlKey + ": placeholder value");
                 else if (!IsUsableDatabaseUrl(databaseUrlRaw))
                     errors.Add(DatabaseUrlKey + ": not a valid PostgreSQL URL or connection string");
+            }
 
+            if (requiresSteamStack || (env.IsProduction() && publicBaseRaw is not null))
+            {
                 if (publicBaseRaw is null) errors.Add(MatchPublicBaseUrlKey + ": missing");
                 else if (IsPlaceholder(publicBaseRaw)) errors.Add(MatchPublicBaseUrlKey + ": placeholder value");
                 else if (publicBaseError is not null) errors.Add(publicBaseError);
                 else if (env.IsProduction()
                          && !string.Equals(match.PublicBaseUrl!.Scheme, Uri.UriSchemeHttps, StringComparison.OrdinalIgnoreCase))
                     errors.Add(MatchPublicBaseUrlKey + ": must use https in Production");
-
-                if (buildIdRaw is null) errors.Add(MatchBuildIdKey + ": missing");
-                else if (IsPlaceholder(buildIdRaw)) errors.Add(MatchBuildIdKey + ": placeholder value");
             }
             else if (publicBaseError is not null)
             {
                 errors.Add(publicBaseError);
+            }
+
+            if (requiresSteamStack || (env.IsProduction() && buildIdRaw is not null))
+            {
+                if (buildIdRaw is null) errors.Add(MatchBuildIdKey + ": missing");
+                else if (IsPlaceholder(buildIdRaw)) errors.Add(MatchBuildIdKey + ": placeholder value");
             }
 
             return new ConfigurationResult(steam, match, errors);

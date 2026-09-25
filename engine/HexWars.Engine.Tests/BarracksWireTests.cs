@@ -74,7 +74,7 @@ namespace HexWars.Engine.Tests
         private static IEnumerable<TestCaseData> MalformedPayloads()
         {
             yield return new TestCaseData("").SetName("Read_RejectsMissingVersion");
-            yield return new TestCaseData("V2").SetName("Read_RejectsUnknownVersion");
+            yield return new TestCaseData("V99").SetName("Read_RejectsUnknownVersion");
             yield return new TestCaseData("V1\nnot-base64!|1|2|3|4|5|6|7|8|9").SetName("Read_RejectsInvalidBase64Name");
             yield return new TestCaseData("V1\nQQ==|1|2|3|4|5|6|7|8").SetName("Read_RejectsTruncatedRecord");
             yield return new TestCaseData("V1\nQQ==|1|2|3|4|5|6|7|8|9|10").SetName("Read_RejectsRecordWithExtraField");

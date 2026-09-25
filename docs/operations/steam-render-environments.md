@@ -63,13 +63,13 @@ names, bound by the server configuration layer.
 
 | Variable | Type | Default | Required | Secret | Semantics |
 |---|---|---|---|---|---|
-| `STEAM_APP_ID` | uint | none | when Steam is enabled, or in Production | no | The Steamworks App ID that tickets and lobby metadata are validated against. |
-| `STEAM_PUBLISHER_WEB_API_KEY` | string | none | when Steam is enabled, or in Production | **YES** | Publisher Web API key. Exists only in the Render secret store and the server process. Never logged, never returned by any endpoint. |
+| `STEAM_APP_ID` | uint | none | when Steam is enabled | no | The Steamworks App ID that tickets and lobby metadata are validated against. |
+| `STEAM_PUBLISHER_WEB_API_KEY` | string | none | when Steam is enabled | **YES** | Publisher Web API key. Exists only in the Render secret store and the server process. Never logged, never returned by any endpoint. |
 | `STEAM_WEB_API_BASE_URL` | URL | `https://partner.steam-api.com` | no | no | Base URL for Steamworks Web API calls. Tests point this at a fake endpoint. |
-| `DATABASE_URL` | `postgres://` URI, or an Npgsql keyword/value string | none | when Steam is enabled, or in Production | **YES** | Postgres connection target. Only `host:port/db` may ever be echoed back; credentials never are. |
-| `MATCH_PUBLIC_BASE_URL` | absolute URL, https in Production, no credentials, query, or fragment | none | when Steam is enabled, or in Production | no | The externally reachable base URL. The server derives the websocket URL from it by mapping `http` to `ws` and `https` to `wss`, then appending `/ws/v2`. Startup rejects a value carrying userinfo, a query string, or a fragment, because this value is echoed into the environment report and logged; the report renders scheme, authority and path only. |
+| `DATABASE_URL` | `postgres://` URI, or an Npgsql keyword/value string | none | when Steam is enabled | **YES** | Postgres connection target. Only `host:port/db` may ever be echoed back; credentials never are. |
+| `MATCH_PUBLIC_BASE_URL` | absolute URL, https in Production, no credentials, query, or fragment | none | when Steam is enabled | no | The externally reachable base URL. The server derives the websocket URL from it by mapping `http` to `ws` and `https` to `wss`, then appending `/ws/v2`. Startup rejects a value carrying userinfo, a query string, or a fragment, because this value is echoed into the environment report and logged; the report renders scheme, authority and path only. |
 | `MATCH_JOIN_TOKEN_TTL_SECONDS` | int | `900` | no | no | Lifetime of an issued join credential. Valid range 60..86400. |
-| `MATCH_BUILD_ID` | string | none | yes | no | Identifies the running build. Falls back to `RENDER_GIT_COMMIT` when unset, so a Render deploy needs no value here; set it only to pin a build for a client compatibility window. |
+| `MATCH_BUILD_ID` | string | none | when Steam is enabled | no | Identifies the running build. Falls back to `RENDER_GIT_COMMIT` when unset, so a Render deploy needs no value here; set it only to pin a build for a client compatibility window. |
 | `RENDER_GIT_COMMIT` | string | set by Render | no | no | Not a HexWars setting. Read only as the fallback for `MATCH_BUILD_ID`, because a Blueprint has nowhere to write the commit it is about to deploy. An explicit `MATCH_BUILD_ID` always wins. |
 | `HEXWARS_VERIFY_DATABASE_URL` | postgres URI | unset | no | **YES** | Read only by the `verify-journals` verb, which never runs as part of the service. Points it at a restored backup without editing the `DATABASE_URL` the service runs on; falls back to `DATABASE_URL` when unset. See [Match recovery runbook](match-recovery-runbook.md). |
 | `MATCH_PROTOCOL_VERSION` | int | `2` | no | no | Wire protocol version advertised to clients and stored on each match. Must be one this build actually speaks (today: `2`); anything else fails startup. The number is written into every match row and compared against the number a later host carries, so a value this build has no code for does not fail now, it fails months from now as every match written under it becoming unrecoverable. |
@@ -147,8 +147,17 @@ changes deliberately rather than being worked around in the deployment.
 
 ## 5. Startup validation and the environment report
 
-Production startup **fails closed**. When the environment is Production, or when `LOBBY_PROVIDER` includes
-`Steam`, and any of `STEAM_APP_ID`, `STEAM_PUBLISHER_WEB_API_KEY`, `DATABASE_URL`, `MATCH_PUBLIC_BASE_URL`,
+Steam is optional for a WebGL-only service in every environment, including Production. Leave
+`LOBBY_PROVIDER` unset (the default is `Legacy`) or set it to `Legacy`. The browser client,
+`/games`, and `/ws` then work without a Steam App ID, publisher key, database, public match URL
+or match build ID. Steam match endpoints and `/ws/v2` are not mapped in this mode.
+
+Set `LOBBY_PROVIDER=Steam` or `Legacy,Steam` to enable Steam matchmaking and require its complete
+configuration. Production still validates optional database, public URL and build settings when
+provided, and preserves HTTPS rules for the public match URL. Keep `ASPNETCORE_ENVIRONMENT=Production`
+for deployed WebGL services; Development is not needed to make Steam optional.
+
+Steam hosting startup **fails closed**. When `LOBBY_PROVIDER` includes `Steam`, and any of `STEAM_APP_ID`, `STEAM_PUBLISHER_WEB_API_KEY`, `DATABASE_URL`, `MATCH_PUBLIC_BASE_URL`,
 or `MATCH_BUILD_ID` is missing or holds a placeholder, the process exits non-zero before serving traffic.
 The failure message names the offending **keys** only. It never prints a value, because the fastest way to
 leak a publisher key is to log it while complaining that it looks wrong.

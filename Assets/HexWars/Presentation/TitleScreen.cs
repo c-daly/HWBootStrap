@@ -156,7 +156,8 @@ namespace HexWars.Presentation
             UiKit.Stretch(plate.GetComponent<RectTransform>());
             plate.raycastTarget = false;
 
-            var word = UiKit.Label(col.transform, "HEXWARS", 0f, -34f, 520f, 70f, 58, TextAnchor.MiddleCenter, UiKit.Accent);
+            HexBrandMark.Add(col.transform, -191f, -45f, 48f);
+            var word = UiKit.Label(col.transform, "HEXWARS", 34f, -34f, 330f, 70f, 52, TextAnchor.MiddleCenter, UiKit.Accent);
             word.fontStyle = FontStyle.Bold;
             UiKit.Label(col.transform, "hex-grid tactics — design an army, take the field",
                         0f, -104f, 520f, 24f, UiKit.SizeBody, TextAnchor.MiddleCenter, UiKit.TextDim);
@@ -207,6 +208,8 @@ namespace HexWars.Presentation
             UiKit.Label(col.transform, "v" + Application.version + "   ·   local, AI, or online play",
                         0f, y - 6f, 520f, 22f, UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
 
+            var collection = UiKit.Button(_canvasGo.transform, "Unit collection", 0, 0, 180, 42, () => GraphiteWorkshop.Open(_game), UiKit.ButtonStyle.Secondary, 17);
+            var cr = collection.GetComponent<RectTransform>(); cr.anchorMin=cr.anchorMax=new Vector2(1,1); cr.pivot=new Vector2(1,1);cr.anchoredPosition=new Vector2(-20,-20);
             var tipsBtn = TipsService.BuildToggle(_canvasGo.transform, 0f, 0f);
             var trt = tipsBtn.GetComponent<RectTransform>();
             trt.anchorMin = trt.anchorMax = new Vector2(0f, 0f);

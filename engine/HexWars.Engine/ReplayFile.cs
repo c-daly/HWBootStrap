@@ -29,7 +29,16 @@ namespace HexWars.Engine
         public static string Write(GameState s, IReadOnlyList<Command> commands)
         {
             var sb = new StringBuilder();
-            sb.Append(Header).Append('\n');
+            bool art = false;
+            foreach (var p in s.Players)
+            {
+                foreach (var u in p.UnitsOnBoard) art |= !string.IsNullOrEmpty(u.ArtId);
+                foreach (var t in p.Barracks) art |= !string.IsNullOrEmpty(t.ArtId);
+            }
+            foreach (var c in commands)
+                art |= c is CreateUnit cu && !string.IsNullOrEmpty(cu.ArtId)
+                    || c is ReplaceTemplate rt && !string.IsNullOrEmpty(rt.ArtId);
+            sb.Append(art ? "HEXWARS-REPLAY 2" : Header).Append('\n');
             sb.Append("META ").Append(s.NextEntityId).Append(' ').Append((int)s.ActivePlayer).Append(' ').Append(s.Round)
               .Append(' ').Append(s.Config.BiomesEnabled ? 1 : 0)
               .Append(' ').Append(s.Config.TurnPolicy.ActionsPerTurn ?? 0)
@@ -46,8 +55,8 @@ namespace HexWars.Engine
             WriteControl(sb, "CONTROL0", s.Board, PlayerId.Player0);
             WriteControl(sb, "CONTROL1", s.Board, PlayerId.Player1);
 
-            WritePlayer(sb, s.Player(PlayerId.Player0));
-            WritePlayer(sb, s.Player(PlayerId.Player1));
+            WritePlayer(sb, s.Player(PlayerId.Player0), art);
+            WritePlayer(sb, s.Player(PlayerId.Player1), art);
 
             sb.Append("CMDS ").Append(commands.Count).Append('\n');
             foreach (var c in commands) sb.Append(WriteCommand(c)).Append('\n');
@@ -61,7 +70,9 @@ namespace HexWars.Engine
             string Next() { while (li < lines.Length && lines[li].Length == 0) li++; return lines[li++]; }
             string Peek() { while (li < lines.Length && lines[li].Length == 0) li++; return li < lines.Length ? lines[li] : ""; }
 
-            if (Next() != Header) throw new FormatException("not a HexWars replay");
+            string header = Next();
+            bool art = header == "HEXWARS-REPLAY 2";
+            if (header != Header && !art) throw new FormatException("not a HexWars replay");
 
             var meta = Next().Split(' '); // META nextId active round [biomes] [turnActions] [turnPolicyKind]
             int nextId = int.Parse(meta[1], CultureInfo.InvariantCulture);
@@ -94,8 +105,8 @@ namespace HexWars.Engine
 
             var board = new Board(tiles, zone0, zone1, control);
 
-            var p0 = ReadPlayer(Next, PlayerId.Player0);
-            var p1 = ReadPlayer(Next, PlayerId.Player1);
+            var p0 = ReadPlayer(Next, PlayerId.Player0, art);
+            var p1 = ReadPlayer(Next, PlayerId.Player1, art);
             var start = new GameState(board, BuildConfig(cfgKv, biomes, turnActions, turnPolicyKind),
                 new[] { p0, p1 }, active, round, nextId);
 
@@ -282,7 +293,7 @@ namespace HexWars.Engine
             return zone;
         }
 
-        private static void WritePlayer(StringBuilder sb, PlayerState p)
+        private static void WritePlayer(StringBuilder sb, PlayerState p, bool art)
         {
             sb.Append("PLAYER ").Append((int)p.Id).Append(' ').Append(p.Points)
               .Append(' ').Append(p.UnitsOnBoard.Count).Append(' ').Append(p.Generators.Count)
@@ -293,7 +304,9 @@ namespace HexWars.Engine
                 sb.Append("U ").Append(u.Id).Append(' ').Append((int)u.Owner).Append(' ');
                 AppendStats(sb, u.Stats);
                 sb.Append(' ').Append(u.Cell.Q).Append(' ').Append(u.Cell.R).Append(' ').Append(u.Elevation)
-                  .Append(' ').Append(CommandWire.EncodeName(u.Name)).Append('\n');
+                  .Append(' ').Append(CommandWire.EncodeName(u.Name));
+                if (art) sb.Append(' ').Append(u.ArtId);
+                sb.Append('\n');
             }
             foreach (var g in p.Generators)
                 sb.Append("G ").Append(g.Id).Append(' ').Append((int)g.Owner).Append(' ')
@@ -303,11 +316,12 @@ namespace HexWars.Engine
                 sb.Append("B ");
                 AppendStats(sb, b.Stats);
                 sb.Append(' ').Append(CommandWire.EncodeName(b.Name));
+                if (art) sb.Append(' ').Append(b.ArtId);
                 sb.Append('\n');
             }
         }
 
-        private static PlayerState ReadPlayer(Func<string> next, PlayerId expected)
+        private static PlayerState ReadPlayer(Func<string> next, PlayerId expected, bool art)
         {
             var head = next().Split(' ');           // PLAYER pid points unitCount genCount barracksCount
             int points = I(head[2]);
@@ -323,7 +337,7 @@ namespace HexWars.Engine
                 int id = I(p[1]); var owner = (PlayerId)I(p[2]);
                 var stats = ReadStats(p, 3);
                 string name = p.Length > 15 ? CommandWire.DecodeName(p[15]) : ""; // old payloads: no name token
-                unitList.Add(new Unit(id, owner, stats, new HexCoord(I(p[12]), I(p[13])), I(p[14]), name));
+                unitList.Add(new Unit(id, owner, stats, new HexCoord(I(p[12]), I(p[13])), I(p[14]), name, art ? p[16] : ""));
             }
             for (int i = 0; i < gens; i++)
             {
@@ -335,7 +349,7 @@ namespace HexWars.Engine
                 var p = next().Split(' ');            // B <9 stats> [name]
                 var stats = ReadStats(p, 1);
                 string name = p.Length > 10 ? CommandWire.DecodeName(p[10]) : ""; // old payloads: no name token
-                barracks.Add(new UnitTemplate(name, stats));
+                barracks.Add(new UnitTemplate(name, stats, art ? p[11] : ""));
             }
 
             return new PlayerState(expected, points, barracks, unitList, genList);

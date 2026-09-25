@@ -16,10 +16,14 @@ namespace HexWars.NetServer.Tests
     [TestFixture]
     public class LegacyWebSocketTests
     {
-        static WebApplicationFactory<Program> Factory(string? allowedWebOrigins = null) =>
+        static WebApplicationFactory<Program> Factory(string? allowedWebOrigins = null, string environment = "Development") =>
             new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
             {
-                builder.UseEnvironment("Development");
+                builder.UseEnvironment(environment);
+                builder.UseSetting("LOBBY_PROVIDER", "Legacy");
+                foreach (string key in new[] { "STEAM_APP_ID", "STEAM_PUBLISHER_WEB_API_KEY", "DATABASE_URL",
+                    "MATCH_PUBLIC_BASE_URL", "MATCH_BUILD_ID", "RENDER_GIT_COMMIT" })
+                    builder.UseSetting(key, "");
                 if (allowedWebOrigins is not null)
                     builder.UseSetting("ALLOWED_WEB_ORIGINS", allowedWebOrigins);
             });
@@ -90,18 +94,20 @@ namespace HexWars.NetServer.Tests
 
         /// <summary>The hub end to end through the real host: two sockets are seated, both hand in a
         /// barracks catalog, and the server deals the same START replay to both.</summary>
-        [Test]
-        public async Task TwoClientsInOneRoom_AreSeatedAndDealtTheSameStart()
+        [TestCase("Development")]
+        [TestCase("Production")]
+        public async Task TwoClientsInOneRoom_AreSeatedAndDealtTheSameStart(string environment)
         {
             string catalog = NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates));
-            using var factory = Factory();
+            using var factory = Factory(environment: environment);
+            string room = environment == "Production" ? "PLAYPROD" : "PLAYTHROUGH";
 
-            using var host = await ConnectAsync(factory, "PLAYTHROUGH", origin: null);
+            using var host = await ConnectAsync(factory, room, origin: "http://localhost");
             Assert.That(await ReceiveAsync(host), Is.EqualTo(NetProtocol.Seat(PlayerId.Player0)));
             Assert.That(await ReceiveAsync(host), Is.EqualTo(NetProtocol.CatalogRequest));
             await SendAsync(host, catalog);
 
-            using var guest = await ConnectAsync(factory, "PLAYTHROUGH", origin: null);
+            using var guest = await ConnectAsync(factory, room, origin: "http://localhost");
             Assert.That(await ReceiveAsync(guest), Is.EqualTo(NetProtocol.Seat(PlayerId.Player1)));
             Assert.That(await ReceiveAsync(guest), Is.EqualTo(NetProtocol.CatalogRequest));
             await SendAsync(guest, catalog);

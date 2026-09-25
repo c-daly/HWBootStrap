@@ -16,13 +16,14 @@ namespace HexWars.Engine
         public int Elevation { get; }
         public int CurrentHp { get; }
         public string Name { get; }
+        public string ArtId { get; }
 
         /// <summary>Create a fresh unit at full health. <paramref name="name"/> defaults to "" (no
         /// template name) — see <see cref="DisplayName"/> for the fallback shown to a player.</summary>
-        public Unit(int id, PlayerId owner, UnitStats stats, HexCoord cell, int elevation, string name = "")
-            : this(id, owner, stats, cell, elevation, stats.Health, name) { }
+        public Unit(int id, PlayerId owner, UnitStats stats, HexCoord cell, int elevation, string name = "", string artId = "")
+            : this(id, owner, stats, cell, elevation, stats.Health, name, artId) { }
 
-        private Unit(int id, PlayerId owner, UnitStats stats, HexCoord cell, int elevation, int currentHp, string name)
+        private Unit(int id, PlayerId owner, UnitStats stats, HexCoord cell, int elevation, int currentHp, string name, string artId)
         {
             Id = id;
             Owner = owner;
@@ -31,6 +32,7 @@ namespace HexWars.Engine
             Elevation = elevation;
             CurrentHp = currentHp;
             Name = name;
+            ArtId = UnitArt.Normalize(artId);
         }
 
         public bool IsAlive => CurrentHp > 0;
@@ -44,11 +46,11 @@ namespace HexWars.Engine
         {
             int hp = CurrentHp - amount;
             if (hp < 0) hp = 0;
-            return new Unit(Id, Owner, Stats, Cell, Elevation, hp, Name);
+            return new Unit(Id, Owner, Stats, Cell, Elevation, hp, Name, ArtId);
         }
 
         /// <summary>A copy moved to a new 3D position, keeping current health.</summary>
         public Unit WithCell(HexCoord cell, int elevation) =>
-            new Unit(Id, Owner, Stats, cell, elevation, CurrentHp, Name);
+            new Unit(Id, Owner, Stats, cell, elevation, CurrentHp, Name, ArtId);
     }
 }

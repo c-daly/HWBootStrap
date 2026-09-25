@@ -31,9 +31,8 @@ ENV PORT=8080
 # prevents ASP.NET Core default configuration providers from allocating inotify watchers on hosts
 # with a low per-user inotify limit (such as Render).
 ENV DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE=false
-# Fail closed by default: a container started with no environment at all is a production container, and
-# the configuration validation refuses to serve one that is missing its secrets rather than coming up
-# half configured. A development run overrides this explicitly.
+# Production transport/logging rules apply to both hosting modes. The default Legacy provider serves
+# WebGL without Steam credentials; LOBBY_PROVIDER=Steam enables and validates the full Steam stack.
 ENV ASPNETCORE_ENVIRONMENT=Production
 # Workstation GC on purpose. Server GC sizes its heaps per core and is the right default for a machine
 # that owns its CPUs; this runs one small instance on a shared plan, where per-core heaps cost resident
