@@ -96,6 +96,9 @@ namespace HexWars.Presentation.PlayModeTests
         [UnityTest]
         public IEnumerator MovementUsesDifferentRecordedTakesWithoutChangingGameplayRandomness()
         {
+            foreach (var name in new[] { "Move", "Move_1", "Move_2", "Move_3" })
+                Assert.That(Resources.Load<AudioClip>("Audio/Soft/" + name), Is.Not.Null,
+                    "The recorded movement take must be present: " + name);
             SoundManager.Muted = false;
             string previous = null;
             var heard = new HashSet<string>();

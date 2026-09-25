@@ -21,7 +21,27 @@ designer, and automatic tips are smaller and expire after six seconds.
 
 The [tabletop sound pass](tabletop-audio.md) is included: shorter and quieter effects, fading background
 audio, and separate Master / Effects / Ambience / Music controls in **Menu**. The comparison page
-is served at `/sound-study/`.
+is served at `/sound-study/`. **Music during game** optionally keeps the theme playing through
+matches, with a saved preference and immediate switching.
+
+## Deploy the audio feature branch without merging
+
+`codex/tabletop-audio-20260925` includes the earlier gameplay/UI changes, the Steam-optional web
+server, the audio changes and the compiled browser client. Deploy the whole branch or its latest
+commit, rather than cherry-picking the music-setting commit. Unity is not required on the web host.
+
+For the existing Render WebGL service, keep the repository root as the Docker context and use
+`./Dockerfile`. Set `LOBBY_PROVIDER=Legacy` and `INCLUDE_WEBGL=true`; leave unused Steam credentials
+and `DATABASE_URL` unset. Set `ALLOWED_WEB_ORIGINS` to the actual HTTPS site origin for browser
+multiplayer. The server exposes `/health/ready` for the health check.
+
+Use **Manual Deploy > Deploy a specific commit** with the feature branch's full SHA, or point the
+service's linked branch at `codex/tabletop-audio-20260925` and deploy its latest commit. The first
+method disables automatic deploys so another branch's next push cannot replace the preview.
+See [Render's deployment documentation](https://render.com/docs/deploys#deploying-a-specific-commit).
+
+The root `render.yaml` describes the separate Steam match services and databases; it is not the
+blueprint for this existing WebGL service. No PR merge is needed for this deployment.
 
 ## Run the committed build
 
