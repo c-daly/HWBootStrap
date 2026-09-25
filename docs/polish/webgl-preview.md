@@ -70,12 +70,13 @@ This startup fix changes only the server; the WebGL player bundle does not need 
 
 Steam lobbies, invitations and the persistent match-service entry flow still belong to the native
 Steam client. Browser guest accounts/invite links remain separate follow-up work.
-This branch has not been deployed to the production site.
+These checks do not trigger a production deployment.
 
 ## Tactical implementation validation
 
-The [integration receipt](evidence/polish-integration-checks.json) covers the current build and review
-fixes. The [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) preserves the prior checks.
+The [music-setting receipt](evidence/music-during-game-checks.json) covers the latest WebGL build,
+browser controls and clean branch deployment checks. The [integration receipt](evidence/polish-integration-checks.json)
+covers the preceding gameplay and review fixes. The [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) preserves the prior checks.
 The [implementation receipt](evidence/tactical-implementation-checks.json) and
 [browser receipt](evidence/tactical-webgl-checks.json) preserve the preceding implementation checks. The gameplay/UI walkthrough
 and actual Unity screenshots are in [gameplay-visual-language.md](gameplay-visual-language.md).

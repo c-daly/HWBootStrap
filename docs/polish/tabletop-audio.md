@@ -13,8 +13,17 @@ loop. Board ambience and the workshop bed retain their existing recordings and l
 
 **Music during a match:** open Menu and enable **Music during game** below the music volume.
 The choice is saved, takes effect immediately, and keeps the same track position when moving
-between the title and a match. Music volume and mute still apply independently of effects and
+between the title, setup, online waiting and a match. Music volume and mute still apply independently of effects and
 ambience. The default remains title-only.
+
+The [music-setting receipt](evidence/music-during-game-checks.json) records the latest web update:
+44 PlayMode tests pass, the rebuilt WebGL payload matches the staged files, and browser checks
+confirm live switching and the saved choice after reload. A clean export of the committed server
+publishes and serves those exact files in Production on .NET 8.0.28 without Steam credentials or
+a database. The Windows player and the broader suites below retain their earlier validation.
+See [branch deployment instructions](webgl-preview.md#deploy-the-audio-feature-branch-without-merging).
+
+![Music during game enabled in the match menu](evidence/music-during-game.png)
 
 The title arrangement is still provisional. The next piano audition should prioritize a rich,
 soft, pleasant instrument tone, with the mood free to vary. User-supplied listening references:
