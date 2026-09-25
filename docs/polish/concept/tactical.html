@@ -1,0 +1,323 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <title>HexWars — Tactical interface study</title>
+    <link rel="stylesheet" href="tactical.css" />
+    <script src="machine-art.js" defer></script>
+    <script src="tactical.js" defer></script>
+  </head>
+  <body>
+    <svg class="definitions" aria-hidden="true">
+      <defs>
+        <symbol id="h-mark" viewBox="0 0 40 44">
+          <path d="M20 2 38 12v20L20 42 2 32V12Z" />
+          <path d="M12 14v16m16-16v16M12 22h16" />
+        </symbol>
+        <symbol id="i-move" viewBox="0 0 24 24">
+          <path d="M4 17h6V7h10m-5-5 5 5-5 5" />
+        </symbol>
+        <symbol id="i-attack" viewBox="0 0 24 24">
+          <circle cx="12" cy="12" r="6" />
+          <path d="M12 1v5m0 12v5M1 12h5m12 0h5" />
+        </symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24">
+          <path d="m12 2 8 4v7l-8 9-8-9V6Z" />
+        </symbol>
+        <symbol id="i-height" viewBox="0 0 24 24">
+          <path d="M3 20h6v-6h6V8h6M12 4l4-3 4 3" />
+        </symbol>
+        <symbol id="i-eye" viewBox="0 0 24 24">
+          <path d="M2 12Q12-3 22 12 12 27 2 12Z" />
+          <circle cx="12" cy="12" r="3" />
+        </symbol>
+      </defs>
+    </svg>
+    <header class="topbar">
+      <a href="tactical.html" class="brand" aria-label="HexWars tactical study"
+        ><svg><use href="#h-mark" /></svg><span>HEXWARS</span></a
+      >
+      <div class="turn-banner">
+        <span class="live-dot"></span><strong id="turn-label">Your turn</strong
+        ><span class="round-label">ROUND <b id="round">04</b></span>
+      </div>
+      <div class="top-actions">
+        <span class="study-tag">Interactive UI study</span
+        ><button
+          class="icon-button"
+          id="help"
+          aria-label="Show visual guide"
+          title="Visual guide"
+        >
+          ?</button
+        ><button class="quiet" id="reset">Reset</button>
+      </div>
+    </header>
+    <main class="layout">
+      <section class="battle-area" aria-label="Battlefield">
+        <div class="field-heading">
+          <div>
+            <p class="eyebrow">SKIRMISH / 04</p>
+            <h1>The breakwater</h1>
+            <p class="mission">Eliminate the opposing units.</p>
+          </div>
+          <div class="army-count">
+            <span id="friendly-count">3</span><i>vs</i
+            ><span id="enemy-count">2</span><small>UNITS ON FIELD</small>
+          </div>
+        </div>
+        <div class="board-wrap">
+          <svg
+            id="board"
+            viewBox="0 85 880 515"
+            role="group"
+            aria-labelledby="board-title board-desc"
+          >
+            <title id="board-title">The breakwater battlefield</title>
+            <desc id="board-desc">
+              An interactive sample position. Select a friendly machine, preview
+              a move or target, then confirm the action. Buttons and keyboard
+              controls are also available in the unit panel.
+            </desc>
+            <defs>
+              <radialGradient id="stage-light">
+                <stop stop-color="#355665" stop-opacity=".32" />
+                <stop offset="1" stop-color="#101b25" stop-opacity="0" />
+              </radialGradient>
+              <linearGradient id="water-top" x2="1" y2="1">
+                <stop stop-color="#325a66" />
+                <stop offset="1" stop-color="#1d3c4d" />
+              </linearGradient>
+              <linearGradient id="stone-top" x2=".8" y2="1">
+                <stop stop-color="#66757b" />
+                <stop offset="1" stop-color="#435660" />
+              </linearGradient>
+              <linearGradient id="forest-top" x2="1" y2="1">
+                <stop stop-color="#617469" />
+                <stop offset="1" stop-color="#354e4c" />
+              </linearGradient>
+              <linearGradient id="plain-top" x2="1" y2="1">
+                <stop stop-color="#4b646d" />
+                <stop offset="1" stop-color="#354e59" />
+              </linearGradient>
+              <marker
+                id="route-arrow"
+                viewBox="0 0 10 10"
+                refX="8"
+                refY="5"
+                markerWidth="4"
+                markerHeight="4"
+                orient="auto-start-reverse"
+              >
+                <path d="M0 0 10 5 0 10Z" fill="#b5ead9" />
+              </marker>
+            </defs>
+            <ellipse
+              cx="449"
+              cy="343"
+              rx="440"
+              ry="300"
+              fill="url(#stage-light)"
+            />
+            <g class="survey-lines" fill="none">
+              <ellipse cx="453" cy="363" rx="360" ry="205" />
+              <ellipse
+                cx="453"
+                cy="363"
+                rx="375"
+                ry="218"
+                stroke-dasharray="2 16"
+              />
+              <path d="M65 363h46m687 0h30M453 115v20m0 427v35" />
+            </g>
+            <g id="terrain"></g>
+            <g id="routes" pointer-events="none"></g>
+            <g id="machines"></g>
+            <g id="board-labels" pointer-events="none"></g>
+          </svg>
+          <div class="board-caption">
+            <span class="coordinate" id="cell-info"
+              >HIGH GROUND / ELEVATION 2</span
+            ><span>Sample encounter · no online match</span>
+          </div>
+        </div>
+        <div class="context-strip">
+          <span class="cue-mark" id="context-icon">⌖</span>
+          <p id="context-hint">
+            Select the marked opponent to inspect the shot.
+          </p>
+          <button class="text-button" id="clear-preview">
+            Clear preview <kbd>Esc</kbd>
+          </button>
+        </div>
+        <section class="squad" aria-label="Your units">
+          <div class="squad-heading">
+            <h2>Your units</h2>
+            <span id="ready-count">3 can act</span
+            ><button class="text-button" id="open-workshop">
+              Edit appearance <span aria-hidden="true">↗</span>
+            </button>
+          </div>
+          <div class="squad-list" id="squad-list"></div>
+        </section>
+      </section>
+      <aside class="inspector" aria-label="Selected unit and action preview">
+        <section class="unit-summary">
+          <div class="unit-title">
+            <div>
+              <p class="eyebrow" id="unit-role">SNIPER / 01</p>
+              <h2 id="unit-name">Longshot</h2>
+            </div>
+            <span class="friendly-tag">YOUR UNIT</span>
+          </div>
+          <div class="portrait-stage">
+            <div id="unit-portrait"></div>
+            <span class="portrait-caption" id="form-caption"
+              >Lance · long-range gun</span
+            >
+          </div>
+          <div class="health-line">
+            <span>Hull integrity</span><strong id="unit-health">4 / 4</strong>
+          </div>
+          <div class="health-bar" id="unit-health-bar"></div>
+          <dl class="stat-grid" id="unit-stats"></dl>
+        </section>
+        <section class="action-section">
+          <div class="section-title">
+            <h3>This turn</h3>
+            <span id="availability">Move + attack ready</span>
+          </div>
+          <div class="action-tabs" aria-label="Choose an action">
+            <button id="move-mode" aria-pressed="false">
+              <svg><use href="#i-move" /></svg
+              ><span>Move<small id="move-remaining">2 steps left</small></span
+              ><kbd>M</kbd></button
+            ><button id="attack-mode" aria-pressed="true">
+              <svg><use href="#i-attack" /></svg
+              ><span>Attack<small id="attack-remaining">Ready</small></span
+              ><kbd>A</kbd>
+            </button>
+          </div>
+        </section>
+        <section
+          class="decision"
+          id="decision"
+          aria-label="Action preview"
+        ></section>
+        <div class="confirm-area">
+          <button class="commit-button" id="commit">
+            Fire · 3 damage <span>↗</span>
+          </button>
+          <p id="commit-note">Preview only until you confirm.</p>
+        </div>
+        <div class="turn-end">
+          <div>
+            <span id="remaining-summary">3 units can still act</span
+            ><small>Unused actions do not carry over.</small>
+          </div>
+          <button id="end-turn">End turn <span>→</span></button>
+        </div>
+      </aside>
+    </main>
+    <footer class="study-footer">
+      <span
+        ><i class="key-line friendly-key"></i> Yours · solid rim
+        <i class="key-line enemy-key"></i> Opponent · broken rim</span
+      ><span
+        ><i class="key-bracket"></i> Selected <i class="key-route"></i> Move
+        <i class="key-target"></i> Attack</span
+      ><button class="text-button" id="reduce-motion" aria-pressed="false">
+        Reduce motion
+      </button>
+    </footer>
+    <p class="sr-only" id="announcement" role="status" aria-live="polite"></p>
+    <dialog id="workshop-dialog" class="workshop-dialog">
+      <form method="dialog" class="dialog-top">
+        <div>
+          <p class="eyebrow">APPEARANCE</p>
+          <h2>Built for a purpose.</h2>
+        </div>
+        <button class="close-button" aria-label="Close appearance editor">
+          ×
+        </button>
+      </form>
+      <p class="dialog-copy">
+        Choose a machine for <strong id="editing-unit">Longshot</strong>. Its
+        stats and abilities stay the same.
+      </p>
+      <div class="machine-picker" id="machine-picker"></div>
+      <div class="workshop-bottom">
+        <p id="art-cue"></p>
+        <button class="primary" id="apply-art">Use this appearance</button>
+      </div>
+    </dialog>
+    <dialog id="guide-dialog" class="guide-dialog">
+      <form method="dialog" class="dialog-top">
+        <div>
+          <p class="eyebrow">FIELD GUIDE</p>
+          <h2>Read the next move.</h2>
+        </div>
+        <button class="close-button" aria-label="Close visual guide">×</button>
+      </form>
+      <div class="guide-grid">
+        <article>
+          <span class="guide-symbol selection-symbol">⌜ ⌝</span>
+          <h3>White brackets select.</h3>
+          <p>
+            They mark the active unit. Team identity stays on the chassis rim.
+          </p>
+        </article>
+        <article>
+          <svg class="guide-symbol"><use href="#i-move" /></svg>
+          <h3>Mint traces movement.</h3>
+          <p>
+            Outlined cells are reachable. A route and cost appear before you
+            commit.
+          </p>
+        </article>
+        <article>
+          <svg class="guide-symbol attack-symbol"><use href="#i-attack" /></svg>
+          <h3>Copper marks a shot.</h3>
+          <p>
+            Target brackets, the damage forecast and the Fire button describe
+            one action.
+          </p>
+        </article>
+        <article>
+          <svg class="guide-symbol"><use href="#i-height" /></svg>
+          <h3>Terrain explains itself.</h3>
+          <p>
+            Stepped sides show elevation. The preview reports height and cover
+            effects.
+          </p>
+        </article>
+      </div>
+      <p class="dialog-copy">
+        Choose a unit, press <kbd>M</kbd> or <kbd>A</kbd>, then choose a marked
+        cell or target. Confirm in the side panel. <kbd>Esc</kbd> clears a
+        preview. All actions also have buttons.
+      </p>
+      <p class="study-boundary">
+        This is an interactive visual study with a small local fixture.
+        Movement, combat, turn progression and appearance changes here do not
+        update your HexWars game or saved army.
+      </p>
+    </dialog>
+    <dialog id="turn-dialog" class="turn-dialog">
+      <form method="dialog" class="dialog-top">
+        <h2>Finish this turn?</h2>
+        <button class="close-button" aria-label="Keep playing">×</button>
+      </form>
+      <p id="turn-warning">Your units still have actions available.</p>
+      <p class="dialog-copy">
+        This study advances to your next turn without simulating an opponent.
+      </p>
+      <div class="dialog-actions">
+        <button id="keep-playing">Keep playing</button
+        ><button class="primary" id="confirm-end">End preview turn</button>
+      </div>
+    </dialog>
+  </body>
+</html>

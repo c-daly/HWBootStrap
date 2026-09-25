@@ -1,3 +1,12 @@
+# Latest: gameplay and visual language
+
+The [new tactical interface study](gameplay-visual-language.md) responds to the request for
+clearer gameplay cues, a more attractive UI and less abstract units. Open the
+[interactive preview](concept/tactical.html) or the
+[Windows launcher](<concept/Open Tactical Study.cmd>). It explores a focused unit panel,
+movement/attack forecasts and eight recognizable machine forms. This is a browser design
+study; the current playable Unity build below is unchanged.
+
 # Playable graphite update
 
 The graphite direction is now implemented in Unity. Start with the [WebGL build](webgl-preview.md)
