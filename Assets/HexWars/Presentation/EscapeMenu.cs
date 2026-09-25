@@ -90,44 +90,32 @@ namespace HexWars.Presentation
             var prt = panel.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = prt.pivot = new Vector2(0.5f, 0.5f);
             bool online = _game.Networked;
-            prt.sizeDelta = new Vector2(340f, online ? 406f : 356f);
+            prt.sizeDelta = new Vector2(340f, online ? 538f : 488f);
 
             UiKit.Label(panel.transform, "MENU", 0f, -18f, 300f, 30f, UiKit.SizeTitle, TextAnchor.MiddleCenter);
 
-            // sound row: mute toggle + volume steppers, all through SoundSettings (persisted master)
-            Text volText = null;
-            Text muteText = UiKit.Button(panel.transform, MuteLabel(), -90f, -64f, 100f, 40f, () =>
+            _muteText = UiKit.Button(panel.transform, MuteLabel(), 0f, -60f, 280f, 32f, () =>
             {
                 SoundSettings.MuteAll = !SoundSettings.MuteAll;
-                RefreshSoundRow();
+                _muteText.text = MuteLabel();
             }, UiKit.ButtonStyle.Secondary, UiKit.SizeCaption).GetComponentInChildren<Text>();
-            UiKit.Button(panel.transform, "-", 0f, -64f, 40f, 40f, () =>
-            {
-                SoundSettings.Volume -= 0.1f;
-                RefreshSoundRow();
-            }, UiKit.ButtonStyle.Secondary);
-            volText = UiKit.Label(panel.transform, VolLabel(), 52f, -64f, 48f, 40f,
-                                  UiKit.SizeBody, TextAnchor.MiddleCenter);
-            UiKit.Button(panel.transform, "+", 104f, -64f, 40f, 40f, () =>
-            {
-                SoundSettings.Volume += 0.1f;
-                RefreshSoundRow();
-            }, UiKit.ButtonStyle.Secondary);
-            _volText = volText;
-            _muteText = muteText;
+            SoundRow(panel.transform, "Master", -102f, () => SoundSettings.Volume, v => SoundSettings.Volume = v, true);
+            SoundRow(panel.transform, "Effects", -138f, () => SoundSettings.Effects, v => SoundSettings.Effects = v, true);
+            SoundRow(panel.transform, "Ambience", -174f, () => SoundSettings.Atmosphere, v => SoundSettings.Atmosphere = v, false);
+            SoundRow(panel.transform, "Music", -210f, () => SoundSettings.Music, v => SoundSettings.Music = v, false);
 
             Text motion = null;
-            motion = UiKit.Button(panel.transform, MotionLabel(), 0f, -114f, 280f, 36f, () =>
+            motion = UiKit.Button(panel.transform, MotionLabel(), 0f, -258f, 280f, 36f, () =>
             {
                 MotionSettings.Reduced = !MotionSettings.Reduced;
                 if (MotionSettings.Reduced) _game.Presenter?.FastForward();
                 motion.text = MotionLabel();
             }, UiKit.ButtonStyle.Secondary, UiKit.SizeCaption).GetComponentInChildren<Text>();
-            UiKit.Button(panel.transform, "How to play", -73f, -160f, 134f, 36f,
+            UiKit.Button(panel.transform, "How to play", -73f, -304f, 134f, 36f,
                 () => GameRules.Show(_overlay.transform, UiKit.Font(), UiKit.OrderEscape+10), UiKit.ButtonStyle.Secondary, UiKit.SizeCaption);
-            TipsService.BuildToggle(panel.transform, 70f, -160f);
-            UiKit.Button(panel.transform, "Resume", 0f, -220f, 280f, 44f, Close, UiKit.ButtonStyle.Cta);
-            UiKit.Button(panel.transform, "Leave game", 0f, -274f, 280f, 44f, () =>
+            TipsService.BuildToggle(panel.transform, 70f, -304f);
+            UiKit.Button(panel.transform, "Resume", 0f, -358f, 280f, 44f, Close, UiKit.ButtonStyle.Cta);
+            UiKit.Button(panel.transform, "Leave game", 0f, -410f, 280f, 44f, () =>
             {
                 Close();
                 _game.ReturnToMenu();
@@ -135,20 +123,26 @@ namespace HexWars.Presentation
             if (online)
                 UiKit.Label(panel.transform,
                             "Leaving disconnects you - rejoin from the lobby\nwhile the room is held (about 10 minutes).",
-                            0f, -328f, 320f, 40f, UiKit.SizeCaption, TextAnchor.UpperCenter, UiKit.TextDim);
+                            0f, -464f, 320f, 40f, UiKit.SizeCaption, TextAnchor.UpperCenter, UiKit.TextDim);
         }
 
-        Text _volText, _muteText;
-
+        Text _muteText;
         static string MotionLabel() => "Reduced motion: " + (MotionSettings.Reduced ? "On" : "Off");
         static string MuteLabel() => SoundSettings.MuteAll ? "Sound: Off" : "Sound: On";
-        static string VolLabel() => Mathf.RoundToInt(SoundSettings.Volume * 100f) + "%";
 
-        void RefreshSoundRow()
+        static void SoundRow(Transform parent, string name, float y, System.Func<float> get,
+                             System.Action<float> set, bool preview)
         {
-            if (_volText != null) _volText.text = VolLabel();
-            if (_muteText != null) _muteText.text = MuteLabel();
-            SoundManager.Play(SoundKind.Move); // audible feedback at the new level (silent when muted)
+            UiKit.Label(parent, name, -92f, y, 90f, 30f, UiKit.SizeBody, TextAnchor.MiddleLeft);
+            var value = UiKit.Label(parent, Percent(get()), 50f, y, 50f, 30f, UiKit.SizeBody, TextAnchor.MiddleCenter);
+            void Adjust(float delta)
+            {
+                set(get() + delta); value.text = Percent(get());
+                if (preview) SoundManager.Play(SoundKind.Select);
+            }
+            UiKit.Button(parent, "-", -5f, y, 36f, 30f, () => Adjust(-.1f), UiKit.ButtonStyle.Secondary);
+            UiKit.Button(parent, "+", 105f, y, 36f, 30f, () => Adjust(.1f), UiKit.ButtonStyle.Secondary);
         }
+        static string Percent(float value) => Mathf.RoundToInt(value * 100f) + "%";
     }
 }

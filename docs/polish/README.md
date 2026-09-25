@@ -10,6 +10,10 @@ range markers. Biome colors and decoration are hidden while biome rules are disa
 Enable **Place starting units** in setup to arrange each army anywhere in its starting area before
 pressing **Ready**. Escape immediately dismisses help and the designer; coaching is smaller and brief.
 
+The [sound pass](sound-direction.md) adds quiet mechanical cues, shorter weapon tails and separate
+effects, ambience and music controls. With the preview server running,
+[audition the changes](http://localhost:8196/sound-study/).
+
 Open the [WebGL player instructions](webgl-preview.md) or the
 [Windows game launcher](<Open Tactical Game.cmd>). The [Windows build notes](windows-preview.md)
 and [latest validation receipt](evidence/battlefield-clarity-checks.json) describe what was tested.

@@ -1,0 +1,233 @@
+{
+  "sample_rate": 44100,
+  "seed": 25419,
+  "original_recordings_unchanged": true,
+  "clips": {
+    "AttackLight_0": {
+      "seconds": 0.3,
+      "peak_dbfs": -20.29,
+      "rms_dbfs": -31.37,
+      "sha256": "09782ed4984c5d94a4b4586632ff93d4f9a828d5177e2665ed22cbf374e59e13"
+    },
+    "AttackLight_1": {
+      "seconds": 0.3,
+      "peak_dbfs": -21.31,
+      "rms_dbfs": -31.37,
+      "sha256": "10760d3a5b03664b9273009b1985b9cbec3de7ed24047d15bea4371477800a95"
+    },
+    "AttackLight_2": {
+      "seconds": 0.3,
+      "peak_dbfs": -21.68,
+      "rms_dbfs": -31.37,
+      "sha256": "75c4094d30faf65b1300d78213cfe9aceccc99a74e3764920b1a2a26522b0a9a"
+    },
+    "AttackLight_3": {
+      "seconds": 0.3,
+      "peak_dbfs": -20.29,
+      "rms_dbfs": -31.37,
+      "sha256": "44ce4f6cd417f3483d038773a526e403021d0585a2c7fc68575026b3cef20339"
+    },
+    "AttackMid_0": {
+      "seconds": 0.43,
+      "peak_dbfs": -14.42,
+      "rms_dbfs": -28.85,
+      "sha256": "75982034394054b535f74de9ee00061c81878724b056b5f04cf95e0168ca3683"
+    },
+    "AttackMid_1": {
+      "seconds": 0.43,
+      "peak_dbfs": -14.42,
+      "rms_dbfs": -28.81,
+      "sha256": "158106029ba3ab47e7eb0ab31b599a9a5e85950a8e89e5278d416991df3862cc"
+    },
+    "AttackMid_2": {
+      "seconds": 0.43,
+      "peak_dbfs": -14.45,
+      "rms_dbfs": -28.4,
+      "sha256": "9d29b3905b135642e65ab1af1471c75e79e6d92ce030f3b3da7d0bde48124bdf"
+    },
+    "AttackMid_3": {
+      "seconds": 0.43,
+      "peak_dbfs": -14.42,
+      "rms_dbfs": -28.53,
+      "sha256": "0a8f4bb3a99b1c41c3956c09a3805418b0d618f0a22e077b9ea33c30910af539"
+    },
+    "AttackHeavy_0": {
+      "seconds": 0.6,
+      "peak_dbfs": -15.96,
+      "rms_dbfs": -26.94,
+      "sha256": "f484af24b0276de2ec6cd064f91d18bac6300c6129edd747d83cb78c0a28abb7"
+    },
+    "AttackHeavy_1": {
+      "seconds": 0.6,
+      "peak_dbfs": -14.58,
+      "rms_dbfs": -26.94,
+      "sha256": "ce015b45f4ebb1c4adac5f392641d6ee46daf42429220a5a7a08f1b6ffcba3db"
+    },
+    "AttackHeavy_2": {
+      "seconds": 0.6,
+      "peak_dbfs": -14.06,
+      "rms_dbfs": -26.94,
+      "sha256": "e60108053ecf0f9a10200cf1f7a37ad1ff916e691820645b3bb6fd4b3e910c7a"
+    },
+    "AttackHeavy_3": {
+      "seconds": 0.6,
+      "peak_dbfs": -13.15,
+      "rms_dbfs": -27.33,
+      "sha256": "92002686b2cf52d2b923070488f80abd7739f40304b1e775a53de861a6fdd643"
+    },
+    "Deploy": {
+      "seconds": 0.44,
+      "peak_dbfs": -17.5,
+      "rms_dbfs": -31.37,
+      "sha256": "b0064ecb35e36cc1de717a5d30ef50b8f361ece4dae7764e749cf365e4763a90"
+    },
+    "Design": {
+      "seconds": 0.25,
+      "peak_dbfs": -16.48,
+      "rms_dbfs": -40.28,
+      "sha256": "dc9cb9945cd5ae7673729171531da2fc291a2d18c25c4be57fec0f40a2fba0c6"
+    },
+    "Select": {
+      "seconds": 0.075,
+      "peak_dbfs": -31.6,
+      "rms_dbfs": -44.44,
+      "sha256": "5642f14b1e91306b6d89935a8fade4ee0b55aadea7502890e494bd4b26330c80"
+    },
+    "Move": {
+      "seconds": 0.18,
+      "peak_dbfs": -20.92,
+      "rms_dbfs": -37.03,
+      "sha256": "8bd73a560cc6dd1fb0de85140594943e2467f202baeb942cfce4b31031a5002e"
+    },
+    "Place": {
+      "seconds": 0.14,
+      "peak_dbfs": -20.45,
+      "rms_dbfs": -34.8,
+      "sha256": "a4365c5dcf2b70ff357b1ec29955db2ee059ffc4e79317e8c08577a273d81791"
+    },
+    "Build": {
+      "seconds": 0.24,
+      "peak_dbfs": -17.72,
+      "rms_dbfs": -36.95,
+      "sha256": "7558c54db488bfd969bb1a57508ce1cabdd8fd7a68daee5cafbb0aba0b1d90c6"
+    },
+    "Claim": {
+      "seconds": 0.29,
+      "peak_dbfs": -25.72,
+      "rms_dbfs": -35.39,
+      "sha256": "66aad9810cf25f505219128908e3589113a619031a3426e5d90cd637bf4f9c9f"
+    },
+    "EndTurn": {
+      "seconds": 0.36,
+      "peak_dbfs": -24.95,
+      "rms_dbfs": -34.89,
+      "sha256": "ccf8396cff4708215eba0e93368a02c18102aec885ba7a7655c298a191aed807"
+    },
+    "Win": {
+      "seconds": 0.72,
+      "peak_dbfs": -22.69,
+      "rms_dbfs": -33.15,
+      "sha256": "c45269352e267d5916b6738567ef0676685e0fa0a2a8b364e49a2a41c001d95e"
+    },
+    "Death": {
+      "seconds": 0.38,
+      "peak_dbfs": -14.89,
+      "rms_dbfs": -36.4,
+      "sha256": "062b33d68c39b463e0b5187e98a95e129b9b176f25c9654f27aa18ff473eae20"
+    }
+  },
+  "comparison": [
+    {
+      "name": "Move",
+      "label": "Move",
+      "description": "A soft contact instead of a high beep.",
+      "before": "Move-before.wav",
+      "after": "Move.wav"
+    },
+    {
+      "name": "AttackLight_0",
+      "label": "Light shot",
+      "description": "Shorter, rounded transients and room for the impact.",
+      "before": "AttackLight_0-before.wav",
+      "after": "AttackLight_0.wav"
+    },
+    {
+      "name": "AttackMid_0",
+      "label": "Medium shot",
+      "description": "Tamed peak and a shorter tail.",
+      "before": "AttackMid_0-before.wav",
+      "after": "AttackMid_0.wav"
+    },
+    {
+      "name": "AttackHeavy_0",
+      "label": "Heavy shot",
+      "description": "More weight, without a long low rumble.",
+      "before": "AttackHeavy_0-before.wav",
+      "after": "AttackHeavy_0.wav"
+    },
+    {
+      "name": "Deploy",
+      "label": "Deployment",
+      "description": "A brief mechanical latch.",
+      "before": "Deploy-before.wav",
+      "after": "Deploy.wav"
+    },
+    {
+      "name": "Design",
+      "label": "Design saved",
+      "description": "A small confirmation, with no fanfare.",
+      "before": "Design-before.wav",
+      "after": "Design.wav"
+    },
+    {
+      "name": "EndTurn",
+      "label": "Turn change",
+      "description": "A quiet two-note handover.",
+      "before": "EndTurn-before.wav",
+      "after": "EndTurn.wav"
+    }
+  ],
+  "sequence": [
+    {
+      "seconds": 0.4,
+      "cue": "Select"
+    },
+    {
+      "seconds": 1.2,
+      "cue": "Move"
+    },
+    {
+      "seconds": 3.3,
+      "cue": "Select"
+    },
+    {
+      "seconds": 4.1,
+      "cue": "AttackLight_0"
+    },
+    {
+      "seconds": 6.7,
+      "cue": "AttackMid_0"
+    },
+    {
+      "seconds": 7.6,
+      "cue": "Death"
+    },
+    {
+      "seconds": 10.8,
+      "cue": "Deploy"
+    },
+    {
+      "seconds": 13.6,
+      "cue": "Design"
+    },
+    {
+      "seconds": 16.8,
+      "cue": "EndTurn"
+    }
+  ],
+  "default_loop_gains": {
+    "TitleMusic": 0.12,
+    "AmbientBed": 0.05,
+    "DesignerHum": 0.09
+  }
+}

@@ -1,0 +1,135 @@
+{
+  "date": "2026-09-25T17:08:11.461Z",
+  "errors": [],
+  "failed": [],
+  "stoppedMediaRequests": [
+    {
+      "url": "http://127.0.0.1:8196/sound-study/TitleMusic.wav",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:8196/sound-study/AmbientBed.wav",
+      "error": "net::ERR_ABORTED"
+    },
+    {
+      "url": "http://127.0.0.1:8196/sound-study/DesignerHum.wav",
+      "error": "net::ERR_ABORTED"
+    }
+  ],
+  "clips": [
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Move-before.wav",
+      "duration": 0.07,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Move.wav",
+      "duration": 0.18,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AttackLight_0-before.wav",
+      "duration": 1.12483,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AttackLight_0.wav",
+      "duration": 0.3,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AttackMid_0-before.wav",
+      "duration": 2,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AttackMid_0.wav",
+      "duration": 0.43,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AttackHeavy_0-before.wav",
+      "duration": 2.993401,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AttackHeavy_0.wav",
+      "duration": 0.6,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Deploy-before.wav",
+      "duration": 1.567347,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Deploy.wav",
+      "duration": 0.44,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Design-before.wav",
+      "duration": 1.119297,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Design.wav",
+      "duration": 0.25,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/EndTurn-before.wav",
+      "duration": 0.11,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/EndTurn.wav",
+      "duration": 0.36,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Select.wav",
+      "duration": 0.075011,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Place.wav",
+      "duration": 0.14,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Death.wav",
+      "duration": 0.38,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/Win.wav",
+      "duration": 0.72,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/TitleMusic.wav",
+      "duration": 12,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/AmbientBed.wav",
+      "duration": 12,
+      "error": null
+    },
+    {
+      "src": "http://127.0.0.1:8196/sound-study/DesignerHum.wav",
+      "duration": 12,
+      "error": null
+    }
+  ],
+  "sequence": {
+    "duration": 20,
+    "peak": 0.1330057680606842,
+    "active": 142,
+    "ended": true
+  },
+  "escapeStopsPlayback": true,
+  "mobileHasNoHorizontalOverflow": true,
+  "browser": "149.0.7827.53"
+}

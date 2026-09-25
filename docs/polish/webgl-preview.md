@@ -19,6 +19,10 @@ press **Ready** when finished. Round one starts after both armies are ready. The
 automatic placement; AI opponents keep that formation. Escape immediately dismisses help and the
 designer, and automatic tips are smaller and expire after six seconds.
 
+The [sound pass](sound-direction.md) is included: shorter and quieter effects, fading background
+audio, and separate Master / Effects / Ambience / Music controls in **Menu**. The comparison page
+is served at `/sound-study/`.
+
 ## Run the committed build
 
 For local AI, hotseat and the unit collection, serve the static files from the repository root:
@@ -45,7 +49,7 @@ is unset. Selecting `Steam` or `Legacy,Steam` explicitly still requires the full
 This startup fix changes only the server; the WebGL player bundle does not need rebuilding.
 
 Steam lobbies, invitations and the persistent match-service entry flow still belong to the native
-Steam client. Browser guest accounts/invite links and the sound pass are separate follow-up work.
+Steam client. Browser guest accounts/invite links remain separate follow-up work.
 This branch has not been deployed to the production site.
 
 ## Tactical implementation validation

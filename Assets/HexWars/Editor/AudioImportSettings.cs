@@ -19,6 +19,25 @@ namespace HexWars.Presentation.EditorTools
     {
         const string Dir = "Assets/HexWars/Resources/Audio";
 
+        [MenuItem("HexWars/Audio/Prepare Quiet Effects")]
+        public static void ApplySoftPalette()
+        {
+            foreach (string guid in AssetDatabase.FindAssets("t:AudioClip", new[] { Dir + "/Soft" }))
+            {
+                var importer = (AudioImporter)AssetImporter.GetAtPath(AssetDatabase.GUIDToAssetPath(guid));
+                var settings = importer.defaultSampleSettings;
+                settings.loadType = AudioClipLoadType.DecompressOnLoad;
+                settings.compressionFormat = AudioCompressionFormat.PCM;
+                settings.preloadAudioData = true;
+                importer.defaultSampleSettings = settings;
+                importer.forceToMono = true;
+                importer.loadInBackground = false;
+                importer.SaveAndReimport();
+            }
+            AssetDatabase.SaveAssets();
+            Debug.Log("[SoundPolish] Quiet effect import settings applied.");
+        }
+
         [MenuItem("HexWars/Audio/Apply Import Settings")]
         public static void Apply()
         {

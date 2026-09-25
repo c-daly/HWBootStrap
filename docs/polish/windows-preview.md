@@ -11,6 +11,9 @@ Biome decoration is hidden while its rules are off. Enable **Place starting unit
 each army on empty highlighted hexes, then choose **Ready**. See the
 [latest validation receipt](evidence/battlefield-clarity-checks.json).
 
+The [sound pass](sound-direction.md) adds quieter effects and fading background audio.
+Adjust **Master**, **Effects**, **Ambience** and **Music** independently in **Menu**.
+
 Build it in Unity with **HexWars → Build Tactical Windows Preview**. This standalone preview does
 not require Steam; native Steam integration remains a separate configured build path.
 

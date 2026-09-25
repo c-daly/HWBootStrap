@@ -510,9 +510,10 @@ namespace HexWars.Presentation
             Select(null); // every unit has acted this turn
         }
 
-        public void SelectById(int id)
+        public void SelectById(int id, bool audible = false)
         {
             if (_game != null && !TacticalForecast.FindVisible(_game.State, id, Viewer).HasValue) return;
+            if (audible && id != _selectedId) SoundManager.Play(SoundKind.Select);
             ClearPreview();
             ClearMovementRoutes();
             _selectedId = id;
@@ -524,6 +525,7 @@ namespace HexWars.Presentation
 
         void Select(UnitView unit)
         {
+            if (unit != null && unit.Unit.Id != _selectedId) SoundManager.Play(SoundKind.Select);
             ClearPreview();
             ClearMovementRoutes();
             _selected = unit;

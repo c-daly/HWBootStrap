@@ -92,7 +92,7 @@ namespace HexWars.Presentation
             StopAllCoroutines();
             if (_projectile != null) { Destroy(_projectile); _projectile = null; }
             if (_current.HasValue) { Commit(_current.Value, skipCombatFx: _reported); _current = null; }
-            while (_queue.Count > 0) Commit(_queue.Dequeue());
+            while (_queue.Count > 0) Commit(_queue.Dequeue(), emitAudio: false);
             _playing = false;
         }
 
@@ -510,20 +510,28 @@ namespace HexWars.Presentation
             // double-sound (Task 14 review).
             switch (item.Cmd)
             {
+                case PlaceStartingUnit _: SoundManager.Play(SoundKind.Place); break;
                 case DeployGenerator _: SoundManager.Play(SoundKind.Build); break;
             }
         }
 
-        void Commit(Item item, bool skipCombatFx = false)
+        void Commit(Item item, bool skipCombatFx = false, bool emitAudio = true)
         {
             Tokens().Sync(item.Next, _game?.FogViewerFor(item.Next));
             _board.UpdateControlTint(item.Next);
             if (!skipCombatFx && !(item.Cmd is MoveUnit))
                 CombatFx.Report(item.Prev, item.Next, _board, item.Cmd); // popups (attack timing refined in Task 4)
-            if (!(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer)
-                SoundManager.Play(SoundKind.EndTurn); // paced turns auto-pass without an EndTurn command
-            if (LiveUnits(item.Next) < LiveUnits(item.Prev)) { SoundManager.Play(SoundKind.Death); Rig()?.Shake(); }
-            if (item.Next.IsGameOver && !item.Prev.IsGameOver) SoundManager.Play(SoundKind.Win);
+            bool lostUnit = _presented && LiveUnits(item.Next) < LiveUnits(item.Prev);
+            if (lostUnit) Rig()?.Shake();
+            // One resolution cue per action. A kill or match conclusion already explains the moment;
+            // stacking a turn chime on top makes fast or reduced-motion combat needlessly noisy.
+            if (emitAudio)
+            {
+                if (item.Next.IsGameOver && !item.Prev.IsGameOver) SoundManager.Play(SoundKind.Win);
+                else if (lostUnit) SoundManager.Play(SoundKind.Death);
+                else if (!(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer)
+                    SoundManager.Play(SoundKind.EndTurn);
+            }
             ItemCommitted?.Invoke(item.Prev, item.Cmd, item.Next);
         }
 
