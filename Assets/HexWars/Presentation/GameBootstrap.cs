@@ -236,6 +236,7 @@ namespace HexWars.Presentation
         /// a seat this human controls fires the tip once per game, CTA drawing attention to the Designer.</summary>
         void CheckFirstBounty(GameState prev, Command cmd)
         {
+            if (State.IsGameOver) { TipsService.EndGame(); return; }
             if (!(cmd is AttackUnit atk) || !IsLocalCommand(cmd)) return;
             int gained = State.Player(atk.Issuer).Points - prev.Player(atk.Issuer).Points;
             if (gained <= 0) return;
@@ -426,6 +427,7 @@ namespace HexWars.Presentation
         /// a null state is what lets it come back). The next created game rebuilds everything.</summary>
         public void ReturnToMenu()
         {
+            TipsService.EndGame(); // Coaching stays ended until the next real match starts.
             Presenter?.ResetQueue();
             GameOverBanner.Dismiss();
             // a lobby coordinator kept alive as the credential broker must not outlive the match

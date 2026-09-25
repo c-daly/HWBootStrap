@@ -17,6 +17,8 @@ namespace HexWars.Presentation
         const string PrefKey = "HexWars.Tips";
         static bool? _enabled;
         static readonly HashSet<string> _firedThisGame = new HashSet<string>();
+        static DeferredBounty _pendingBounty;
+        static bool _gameEnded;
 
         /// <summary>Defaults ON for a first-ever visit (no key written yet); persists after that.</summary>
         public static bool Enabled
@@ -31,14 +33,22 @@ namespace HexWars.Presentation
                 _enabled = value;
                 PlayerPrefs.SetInt(PrefKey, value ? 1 : 0);
                 PlayerPrefs.Save();
-                if (!value) TipBubble.Dismiss(); // switching off must not leave a bubble hanging (spec §7:
+                if (!value) { ClearPendingBounty(); TipBubble.Dismiss(); } // switching off must not leave a bubble hanging (spec §7:
                                                   // "off forever once off" — includes whatever's on screen right now
             }
         }
 
         /// <summary>Clear the once-per-game registry. Called by GameBootstrap on every real new-game
         /// entry point (NOT on a Task 6 reconnect's START re-deal — that's the same game continuing).</summary>
-        public static void NewGame() => _firedThisGame.Clear();
+        public static void NewGame() { _gameEnded = false; _firedThisGame.Clear(); ClearPendingBounty(); }
+
+        /// <summary>End coaching for this match, including late events after the result is dismissed.</summary>
+        public static void EndGame()
+        {
+            _gameEnded = true;
+            ClearPendingBounty();
+            TipBubble.Dismiss();
+        }
 
         /// <summary>Show a tip at most once per game per <paramref name="id"/>, only while Tips is on.
         /// A no-op otherwise (off, or already fired this game) — callers never branch on Enabled. Always
@@ -46,10 +56,50 @@ namespace HexWars.Presentation
         /// blocks input"), unlike the stat-reference popups callers reach directly via TipBubble.Show.</summary>
         public static void Show(string id, string text, Vector2? screenPos = null, string cta = null, System.Action onCta = null)
         {
-            if (!Enabled || TipBubble.IsOpen) return;
+            if (_gameEnded || !Enabled || _firedThisGame.Contains(id)) return;
+            if (TipBubble.IsOpen)
+            {
+                // A bounty is a one-time event; keep it until the existing help closes. Selection,
+                // deployment and end-turn tips describe transient state and must not form a backlog.
+                if (id == "first-bounty" && _pendingBounty == null)
+                {
+                    _pendingBounty = new GameObject("Deferred bounty coaching").AddComponent<DeferredBounty>();
+                    _pendingBounty.Text = text; _pendingBounty.Position = screenPos;
+                    _pendingBounty.Cta = cta; _pendingBounty.OnCta = onCta;
+                }
+                return;
+            }
             if (!_firedThisGame.Add(id)) return;
+            if (id == "first-bounty") ClearPendingBounty();
             var pos = screenPos ?? new Vector2(210f, 150f);
             TipBubble.Show(text, pos, cta, onCta, modal: false);
+        }
+
+        static void ClearPendingBounty()
+        {
+            if (_pendingBounty == null) return;
+            var pending = _pendingBounty; _pendingBounty = null;
+            pending.gameObject.SetActive(false);
+            if (Application.isPlaying) Object.Destroy(pending.gameObject);
+            else Object.DestroyImmediate(pending.gameObject);
+        }
+
+        sealed class DeferredBounty : MonoBehaviour
+        {
+            internal string Text, Cta;
+            internal Vector2? Position;
+            internal System.Action OnCta;
+            float _quietSince = -1;
+
+            void Update()
+            {
+                if (_pendingBounty != this || _gameEnded || !Enabled) return;
+                if (TipBubble.IsOpen) { _quietSince = -1; return; }
+                if (_quietSince < 0) _quietSince = Time.unscaledTime;
+                // Dismissing help must clear it immediately, with a quiet interval before coaching.
+                if (Time.unscaledTime - _quietSince < 1f) return;
+                Show("first-bounty", Text, Position, Cta, OnCta);
+            }
         }
 
         /// <summary>Small reusable "Tips: On/Off" control — the title screen (bottom corner) and the

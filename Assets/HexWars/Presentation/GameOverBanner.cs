@@ -21,6 +21,7 @@ namespace HexWars.Presentation
 
         public static void Show(string title, string subtitle, Color accent, System.Action onMainMenu = null, System.Action onRematch = null)
         {
+            TipsService.EndGame();
             Dismiss(); // never stack two
             _shownAt = Time.unscaledTime;
 

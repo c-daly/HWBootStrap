@@ -19,6 +19,10 @@ press **Ready** when finished. Round one starts after both armies are ready. The
 automatic placement; AI opponents keep that formation. Escape immediately dismisses help and the
 designer, and automatic tips are smaller and expire after six seconds.
 
+The [sound pass](sound-direction.md) is included: shorter and quieter effects, fading background
+audio, and separate Master / Effects / Ambience / Music controls in **Menu**. The comparison page
+is served at `/sound-study/`.
+
 ## Run the committed build
 
 For local AI, hotseat and the unit collection, serve the static files from the repository root:
@@ -45,16 +49,19 @@ is unset. Selecting `Steam` or `Legacy,Steam` explicitly still requires the full
 This startup fix changes only the server; the WebGL player bundle does not need rebuilding.
 
 Steam lobbies, invitations and the persistent match-service entry flow still belong to the native
-Steam client. Browser guest accounts/invite links and the sound pass are separate follow-up work.
+Steam client. Browser guest accounts/invite links remain separate follow-up work.
 This branch has not been deployed to the production site.
 
 ## Tactical implementation validation
 
-The latest [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) covers this revision.
+The [integration receipt](evidence/polish-integration-checks.json) covers the current build and review
+fixes. The [battlefield clarity receipt](evidence/battlefield-clarity-checks.json) preserves the prior checks.
 The [implementation receipt](evidence/tactical-implementation-checks.json) and
 [browser receipt](evidence/tactical-webgl-checks.json) preserve the preceding implementation checks. The gameplay/UI walkthrough
 and actual Unity screenshots are in [gameplay-visual-language.md](gameplay-visual-language.md).
 The historical receipts below describe the earlier build; they are retained as earlier evidence.
+
+The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.
 
 ## Rebuild
 

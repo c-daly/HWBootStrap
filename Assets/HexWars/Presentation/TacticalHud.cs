@@ -184,6 +184,12 @@ namespace HexWars.Presentation
             _input?.ClearPreview();_dirty=true;
         }
 
+        internal void DismissWorkshop()
+        {
+            if(_designer!=null)WebGlInputBridge.CancelFocusedEdit(_designer.transform);
+            SetWorkshop(false);
+        }
+
         PlayerId Seat
         {
             get
@@ -311,7 +317,7 @@ namespace HexWars.Presentation
                 bool canMove=active&&!spent&&MovementService.Routes(s,u).Count>0;
                 bool canAttack=active&&!spent&&AttackPreviewTargets.Resolve(s,u,null,Seat).Count>0;
                 if(canMove||canAttack)canAct++;
-                var b=Button(_squadContent,"Select unit "+id,"",x,0,186,66,()=>_input?.SelectById(id));_squad.Add(b);
+                var b=Button(_squadContent,"Select unit "+id,"",x,0,186,66,()=>_input?.SelectById(id,true));_squad.Add(b);
                 Tint(b,_input!=null&&_input.SelectedId==id?new Color(.22f,.35f,.35f):Panel);
                 var p=GraphiteWorkshop.Portrait(b.transform,UnitArt.Index(UnitArt.Resolve(u.ArtId,u.Stats)),0,0,58,u.Owner);Place(p.rectTransform,2,2,58,58);
                 Label(b.transform,u.DisplayName,65,7,110,22,14);

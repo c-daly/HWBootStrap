@@ -91,10 +91,29 @@ namespace HexWars.Presentation
             if (!IsBusy) return;
             StopAllCoroutines();
             if (_projectile != null) { Destroy(_projectile); _projectile = null; }
-            if (_current.HasValue) { Commit(_current.Value, skipCombatFx: _reported); _current = null; }
-            while (_queue.Count > 0) Commit(_queue.Dequeue());
+            SoundKind? resolution = null;
+            if (_current.HasValue)
+            {
+                // The camera may still be leading an action that has not started playing yet.
+                _presented = _presented || ActionSite(_current.Value).HasValue;
+                resolution = Commit(_current.Value, skipCombatFx: _reported, emitAudio: false);
+                _current = null;
+            }
+            while (_queue.Count > 0)
+            {
+                var item = _queue.Dequeue();
+                // Queued items never ran Play: evaluate their own visibility, not the previous item's.
+                _presented = ActionSite(item).HasValue;
+                var cue = Commit(item, emitAudio: false);
+                if (ResolutionPriority(cue) > ResolutionPriority(resolution)) resolution = cue;
+            }
             _playing = false;
+            // Preserve the most important result of the whole batch without a burst of skipped cues.
+            if (resolution.HasValue) SoundManager.Play(resolution.Value);
         }
+
+        static int ResolutionPriority(SoundKind? cue) =>
+            cue == SoundKind.Win ? 3 : cue == SoundKind.Death ? 2 : cue.HasValue ? 1 : 0;
 
         public void ResetQueue()
         {
@@ -510,21 +529,28 @@ namespace HexWars.Presentation
             // double-sound (Task 14 review).
             switch (item.Cmd)
             {
+                case PlaceStartingUnit _: SoundManager.Play(SoundKind.Place); break;
                 case DeployGenerator _: SoundManager.Play(SoundKind.Build); break;
             }
         }
 
-        void Commit(Item item, bool skipCombatFx = false)
+        SoundKind? Commit(Item item, bool skipCombatFx = false, bool emitAudio = true)
         {
             Tokens().Sync(item.Next, _game?.FogViewerFor(item.Next));
             _board.UpdateControlTint(item.Next);
             if (!skipCombatFx && !(item.Cmd is MoveUnit))
                 CombatFx.Report(item.Prev, item.Next, _board, item.Cmd); // popups (attack timing refined in Task 4)
-            if (!(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer)
-                SoundManager.Play(SoundKind.EndTurn); // paced turns auto-pass without an EndTurn command
-            if (LiveUnits(item.Next) < LiveUnits(item.Prev)) { SoundManager.Play(SoundKind.Death); Rig()?.Shake(); }
-            if (item.Next.IsGameOver && !item.Prev.IsGameOver) SoundManager.Play(SoundKind.Win);
+            bool lostUnit = _presented && LiveUnits(item.Next) < LiveUnits(item.Prev);
+            if (lostUnit) Rig()?.Shake();
+            // One resolution cue per action. A kill or match conclusion already explains the moment;
+            // stacking a turn chime on top makes fast or reduced-motion combat needlessly noisy.
+            SoundKind? cue = item.Next.IsGameOver && !item.Prev.IsGameOver ? SoundKind.Win :
+                lostUnit ? SoundKind.Death :
+                _presented && !(item.Cmd is EndTurn) && item.Next.ActivePlayer != item.Prev.ActivePlayer ? SoundKind.EndTurn :
+                (SoundKind?)null;
+            if (emitAudio && cue.HasValue) SoundManager.Play(cue.Value);
             ItemCommitted?.Invoke(item.Prev, item.Cmd, item.Next);
+            return cue;
         }
 
         internal static Unit? FindUnit(GameState s, PlayerId owner, int id)

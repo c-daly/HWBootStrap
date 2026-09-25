@@ -9,7 +9,12 @@ The latest build includes mint/copper team hulls and portraits, mirrored backlin
 starting placement, gold range cues, direct double-click actions and immediate Escape dismissal.
 Biome decoration is hidden while its rules are off. Enable **Place starting units** in setup, arrange
 each army on empty highlighted hexes, then choose **Ready**. See the
-[latest validation receipt](evidence/battlefield-clarity-checks.json).
+[latest validation receipt](evidence/polish-integration-checks.json).
+
+The [sound pass](sound-direction.md) adds quieter effects and fading background audio.
+Adjust **Master**, **Effects**, **Ambience** and **Music** independently in **Menu**.
+
+The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.
 
 Build it in Unity with **HexWars → Build Tactical Windows Preview**. This standalone preview does
 not require Steam; native Steam integration remains a separate configured build path.
