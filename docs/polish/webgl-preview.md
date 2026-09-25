@@ -19,9 +19,14 @@ Open `http://localhost:8196`. Select **Unit collection**, inspect a form and cho
 
 To use Browse/Host/room-code multiplayer, run the matching .NET server from
 `engine/HexWars.NetServer` with `dotnet run -- --urls http://127.0.0.1:8196`, setting
-`ASPNETCORE_ENVIRONMENT=Development` and `LOBBY_PROVIDER=legacy` in that terminal first. Stop any
+`ASPNETCORE_ENVIRONMENT=Production` and `LOBBY_PROVIDER=Legacy` in that terminal first. Stop any
 static server already using the port. The .NET server serves the same `wwwroot` folder alongside
 the WebSocket routes. A static file server does not provide the multiplayer backend.
+
+Steam is optional in this mode, including Production: no `STEAM_APP_ID`, publisher key, database,
+public match URL or match build ID is required. `Legacy` is also the default when `LOBBY_PROVIDER`
+is unset. Selecting `Steam` or `Legacy,Steam` explicitly still requires the full Steam configuration.
+This startup fix changes only the server; the WebGL player bundle does not need rebuilding.
 
 Steam lobbies, invitations and the persistent match-service entry flow still belong to the native
 Steam client. Browser guest accounts/invite links and the sound pass are separate follow-up work.
@@ -59,7 +64,8 @@ versions. See [appearance compatibility](windows-preview.md#appearance-data-and-
   saving to barracks and deployment. Deployment spent two points and rendered Halo on the board.
 - Engine: 1,174 tests passed. Unity EditMode: 664 passed. Unity PlayMode: 7 passed, including
   hidden-panel deferral and separate button/hero GPU texture sizes after the portrait change.
-  WebGL input bridge: 1 passed. Server regressions: 953 passed with disposable PostgreSQL 16.
+  WebGL input bridge: 1 passed. Server regressions: 962 passed with disposable PostgreSQL 16
+  after making Steam configuration optional for Production WebGL hosting.
 - The initial server run had no Docker/database and was aborted; its failure log is retained.
   The final database-backed run passed in full. Earlier browser collider errors are also retained.
 - Chrome reported three nonfatal Unity warnings: persistent-data synchronization deprecation,
@@ -67,7 +73,8 @@ versions. See [appearance compatibility](windows-preview.md#appearance-data-and-
 
 Build hashes and counts: [build receipt](evidence/webgl-build-checks.json).
 Browser log and resource statuses: [browser receipt](evidence/webgl-browser-checks.json).
-Checks cover local rendering and gameplay; they do not establish live multiplayer recovery or
+Production startup and anonymous browser room flow: [optional Steam receipt](evidence/webgl-steam-optional-checks.json).
+Checks cover local rendering, gameplay and browser room startup; they do not establish live multiplayer recovery or
 production/Steam release readiness.
 
 ![Unit collection in WebGL](evidence/webgl-collection.png)

@@ -51,10 +51,11 @@ namespace HexWars.NetServer.Tests
 
         // ---- defaults ------------------------------------------------------
 
-        [Test]
-        public void LegacyDefaults_NothingConfigured_AreValid()
+        [TestCase("Development")]
+        [TestCase("Production")]
+        public void LegacyDefaults_NothingConfigured_AreValid(string environment)
         {
-            var result = Read(new Dictionary<string, string?>());
+            var result = Read(new Dictionary<string, string?>(), environment);
 
             Assert.That(result.IsValid, Is.True, Joined(result));
             Assert.That(result.Match.LobbyProvider, Is.EqualTo(LobbyProviders.Legacy));
@@ -165,10 +166,13 @@ namespace HexWars.NetServer.Tests
 
         // ---- required keys -------------------------------------------------
 
-        [Test]
-        public void SteamProvider_WithNothingElse_NamesExactlyTheFiveRequiredKeys()
+        [TestCase("Development", "Steam")]
+        [TestCase("Production", "Steam")]
+        [TestCase("Development", "Legacy,Steam")]
+        [TestCase("Production", "Legacy,Steam")]
+        public void SteamProvider_WithNothingElse_NamesExactlyTheFiveRequiredKeys(string environment, string providers)
         {
-            var result = Read(new Dictionary<string, string?> { ["LOBBY_PROVIDER"] = "Steam" });
+            var result = Read(new Dictionary<string, string?> { ["LOBBY_PROVIDER"] = providers }, environment);
 
             Assert.That(result.IsValid, Is.False);
             var keys = result.Errors.Select(e => e.Split(new[] { ": " }, StringSplitOptions.None)[0])
@@ -185,12 +189,25 @@ namespace HexWars.NetServer.Tests
         }
 
         [Test]
-        public void Production_RequiresTheSameFiveKeysEvenWithoutTheSteamProvider()
+        public void Production_ExplicitLegacyProviderNeedsNoSteamStack()
         {
-            var result = Read(new Dictionary<string, string?>(), "Production");
+            var result = Read(new Dictionary<string, string?> { ["LOBBY_PROVIDER"] = "Legacy" }, "Production");
+
+            Assert.That(result.IsValid, Is.True, Joined(result));
+            Assert.That(result.Steam.AppId, Is.Zero);
+            Assert.That(result.Match.DatabaseUrl, Is.Empty);
+        }
+
+        [TestCase("DATABASE_URL", "not-a-database")]
+        [TestCase("MATCH_PUBLIC_BASE_URL", "http://match.hexwars.invalid")]
+        [TestCase("MATCH_BUILD_ID", "placeholder")]
+        public void ProductionLegacy_StillValidatesDeploymentSettingsWhenProvided(string key, string value)
+        {
+            var result = Read(new Dictionary<string, string?> { [key] = value }, "Production");
 
             Assert.That(result.IsValid, Is.False);
-            Assert.That(result.Errors, Has.Count.EqualTo(5));
+            Assert.That(result.Errors, Has.Count.EqualTo(1));
+            Assert.That(result.Errors[0], Does.StartWith(key + ":"));
         }
 
         [Test]
@@ -867,10 +884,18 @@ namespace HexWars.NetServer.Tests
 
         // ---- server composition smoke tests ----------------------------------
 
-        [Test]
-        public async Task LegacyDefaults_StillServeHealthzAndTheLobbyBrowser()
+        [TestCase("Development")]
+        [TestCase("Production")]
+        public async Task LegacyDefaults_StillServeHealthzAndTheLobbyBrowser(string environment)
         {
-            using var factory = new WebApplicationFactory<Program>();
+            using var factory = new WebApplicationFactory<Program>().WithWebHostBuilder(builder =>
+            {
+                builder.UseEnvironment(environment);
+                builder.UseSetting("LOBBY_PROVIDER", "Legacy");
+                foreach (string key in new[] { "STEAM_APP_ID", "STEAM_PUBLISHER_WEB_API_KEY", "DATABASE_URL",
+                    "MATCH_PUBLIC_BASE_URL", "MATCH_BUILD_ID", "RENDER_GIT_COMMIT" })
+                    builder.UseSetting(key, "");
+            });
             using var client = factory.CreateClient();
 
             Assert.That(await client.GetStringAsync("/healthz"),
@@ -882,6 +907,10 @@ namespace HexWars.NetServer.Tests
             using var doc = JsonDocument.Parse(await games.Content.ReadAsStringAsync());
             Assert.That(doc.RootElement.TryGetProperty("games", out var array), Is.True);
             Assert.That(array.ValueKind, Is.EqualTo(JsonValueKind.Array));
+            Assert.That((await client.GetAsync("/health/ready")).StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That((await client.PostAsync("/api/v1/steam/matches", null)).StatusCode,
+                Is.EqualTo(HttpStatusCode.NotFound), "Optional Steam means its authenticated routes are disabled.");
+            Assert.That((await client.GetAsync("/ws/v2")).StatusCode, Is.EqualTo(HttpStatusCode.NotFound));
         }
 
         [Test]

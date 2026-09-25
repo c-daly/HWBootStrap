@@ -262,7 +262,7 @@ namespace HexWars.NetServer.Hosting
 
         public static WebApplication UseHexWarsServer(this WebApplication app)
         {
-            // Resolving the options here is the fail-fast point: a half-configured Steam or Production
+            // Resolving the options here is the fail-fast point: a half-configured enabled provider
             // deployment throws OptionsValidationException naming the offending KEYS, never their values.
             var steam = app.Services.GetRequiredService<IOptions<SteamOptions>>().Value;
             var match = app.Services.GetRequiredService<IOptions<MatchHostingOptions>>().Value;
