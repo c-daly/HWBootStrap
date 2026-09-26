@@ -167,9 +167,13 @@ How many actions you take before the turn passes:
     tactical; also makes the claim-ends-turn tax proportionate.
 
 CONTROLS
-  Select a unit on the board or in your squad. Choose a hex or enemy to preview an action.
-  Confirm in the unit panel to move or fire. A preview spends nothing. Escape clears the preview.
-  Move [M] shows reachable cells and costs. Attack [F] shows legal targets and exact damage.
+  Select a unit, then click a highlighted hex to move. Hovering previews the route and its cost.
+  Undo move (Ctrl+Z) restores the last move and its budget, before another action or the turn ends.
+  Undo is unavailable with fog of war, so scouting information cannot be taken back.
+  Gold brackets mark enemies in range now. AFTER MOVE marks additional targets from a previewed hex.
+  Click an enemy to preview damage, then click it again or press Fire to attack. Escape cancels.
+  Squad cards prefer a matching unit that can still act. Board clicks select the exact piece.
+  Move [M] shows reachable cells and costs. Attack [F] focuses the target list.
   Attacking ends that unit's movement. The squad shows which units can still act.
   Phone — drag to pan, pinch to zoom. Use the preview arrows to choose a destination or target.
   Desktop — WASD / arrows to pan, Q/E to orbit, scroll to zoom.

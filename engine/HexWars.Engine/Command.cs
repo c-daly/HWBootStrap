@@ -38,6 +38,9 @@ namespace HexWars.Engine
     /// <summary>Move one of the issuer's units to a reachable destination (once per turn).</summary>
     public sealed record MoveUnit(PlayerId Issuer, int UnitId, HexCoord Dest) : Command(Issuer);
 
+    /// <summary>Restore the last movement before any other accepted action or turn change.</summary>
+    public sealed record UndoMove(PlayerId Issuer) : Command(Issuer);
+
     /// <summary>Attack an enemy unit or generator (by id) with one of the issuer's units (once per turn).</summary>
     public sealed record AttackUnit(PlayerId Issuer, int AttackerId, int TargetId) : Command(Issuer);
 

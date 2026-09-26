@@ -47,7 +47,7 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(markers.Find("AttackTarget_2").gameObject.activeSelf, Is.True);
             Assert.That(markers.GetComponentsInChildren<TextMesh>().Select(t => t.text), Is.EqualTo(new[] { "IN RANGE" }));
             Assert.That(_input.PreviewMove(new HexCoord(3, 1)), Is.True);
-            Assert.That(markers.GetComponentsInChildren<TextMesh>().Select(t => t.text), Is.EqualTo(new[] { "AFTER MOVE", "AFTER MOVE" }));
+            Assert.That(markers.GetComponentsInChildren<TextMesh>().Select(t => t.text), Is.EqualTo(new[] { "IN RANGE", "AFTER MOVE" }));
             Assert.That(_game.State, Is.SameAs(before));
             _input.ClearPreview();
             Assert.That(markers.GetComponentsInChildren<TextMesh>().Select(t => t.text), Is.EqualTo(new[] { "IN RANGE" }));
@@ -66,35 +66,49 @@ namespace HexWars.Presentation.PlayModeTests
         }
 
         [UnityTest]
-        public IEnumerator DoubleClickCommitsMoveAndAttackWithoutTheConfirmationButton()
+        public IEnumerator SingleClickMovesAndUndoRestoresThePieceWithoutAnotherConfirmation()
         {
             var start = _game.State;
             BoardTap(null, new HexCoord(1, 1), 1);
-            Assert.That(_game.State, Is.SameAs(start), "One click only previews.");
-            BoardTap(null, new HexCoord(1, 1), 1.15);
             Assert.That(_game.State.Player(PlayerId.Player0).UnitsOnBoard.Single().Cell, Is.EqualTo(new HexCoord(1, 1)));
-            _game.Presenter.FastForward();
+            Assert.That(_input.CanUndoMove, Is.True);
             var moved = _game.State;
-            BoardTap(2, null, 2);
-            Assert.That(_game.State, Is.SameAs(moved));
-            BoardTap(2, null, 2.15); _game.Presenter.FastForward();
-            Assert.That(_game.State.Player(PlayerId.Player1).UnitsOnBoard.First().CurrentHp, Is.EqualTo(5));
-            Assert.That(_input.TargetId, Is.EqualTo(-1));
+            BoardTap(null, new HexCoord(1, 1), 1.15);
+            Assert.That(_game.State, Is.SameAs(moved), "A habitual second click must not submit a second move.");
+            Assert.That(_input.UndoLastMove(), Is.True);
+            _game.Presenter.FastForward();
+            Assert.That(_game.State.Player(PlayerId.Player0).UnitsOnBoard.Single().Cell, Is.EqualTo(new HexCoord(0, 1)));
+            Assert.That(_game.State.MovementSpent, Is.Empty);
+            Assert.That(_input.CanUndoMove, Is.False);
+            Assert.That(_host.GetComponent<TokenStore>().UnitToken(1).GetComponent<UnitView>().Unit.Cell, Is.EqualTo(new HexCoord(0, 1)));
             yield return null;
         }
 
         [UnityTest]
-        public IEnumerator SlowClicksDifferentTargetsAndCancelledPreviewsDoNotConfirm()
+        public IEnumerator AttackCanBeConfirmedAfterReadingThePreviewWithoutDoubleClickTiming()
         {
             var start = _game.State;
-            BoardTap(null, new HexCoord(1, 1), 1);
-            BoardTap(null, new HexCoord(1, 1), 2);
+            BoardTap(2, null, 1);
             Assert.That(_game.State, Is.SameAs(start));
-            BoardTap(null, new HexCoord(1, 2), 2.1);
-            Assert.That(_game.State, Is.SameAs(start), "Nearby but different hexes must only change the preview.");
+            BoardTap(2, null, 8); _game.Presenter.FastForward();
+            Assert.That(_game.State.Player(PlayerId.Player1).UnitsOnBoard.First().CurrentHp, Is.EqualTo(5));
+            Assert.That(_input.TargetId, Is.EqualTo(-1));
+            Assert.That(_input.CanUndoMove, Is.False);
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator DifferentTargetsAndCancelledAttackPreviewsDoNotFire()
+        {
+            BoardTap(null, new HexCoord(3, 1), 1);
+            _game.Presenter.FastForward();
+            var moved = _game.State;
+            BoardTap(2, null, 2);
+            BoardTap(3, null, 2.1);
+            Assert.That(_game.State, Is.SameAs(moved), "Changing targets only changes the damage preview.");
             _input.ClearPreview();
-            BoardTap(null, new HexCoord(1, 2), 2.2);
-            Assert.That(_game.State, Is.SameAs(start), "Cancelling disarms double-click confirmation.");
+            BoardTap(3, null, 2.2);
+            Assert.That(_game.State, Is.SameAs(moved), "Cancelling disarms attack confirmation.");
             yield return null;
         }
 
@@ -107,10 +121,10 @@ namespace HexWars.Presentation.PlayModeTests
             _input.SelectById(state.Players[0].UnitsOnBoard.First().Id);
             var hud = _host.AddComponent<TacticalHud>(); yield return null; yield return null;
             var destination = _input.PlacementCells.OrderByDescending(c => state.Board.TileAt(c).Elevation).First();
-            Assert.That(_input.PreviewMove(destination), Is.True);
+            BoardTap(null, destination, 1);
             Assert.That(_input.Routes, Is.Empty, "Placement must not pretend to spend a movement route.");
             Assert.That(_input.PreviewAttack(state.Players[1].UnitsOnBoard.First().Id), Is.False);
-            Assert.That(_input.ConfirmPreview(), Is.True); _game.Presenter.FastForward(); yield return null;
+            _game.Presenter.FastForward(); yield return null;
             Assert.That(_game.State.Players[0].UnitsOnBoard.First().Cell, Is.EqualTo(destination));
             var ready = _host.GetComponentsInChildren<Button>().Single(b => b.name == "End turn");
             Assert.That(ready.GetComponentInChildren<Text>().text, Is.EqualTo("Ready"));

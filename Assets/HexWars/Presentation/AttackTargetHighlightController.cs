@@ -27,6 +27,18 @@ namespace HexWars.Presentation
                 AddHalo(targets[i], afterMove);
         }
 
+        public void ShowAvailable(IReadOnlyList<AttackPreviewTarget> current, IReadOnlyList<AttackPreviewTarget> afterMove)
+        {
+            Show(current);
+            if (afterMove == null) return;
+            foreach (var target in afterMove)
+            {
+                bool alreadyShown = false;
+                foreach (var available in current) if (available.UnitId == target.UnitId) { alreadyShown = true; break; }
+                if (!alreadyShown) AddHalo(target, true);
+            }
+        }
+
         public void Clear()
         {
             for (int i = 0; i < _pool.Count; i++)
@@ -114,7 +126,9 @@ namespace HexWars.Presentation
             var world = HexLayout.ToWorld(target.Cell, _board.HexSize);
             float top = (target.Elevation + 1) * _board.LevelHeight;
             halo.transform.localPosition = new Vector3((float)world.x, top + 0.075f, (float)world.z);
-            halo.GetComponentInChildren<TextMesh>(true).text = afterMove ? "AFTER MOVE" : "IN RANGE";
+            var text = halo.GetComponentInChildren<TextMesh>(true);
+            text.text = afterMove ? "AFTER MOVE" : "IN RANGE";
+            text.color = afterMove ? new Color(.70f,.79f,.78f) : new Color(1f,.94f,.76f);
             halo.SetActive(true);
         }
 
