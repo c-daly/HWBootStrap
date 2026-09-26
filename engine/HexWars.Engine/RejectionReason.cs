@@ -32,5 +32,6 @@ namespace HexWars.Engine
         BarracksFull,
         PlacementOnly,
         PlacementAlreadyFinished,
+        NoMoveToUndo,
     }
 }

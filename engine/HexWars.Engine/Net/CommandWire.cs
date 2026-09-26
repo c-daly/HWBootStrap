@@ -19,6 +19,7 @@ namespace HexWars.Engine
                 case FinishPlacement p: return $"READY {(int)p.Issuer}";
                 case MoveUnit m:        return $"M {(int)m.Issuer} {m.UnitId} {m.Dest.Q} {m.Dest.R}";
                 case AttackUnit a:      return $"A {(int)a.Issuer} {a.AttackerId} {a.TargetId}";
+                case UndoMove u:        return $"UNDO {(int)u.Issuer}";
                 case EndTurn e:         return $"E {(int)e.Issuer}";
                 case CreateUnit cu when UnitArt.Normalize(cu.ArtId).Length > 0:
                     return $"C2 {(int)cu.Issuer} {WriteStats(cu.Stats)} {UnitArt.Normalize(cu.ArtId)} {EncodeName(cu.Name)}";
@@ -47,6 +48,9 @@ namespace HexWars.Engine
                 case "READY":
                     if (p.Length != 2) throw new FormatException("malformed placement confirmation");
                     return new FinishPlacement(issuer);
+                case "UNDO":
+                    if (p.Length != 2) throw new FormatException("malformed undo command");
+                    return new UndoMove(issuer);
                 case "M": return new MoveUnit(issuer, I(p[2]), new HexCoord(I(p[3]), I(p[4])));
                 case "A": return new AttackUnit(issuer, I(p[2]), I(p[3]));
                 case "E": return new EndTurn(issuer);

@@ -17,7 +17,7 @@ namespace HexWars.Presentation
         GameObject _canvas, _dialog; RectTransform _panel, _squadContent;
         Text _turn, _round, _mission, _context, _name, _role, _hp, _stats, _availability;
         Text _moveText, _attackText, _decision, _target, _result, _math, _note, _left, _cycleLabel;
-        Button _move, _attack, _confirm, _end, _workshop, _previous, _next;
+        Button _move, _attack, _confirm, _end, _workshop, _previous, _next, _undo;
         Image _health, _targetHealth, _targetLoss;
         UnitPortrait _portrait;
         readonly List<Button> _squad = new List<Button>();
@@ -105,6 +105,7 @@ namespace HexWars.Presentation
             float fieldW=narrow?width:width-W-54;
             _mission=Label(_canvas.transform,"",26,77,fieldW-50,24,15,Muted);
             Button(bar.transform,"Game menu","Menu",width-108,13,84,32,()=>FindAnyObjectByType<EscapeMenu>()?.Toggle(),14);
+            _undo=Button(bar.transform,"Undo move","Undo move",width-385,13,119,32,()=>_input?.UndoLastMove(),14);
             float panelY=narrow?height*.51f:76,panelH=narrow?height*.49f-16:height-99;
             float panelW=narrow?width-32:W;
             _territoryLayout=_game.State!=null&&_game.State.Config.TerritoryMode&&!_game.State.PlacingStartingUnits;
@@ -223,10 +224,12 @@ namespace HexWars.Presentation
             if(changed||_lastSelected!=(_input?.SelectedId??-1)||_lastWaiting!=waiting)RebuildSquad();
             _lastState=s;_lastSelected=_input?.SelectedId??-1;_lastWaiting=waiting;
             if(_input==null)return;
+            _undo.interactable=_input.CanUndoMove;
             if(changed && !waiting && (_input.SelectedId<0 || battleStarting || (s.PlacingStartingUnits && _input.SelectedUnit?.Owner!=viewer)))
                 foreach(var first in s.Player(viewer).UnitsOnBoard) if(first.IsAlive){_input.SelectById(first.Id);break;}
             var chosen=_input.SelectedUnit;
             _confirm.interactable=false;_destinations.Clear();_targets.Clear();
+            _confirm.gameObject.SetActive(true);
             _targetHealth.rectTransform.sizeDelta=new Vector2(0,5);_targetLoss.rectTransform.sizeDelta=new Vector2(0,5);
             if(!chosen.HasValue)
             {
@@ -255,7 +258,8 @@ namespace HexWars.Presentation
                 _decision.text="STARTING POSITION";_result.text="";_math.text="Select a unit, then choose an empty highlighted hex.";
                 _target.text=_input.Destination.HasValue?"Cell "+Cell(_input.Destination.Value):"Choose a starting hex";
                 _confirm.GetComponentInChildren<Text>().text="Place here";_confirm.interactable=arrange&&_input.Destination.HasValue;
-                _note.text="Double-click a hex to place. No movement or points spent.";
+                _confirm.gameObject.SetActive(false);
+                _note.text="Click a hex to place. No movement or points spent.";
                 _context.text="Raised hexes are available too. Select Ready when your army is arranged.";
                 _left.text="Arrange your army";_previous.interactable=_next.interactable=arrange&&_destinations.Count>0;
                 _cycleLabel.text=$"{_destinations.Count} starting hexes";return;
@@ -274,19 +278,24 @@ namespace HexWars.Presentation
             Tint(_attack,_input.Mode==UnitInputController.Intent.Attack?new Color(.39f,.28f,.22f):new Color(.15f,.21f,.25f));
             bool moving=_input.Mode==UnitInputController.Intent.Move;
             Tint(_confirm,moving?new Color(.28f,.53f,.46f):new Color(.65f,.40f,.27f));
-            _note.text=_input.AwaitingServer?"Command sent. The server has not confirmed it yet.":moving?"":"Attacking ends this unit’s movement.";
+            _note.text=_input.AwaitingServer?"Waiting for the server...":moving?
+                (s.Config.FogOfWar?"Fog is on: moves cannot be undone.":"Click a hex to move. Ctrl+Z undoes the last move."):
+                "Click the target again to fire. Movement then ends.";
             _decision.text="PREVIEW";
             _target.text=moving?"Choose a destination":"Choose a target";_result.text="";
             _math.text=spent?"This unit has already attacked.":"";
             _confirm.GetComponentInChildren<Text>().text=moving?"Choose a destination":spent?"Attack used":"Choose a target";
             _context.text=$"Cell {Cell(u.Cell)} · Height {u.Elevation}"+(s.Config.BiomesEnabled?$" · {s.Board.TileAt(u.Cell).Terrain}":"");
-            if(moving&&_input.LockedRoute!=null&&_input.Destination.HasValue)
+            _confirm.gameObject.SetActive(!moving || _input.LockedRoute!=null);
+            if(moving&&_input.HoverRoute!=null&&_input.HoverDestination.HasValue)
             {
-                var route=_input.LockedRoute;string dest=Cell(_input.Destination.Value);
+                var route=_input.HoverRoute;string dest=Cell(_input.HoverDestination.Value);
                 _target.text=$"Cell {dest}";_result.text=$"{route.HorizontalCost} move  /  {route.VerticalCost} climb";_result.color=GraphitePieces.Mint;
-                _math.text=$"Remaining: {route.HorizontalRemaining} move · {route.VerticalRemaining} climb"+(_detailsOpen?$"\nDestination height {s.Board.TileAt(_input.Destination.Value).Elevation}\nAttack stays ready until you fire.":"");
+                _math.text=$"Remaining: {route.HorizontalRemaining} move · {route.VerticalRemaining} climb"+(_detailsOpen?$"\nDestination height {s.Board.TileAt(_input.HoverDestination.Value).Elevation}\nAttack stays ready until you fire.":"");
                 _confirm.GetComponentInChildren<Text>().text="Move to "+dest;_confirm.interactable=command;
                 _context.text=$"Route to {dest}";
+                var preview=GameEngine.Apply(s,new MoveUnit(s.ActivePlayer,u.Id,_input.HoverDestination.Value));
+                if(preview.Success&&preview.NewState.ActivePlayer!=s.ActivePlayer)_note.text="This move ends your turn and cannot be undone.";
             }
             else if(!moving&&TacticalForecast.TryCreate(s,viewer,u.Id,_input.TargetId,out var forecast))
             {
@@ -317,7 +326,7 @@ namespace HexWars.Presentation
                 bool canMove=active&&!spent&&MovementService.Routes(s,u).Count>0;
                 bool canAttack=active&&!spent&&AttackPreviewTargets.Resolve(s,u,null,Seat).Count>0;
                 if(canMove||canAttack)canAct++;
-                var b=Button(_squadContent,"Select unit "+id,"",x,0,186,66,()=>_input?.SelectById(id,true));_squad.Add(b);
+                var b=Button(_squadContent,"Select unit "+id,"",x,0,186,66,()=>_input?.SelectReadyUnitOfKind(id));_squad.Add(b);
                 Tint(b,_input!=null&&_input.SelectedId==id?new Color(.22f,.35f,.35f):Panel);
                 var p=GraphiteWorkshop.Portrait(b.transform,UnitArt.Index(UnitArt.Resolve(u.ArtId,u.Stats)),0,0,58,u.Owner);Place(p.rectTransform,2,2,58,58);
                 Label(b.transform,u.DisplayName,65,7,110,22,14);
