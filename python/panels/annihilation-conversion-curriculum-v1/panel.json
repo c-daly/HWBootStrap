@@ -1,0 +1,164 @@
+{
+  "schema_version": 1,
+  "panel": "annihilation-conversion-curriculum-v1",
+  "status": "complete",
+  "outcome": "curriculum_gate_failed",
+  "confirmation_bank_consumed": false,
+  "next_authorized_task": "bounded_search_baseline",
+  "scope": "tactical-v2 diagnostic conversion curriculum, 13x9, three controllable slots",
+  "authority_plan": "docs/superpowers/plans/2026-07-29-annihilation-conversion-curriculum-and-algorithm-decision.md",
+  "source_revision": {
+    "git_commit": "ff8ad35d68ec6ddf002c82f471313c3e3b6caf4e",
+    "working_tree": "dirty; evidence identities below are content hashes"
+  },
+  "algorithm": "maskable_ppo",
+  "policy": "HexCNN",
+  "opponent": "random",
+  "training": {
+    "timesteps": 51200,
+    "workers": 4,
+    "training_seeds": [101, 113, 127],
+    "alternating_learner_seat": true,
+    "algorithm_options": {
+      "learning_rate": 0.0003,
+      "n_epochs": 10,
+      "target_kl": 0.02
+    },
+    "reward": {
+      "draw_credit_weight": 0.0,
+      "closing_weight": 0.0,
+      "value_delta": "retained",
+      "step_penalty": "retained for isolation"
+    }
+  },
+  "placement_policy": "profiled-seeded-v1",
+  "scenario_artifacts": {
+    "profiled_standard": {
+      "path": "python/config/experiments/annihilation-profiled-standard.json",
+      "sha256": "5df9b345296d41c8772655b26fa5dc86e12da20e267b6b0b0cedf901a8e0b8f4"
+    },
+    "mixed_conversion": {
+      "path": "python/config/experiments/annihilation-profiled-mixed.json",
+      "sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76"
+    }
+  },
+  "expected_tactical_contract": {
+    "contract_hash": "efbde316a5e71e104467b0ebb7848d2b56d739997b7de3cc892e39704b744e23",
+    "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f"
+  },
+  "development_evidence": [
+    {
+      "path": "python/panels/annihilation-conversion-curriculum-v1/development-profile-smoke.json",
+      "sha256": "8e102d5960b3569b91495b2db77fc1be02a5108dbeee2f2ba66e6962e2cb86c6",
+      "seed_bank": "development",
+      "purpose": "cross-stack forced-profile reciprocal smoke; not panel evidence"
+    }
+  ],
+  "training_evidence": [
+    {
+      "path": "python/panels/annihilation-conversion-curriculum-v1/training-schedule-audit.json",
+      "sha256": "a3af8ac5d7d0a777db799b491684186e2f2e1a9ab5344ebdbde7974ed4e3ba94",
+      "frozen_before_locked_evaluation": true
+    }
+  ],
+  "result_evidence": [
+    {
+      "path": "python/panels/annihilation-conversion-curriculum-v1/aggregate.json",
+      "sha256": "843428842bfdd019ae1921fa71067419324dbbb672513ff01d8b06c5e8494b8b"
+    },
+    {
+      "path": "python/panels/annihilation-conversion-curriculum-v1/REPORT.md",
+      "sha256": "2c49f1a779b3139171962d13df92dd61ede17f33345a8e0a698cf71b83138b51"
+    }
+  ],
+  "profile_catalog": [
+    {"id": "standard-3v3", "learner_units": 3, "opponent_units": 3, "separation": "legacy-mirrored"},
+    {"id": "conversion-3v1-near", "learner_units": 3, "opponent_units": 1, "separation": "near"},
+    {"id": "conversion-3v1-medium", "learner_units": 3, "opponent_units": 1, "separation": "medium"},
+    {"id": "conversion-3v1-far", "learner_units": 3, "opponent_units": 1, "separation": "far"},
+    {"id": "conversion-2v1-near", "learner_units": 2, "opponent_units": 1, "separation": "near"},
+    {"id": "conversion-2v1-medium", "learner_units": 2, "opponent_units": 1, "separation": "medium"},
+    {"id": "conversion-2v1-far", "learner_units": 2, "opponent_units": 1, "separation": "far"},
+    {"id": "conversion-1v1-near", "learner_units": 1, "opponent_units": 1, "separation": "near"},
+    {"id": "conversion-1v1-medium", "learner_units": 1, "opponent_units": 1, "separation": "medium"},
+    {"id": "conversion-1v1-far", "learner_units": 1, "opponent_units": 1, "separation": "far"}
+  ],
+  "conditions": {
+    "profiled_standard": {
+      "standard-3v3": 10000,
+      "conversion-3v1-near": 0,
+      "conversion-3v1-medium": 0,
+      "conversion-3v1-far": 0,
+      "conversion-2v1-near": 0,
+      "conversion-2v1-medium": 0,
+      "conversion-2v1-far": 0,
+      "conversion-1v1-near": 0,
+      "conversion-1v1-medium": 0,
+      "conversion-1v1-far": 0
+    },
+    "mixed_conversion": {
+      "standard-3v3": 4000,
+      "conversion-3v1-near": 1000,
+      "conversion-3v1-medium": 0,
+      "conversion-3v1-far": 1000,
+      "conversion-2v1-near": 1000,
+      "conversion-2v1-medium": 0,
+      "conversion-2v1-far": 1000,
+      "conversion-1v1-near": 1000,
+      "conversion-1v1-medium": 0,
+      "conversion-1v1-far": 1000
+    }
+  },
+  "evaluation": {
+    "seed_manifest": "seed-banks.json",
+    "reciprocal": true,
+    "standard_maps_per_model": 50,
+    "standard_games_per_model": 100,
+    "conversion_maps_per_profile_per_model": 10,
+    "conversion_games_per_model": 180,
+    "controls": ["greedy", "random"],
+    "primary_metric": "engine-declared annihilation wins",
+    "draws_are_wins": false,
+    "paired_keys": ["training_seed", "map_seed", "start_profile", "candidate_seat"],
+    "secondary_metrics": [
+      "cycling_draw_incidence",
+      "failed_conversion_incidence",
+      "rounds_to_win",
+      "final_health_adjusted_advantage",
+      "action_waste",
+      "loss_rate",
+      "seat_consistency",
+      "environment_steps",
+      "optimizer_updates",
+      "wall_clock_time",
+      "evaluation_inference_time"
+    ]
+  },
+  "curriculum_pass_gate": {
+    "conversion_win_rate_improvement_percentage_points_min": 15,
+    "conversion_wins_must_improve_for_every_training_seed": true,
+    "cycling_draw_relative_reduction_min": 0.25,
+    "held_out_medium_separation_must_improve": true,
+    "standard_win_rate_drop_percentage_points_max": 5,
+    "per_seed_standard_win_rate_drop_percentage_points_max": 15,
+    "loss_rate_increase_percentage_points_max": 5,
+    "effect_required_in_both_candidate_seats": true
+  },
+  "locked_evidence": [
+    {"path": "python/panels/annihilation-reduced-v1/REPORT.md", "sha256": "6eb3c897f5443be59754a66e8347482982208a548b2eb197ccc2193408d72345"},
+    {"path": "python/panels/annihilation-reduced-v1/aggregate.json", "sha256": "3d57117c7c59f514fc22ebaceee3077e9fb4e5beffe91aefc2d1246110b8d87c"},
+    {"path": "python/panels/annihilation-optimizer-v1/REPORT.md", "sha256": "fe26bae0e48ea6e516dec5e55b3effd8fd94506b7ec2fe2426c6049021c21cd7"},
+    {"path": "python/panels/annihilation-optimizer-v1/aggregate.json", "sha256": "0af29382f583ef360e5e3b7a39efaf7a49b892b7e864c8cda0255d396d2b9ace"},
+    {"path": "python/panels/annihilation-targetkl-continuation-v1/REPORT.md", "sha256": "23924fcf4a85b3006c8f1f77c804abbbe5727cb23423e6526e524c3ef3056bb3"},
+    {"path": "python/panels/annihilation-targetkl-continuation-v1/aggregate.json", "sha256": "9720decffb2e10fee471643b1e89597914b2172e1f9298b65e22a76bb157cca3"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed11-tb-v1/checkpoints/step_000051200.zip", "sha256": "b248a279741fbcc27884971dd2037fcb79b0c98aadf8f188fa1ddd9ee9724517"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed11-tb-v1/run.json", "sha256": "04434abc3b80444e69761103d06d328a6f2d78aab9c5cc646ea5dae457aab937"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed11-tb-v1/scenario.json", "sha256": "8b2ec05162b525b6ef8355acb2b8d211bf592fa062c3f7a0b8a814786452a720"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed23-tb-v1/checkpoints/step_000051200.zip", "sha256": "c05f6fc40b0d1d148d281dec70470c9ceac2ddab820f89003d313504179ab275"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed23-tb-v1/run.json", "sha256": "de45d554fa348ab5278e04376d8d380b96c79337a970d0ce815bcababebf7102"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed23-tb-v1/scenario.json", "sha256": "8b2ec05162b525b6ef8355acb2b8d211bf592fa062c3f7a0b8a814786452a720"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed47-tb-v1/checkpoints/step_000051200.zip", "sha256": "9dbd954d29ebd89d36648f8127572cf0df6f5eeab7b17a74fc3029102270585f"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed47-tb-v1/run.json", "sha256": "bced90db90e6498e9add9725f6b55bb564de759035029cac894776126670a6b4"},
+    {"path": "python/runs/annihilation-optimizer-value_targetkl-seed47-tb-v1/scenario.json", "sha256": "8b2ec05162b525b6ef8355acb2b8d211bf592fa062c3f7a0b8a814786452a720"}
+  ]
+}

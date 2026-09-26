@@ -17,7 +17,7 @@ using HexWars.GymServer;
 //          {"cmd":"step","action":5}        -> {"obs":[...],"reward":r,"terminated":b,"truncated":b,"mask":[...]}
 //          {"cmd":"close"}                  -> (exits)
 //
-// Args: --opponent greedy|random   --seat 0|1   --environment tactical-v1|adaptive-v1
+// Args: --opponent greedy|random|passive   --seat 0|1   --environment tactical-v1|adaptive-v1
 string opponent = "greedy";
 int seat = 0;
 string environment = "tactical-v1";
@@ -59,6 +59,8 @@ TacticalV3Config? tacticalV3Config = environment == MlContract.TacticalV3Version
 
 Func<int, IAgent> opponentFactory = opponent == "random"
     ? (s => new RandomAgent(s))
+    : opponent == "passive"
+        ? (_ => new PassiveAgent())
     : (s => new GreedyAgent(s));
 
 PlayerId learningSeat = seat == 1 ? PlayerId.Player1 : PlayerId.Player0;
@@ -285,15 +287,19 @@ string RequireTacticalV3Command(JsonElement element)
             $"tactical-v3 {command} has unknown or missing fields");
     if (command == "duel_oracle_step" || command == "duel_oracle_query")
     {
-        if (element.GetProperty("search_depth").GetInt32() != 4)
+        bool reachCell = tacticalV3Config!.Objective != null;
+        int requiredDepth = reachCell ? 0 : 4;
+        if (element.GetProperty("search_depth").GetInt32() != requiredDepth)
             throw new InvalidDataException(
-                $"tactical-v3 {command} search_depth must be 4");
+                $"tactical-v3 {command} search_depth must be {requiredDepth}");
         int expansionBudget = element.GetProperty("expansion_budget").GetInt32();
         if (expansionBudget != 512 && expansionBudget != 2048)
             throw new InvalidDataException(
                 $"tactical-v3 {command} expansion_budget must be 512 or 2048");
-        if (element.GetProperty("heuristic_identity").GetString() !=
-            BoundedSearchAgent.HeuristicIdentity)
+        string requiredHeuristic = reachCell
+            ? TacticalV3ObjectiveConfig.ReachCellTeacherHeuristicIdentity
+            : BoundedSearchAgent.HeuristicIdentity;
+        if (element.GetProperty("heuristic_identity").GetString() != requiredHeuristic)
             throw new InvalidDataException(
                 $"tactical-v3 {command} heuristic_identity is unsupported");
     }
@@ -337,6 +343,7 @@ IAgent? MakeController(string? spec, int agentSeed)
 {
     if (spec == "greedy") return new GreedyAgent(agentSeed);
     if (spec == "random") return new RandomAgent(agentSeed);
+    if (spec == "passive") return new PassiveAgent();
     if (spec == "bounded-search")
         return new BoundedSearchAgent(
             BoundedSearchAgent.DefaultExpansionBudget,
@@ -347,7 +354,7 @@ IAgent? MakeController(string? spec, int agentSeed)
 void RequireTacticalV3ControllerSpec(string? spec, string field)
 {
     if (spec == null || spec == "external" || spec == "greedy" ||
-        spec == "random" || spec == "bounded-search")
+        spec == "random" || spec == "passive" || spec == "bounded-search")
         return;
     throw new InvalidDataException(
         $"tactical-v3 duel_reset {field} controller '{spec}' is unsupported");

@@ -8,7 +8,7 @@ namespace HexWars.Presentation.Tests
     public sealed class AttackTargetHighlightControllerTests
     {
         [Test]
-        public void Show_CreatesColliderFreeCircularHaloForEachTarget()
+        public void Show_CreatesColliderFreeTargetBracketsAtTheCellSurface()
         {
             var boardObject = new GameObject("Board");
             try
@@ -31,8 +31,8 @@ namespace HexWars.Presentation.Tests
                 Assert.That(halo.GetComponent<Collider>(), Is.Null);
                 Assert.That(halo.GetComponent<MeshFilter>().sharedMesh.vertexCount, Is.GreaterThan(12));
                 Assert.That(halo.localPosition.y,
-                    Is.GreaterThan(boardObject.GetComponent<BoardRenderer>().LevelHeight + 0.70f),
-                    "the halo must render above the unit disc, icon, and health bar");
+                    Is.EqualTo(boardObject.GetComponent<BoardRenderer>().LevelHeight + 0.075f).Within(.001f),
+                    "target brackets sit outside the chassis at the tile surface");
             }
             finally
             {

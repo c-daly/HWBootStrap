@@ -1,0 +1,86 @@
+{
+  "date": "2026-09-25T00:15:03.426Z",
+  "scope": "Production WebGL-only server startup without Steam configuration; server-only change, existing WebGL bundle unchanged",
+  "webglCacheKey": "ff3139db",
+  "before": {
+    "environment": "Production",
+    "lobbyProvider": "Legacy (default)",
+    "describeEnvironmentExitCode": 2,
+    "missingKeys": [
+      "STEAM_APP_ID",
+      "STEAM_PUBLISHER_WEB_API_KEY",
+      "DATABASE_URL",
+      "MATCH_PUBLIC_BASE_URL",
+      "MATCH_BUILD_ID"
+    ]
+  },
+  "after": {
+    "environment": "Production",
+    "lobbyProvider": "Legacy (default)",
+    "describeEnvironmentExitCode": 0,
+    "steamAppId": null,
+    "databaseTarget": "none",
+    "publicBaseUrl": null
+  },
+  "negativeControl": {
+    "environment": "Production",
+    "lobbyProvider": "Steam",
+    "describeEnvironmentExitCode": 2,
+    "missingKeys": [
+      "STEAM_APP_ID",
+      "STEAM_PUBLISHER_WEB_API_KEY",
+      "DATABASE_URL",
+      "MATCH_PUBLIC_BASE_URL",
+      "MATCH_BUILD_ID"
+    ]
+  },
+  "configurationTests": {
+    "passed": 121,
+    "failed": 0,
+    "skipped": 0
+  },
+  "serverTests": {
+    "passed": 962,
+    "failed": 0,
+    "skipped": 0,
+    "database": "Disposable PostgreSQL 16"
+  },
+  "releasePublish": {
+    "targetFramework": "net8.0",
+    "result": "passed"
+  },
+  "browser": {
+    "date": "2026-09-25T00:15:03.426Z",
+    "browser": "149.0.7827.53",
+    "environment": "Production",
+    "steamConfigured": false,
+    "databaseConfigured": false,
+    "steam": 404,
+    "v2": 404,
+    "health": 200,
+    "games": 200,
+    "hostSeat": "SEAT 0",
+    "guestSeat": "SEAT 1",
+    "listed": true,
+    "sameStart": true,
+    "applied": [
+      "APPLY E 0",
+      "APPLY E 0"
+    ],
+    "errors": [],
+    "failedRequests": []
+  },
+  "browserScope": "Loaded the published WebGL page. Two native browser WebSocket connections exercised anonymous room discovery, seating, catalog exchange, matching START state and end-turn broadcast. This does not drive Unity Host/Join buttons or establish restart recovery.",
+  "validationHistory": "The first two browser assertions flagged Chrome ERR_ABORTED events on deliberate disabled-route 404 probes; all multiplayer assertions passed. Negative route checks were moved to the HTTP test client, preserving strict error checks for actual page traffic. Initial receipts are retained locally in Library/WebGlSteamOptional/browser-first-check.json and browser-second-check.json.",
+  "deployment": "Local verification only; no public production deployment.",
+  "localPreview": {
+    "url": "http://localhost:8196",
+    "environment": "Production",
+    "steamSettingsPresent": false,
+    "windowsIndexStatus": 200,
+    "windowsReadinessStatus": 200,
+    "chromePageErrors": [],
+    "titleScreenAndHLogo": "visually confirmed",
+    "screenshot": "Library/WebGlSteamOptional/production-title.png"
+  }
+}

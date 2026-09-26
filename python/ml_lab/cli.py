@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Sequence, TextIO
 
 from .benchmark import benchmark_gymserver
-from .contracts import RunConfig, request_stop
+from .contracts import RunConfig, request_stop, validate_run_name
 from .controllers import ControllerResolver, ControllerSpec, normalize_controller_spec
 from .doctor import doctor_environment
 from .evaluation import DEFAULT_HELD_OUT_SEED, evaluate_controllers, publish_candidate
@@ -31,6 +31,165 @@ DEFAULT_SERVER = PROJECT_ROOT / "engine" / "HexWars.GymServer" / "bin" / "Releas
 DEFAULT_RUNS_ROOT = PROJECT_ROOT / "python" / "runs"
 TERMINAL_STATES = frozenset({"stopped", "completed", "failed"})
 JSON_SCHEMA_VERSION = 1
+
+
+def _comparison_path(path: Path) -> Path:
+    """Resolve existing ancestors while keeping a missing leaf comparable."""
+
+    return Path(path).resolve(strict=False)
+
+
+def _recorded_run_candidates(value: object, runs_root: Path) -> tuple[Path, ...]:
+    """Return the direct and moved-runs-root interpretations used by retry."""
+
+    if type(value) is not str or not value.strip():
+        return ()
+    direct = Path(value)
+    basename = Path(value.replace("\\", "/")).name
+    candidates = [direct]
+    if basename:
+        fallback = Path(runs_root) / basename
+        if fallback != direct:
+            candidates.append(fallback)
+    return tuple(candidates)
+
+
+def _recorded_run_protections(value: object, runs_root: Path) -> tuple[Path, ...]:
+    """Protect every candidate whose creation could change fallback resolution."""
+
+    protected: list[Path] = []
+    for candidate in _recorded_run_candidates(value, runs_root):
+        protected.append(candidate)
+        is_junction = getattr(candidate, "is_junction", None)
+        if (
+            candidate.is_dir()
+            and not candidate.is_symlink()
+            and not (is_junction is not None and is_junction())
+        ):
+            break
+    return tuple(protected)
+
+
+def _quiet_json_object(path: Path) -> dict[str, Any] | None:
+    try:
+        value = read_json(path)
+    except (OSError, TypeError, ValueError):
+        return None
+    return value if type(value) is dict else None
+
+
+def _retry_protected_runs(collection_run: Path, runs_root: Path) -> set[Path]:
+    """Best-effort source discovery that is safe to perform before log creation."""
+
+    selected = _comparison_path(Path(collection_run))
+    protected = {selected}
+    manifest = _quiet_json_object(selected / "run.json")
+    owner_candidates: list[Path] = []
+    if manifest is not None:
+        owner_value = manifest.get("collection_source_run")
+        for candidate in _recorded_run_protections(owner_value, runs_root):
+            resolved = _comparison_path(candidate)
+            protected.add(resolved)
+            owner_candidates.append(resolved)
+
+        source_policy = manifest.get("source_policy")
+        if type(source_policy) is dict:
+            for candidate in _recorded_run_protections(
+                source_policy.get("run"), runs_root,
+            ):
+                protected.add(_comparison_path(candidate))
+        config = manifest.get("config")
+        if type(config) is dict:
+            for candidate in _recorded_run_protections(
+                config.get("initialization_source"), runs_root,
+            ):
+                protected.add(_comparison_path(candidate))
+
+    # The collection manifest is authoritative for the source policy. Inspect the
+    # selected copy and, when recorded, the owner's copy; malformed evidence is
+    # left for the strict backend validator after a safe log destination is chosen.
+    for run in (selected, *owner_candidates):
+        collection = _quiet_json_object(run / "collection.json")
+        if collection is None:
+            continue
+        source = collection.get("source")
+        if type(source) is not dict:
+            continue
+        for candidate in _recorded_run_protections(source.get("run"), runs_root):
+            protected.add(_comparison_path(candidate))
+    return protected
+
+
+def _validate_retry_prelog_destination(args: argparse.Namespace) -> None:
+    if args.command != "retry-structured":
+        return
+    runs_root = Path(args.runs_root)
+    destination = _comparison_path(runs_root / args.run)
+    for source in _retry_protected_runs(Path(args.collection_run), runs_root):
+        if destination == source or source in destination.parents:
+            raise ValueError(
+                "structured retry destination must be outside the selected, "
+                "collection-owner, and source-policy runs"
+            )
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    left = _comparison_path(left)
+    right = _comparison_path(right)
+    return left == right or left in right.parents or right in left.parents
+
+
+def _outcome_protected_sources(args: argparse.Namespace) -> tuple[Path, ...]:
+    if args.command != "train-outcome":
+        return ()
+    protected: list[Path] = []
+    if args.source_run is not None:
+        protected.append(Path(args.source_run))
+    try:
+        opponent = normalize_controller_spec(args.opponent)
+    except (OSError, ValueError):
+        # Strict controller validation still reports malformed specs later. This
+        # best-effort pass only identifies valid source paths before log creation.
+        return tuple(protected)
+    if opponent.kind == "run" and opponent.path is not None:
+        protected.append(opponent.path)
+    # Outcome training currently accepts run controllers only. Protect legacy
+    # checkpoint and snapshot sources too so logging remains fail-closed before
+    # the strict backend validator reports that they are unsupported.
+    elif opponent.kind == "snapshot" and opponent.source_run is not None:
+        protected.append(opponent.source_run)
+    elif opponent.kind == "checkpoint" and opponent.path is not None:
+        protected.append(opponent.path)
+    return tuple(protected)
+
+
+def _validate_outcome_prelog_destination(args: argparse.Namespace) -> None:
+    if args.command != "train-outcome":
+        return
+    destination = Path(args.runs_root) / args.run
+    if any(
+        _paths_overlap(destination, source)
+        for source in _outcome_protected_sources(args)
+    ):
+        raise ValueError(
+            "outcome training destination must be outside initialization and "
+            "model-opponent sources"
+        )
+
+
+def _validate_training_prelog_destination(args: argparse.Namespace) -> None:
+    if args.command not in {
+        "train", "train-structured", "train-outcome", "retry-structured",
+        "resume",
+    }:
+        return
+    validate_run_name(args.run)
+    runs_root = _comparison_path(Path(args.runs_root))
+    destination = _comparison_path(Path(args.runs_root) / args.run)
+    if destination.parent != runs_root:
+        raise ValueError("training run destination must be a direct child of runs root")
+    _validate_retry_prelog_destination(args)
+    _validate_outcome_prelog_destination(args)
 
 
 def controller_config(raw: str | dict[str, Any] | ControllerSpec) -> dict[str, Any]:
@@ -153,6 +312,50 @@ def build_parser() -> argparse.ArgumentParser:
     _add_no_console_output_argument(structured)
     _add_json_argument(structured)
 
+    outcome = subcommands.add_parser(
+        "train-outcome",
+        help="train a tactical-v3 candidate from complete-game outcomes",
+    )
+    outcome.add_argument("--run", required=True)
+    outcome.add_argument("--source-run", type=Path)
+    outcome.add_argument("--scenario-file", type=Path, required=True)
+    outcome.add_argument("--opponent", default="passive")
+    outcome.add_argument("--timesteps", type=int, required=True)
+    outcome.add_argument("--seed", type=int, default=227)
+    outcome.add_argument("--device", default="auto")
+    outcome.add_argument("--rollout-decisions", type=int, default=64)
+    outcome.add_argument("--validation-games", type=int, default=32)
+    outcome.add_argument("--validation-every-updates", type=int, default=8)
+    outcome.add_argument("--micro-batch-size", type=int, default=32)
+    outcome.add_argument("--learning-rate", type=float, default=3e-4)
+    outcome.add_argument(
+        "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
+    )
+    outcome.add_argument(
+        "--tracker",
+        action="append",
+        help="local or tensorboard",
+    )
+    outcome.add_argument("--wandb-project")
+    outcome.add_argument("--wandb-entity")
+    outcome.add_argument("--wandb-mode")
+    outcome.add_argument("--wandb-group")
+    outcome.add_argument("--wandb-tag", action="append", default=[])
+    outcome.add_argument("--wandb-upload-artifacts", action="store_true")
+    _add_runtime_arguments(outcome)
+    _add_no_console_output_argument(outcome)
+    _add_json_argument(outcome)
+
+    structured_retry = subcommands.add_parser(
+        "retry-structured",
+        help="train a new sibling from an authenticated tactical-v3 collection",
+    )
+    structured_retry.add_argument("--collection-run", type=Path, required=True)
+    structured_retry.add_argument("--run", required=True)
+    _add_runtime_arguments(structured_retry)
+    _add_no_console_output_argument(structured_retry)
+    _add_json_argument(structured_retry)
+
     structured_preflight = subcommands.add_parser(
         "preflight-structured",
         help="validate a tactical-v3 continuation without creating a run",
@@ -164,6 +367,26 @@ def build_parser() -> argparse.ArgumentParser:
     structured_preflight.add_argument("--device", default="auto")
     structured_preflight.add_argument("--server", default=str(DEFAULT_SERVER))
     _add_json_argument(structured_preflight)
+
+    outcome_preflight = subcommands.add_parser(
+        "preflight-outcome",
+        help="validate tactical-v3 outcome training without creating a run",
+    )
+    outcome_preflight.add_argument("--source-run", type=Path)
+    outcome_preflight.add_argument("--scenario-file", type=Path, required=True)
+    outcome_preflight.add_argument("--opponent", default="passive")
+    outcome_preflight.add_argument("--seed", type=int, default=227)
+    outcome_preflight.add_argument("--device", default="auto")
+    outcome_preflight.add_argument("--rollout-decisions", type=int, default=64)
+    outcome_preflight.add_argument("--validation-games", type=int, default=32)
+    outcome_preflight.add_argument("--validation-every-updates", type=int, default=8)
+    outcome_preflight.add_argument("--micro-batch-size", type=int, default=32)
+    outcome_preflight.add_argument("--learning-rate", type=float, default=3e-4)
+    outcome_preflight.add_argument(
+        "--learner-seat", choices=["alternating", "0", "1"], default="alternating"
+    )
+    outcome_preflight.add_argument("--server", default=str(DEFAULT_SERVER))
+    _add_json_argument(outcome_preflight)
 
     resume = subcommands.add_parser(
         "resume", help="continue a metadata-backed run as a new run"
@@ -665,7 +888,10 @@ def _emit_human(stdout: TextIO, command: str, result: dict[str, Any]) -> None:
             marker = "ok" if check.get("ok") else "unavailable"
             print(f"  {check.get('name')}: {marker} ({check.get('detail', '')})", file=stdout)
         return
-    if command in {"train", "train-structured", "resume", "status"}:
+    if command in {
+        "train", "train-structured", "train-outcome", "retry-structured",
+        "resume", "status",
+    }:
         run = result.get("run")
         if run is None:
             print(f"run completed: {result['run_dir']}", file=stdout)
@@ -716,6 +942,8 @@ def _dispatch(
     runner: Callable[..., Path],
     sleeper: Callable[[float], None],
     structured_runner: Callable[..., Path] | None = None,
+    outcome_runner: Callable[..., Path] | None = None,
+    structured_retry_runner: Callable[..., Path] | None = None,
     status_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     if args.command == "doctor":
@@ -766,6 +994,38 @@ def _dispatch(
                 server_cmd=["dotnet", args.server, "--scenario-file", str(args.scenario_file)],
             )
         )
+    if args.command == "train-outcome":
+        from .tactical_v3_outcome import (
+            OutcomeTrainingConfig,
+            run_outcome_training,
+        )
+
+        config = OutcomeTrainingConfig(
+            run_name=args.run,
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            total_decisions=args.timesteps,
+            seed=args.seed,
+            device=args.device,
+            learner_seat=args.learner_seat,
+            trackers=tuple(_tracker_configs(args)),
+            rollout_decisions=args.rollout_decisions,
+            validation_games=args.validation_games,
+            validation_every_updates=args.validation_every_updates,
+            micro_batch_size=args.micro_batch_size,
+            learning_rate=args.learning_rate,
+        )
+        return _run_result(
+            (outcome_runner or run_outcome_training)(
+                config,
+                runs_root=Path(args.runs_root),
+                server_cmd=[
+                    "dotnet", args.server,
+                    "--scenario-file", str(args.scenario_file),
+                ],
+            )
+        )
     if args.command == "preflight-structured":
         return preflight_structured_continuation(
             source_run=args.source_run,
@@ -779,6 +1039,36 @@ def _dispatch(
                 "--scenario-file",
                 str(args.scenario_file),
             ],
+        )
+    if args.command == "preflight-outcome":
+        from .tactical_v3_outcome import preflight_outcome_training
+
+        return preflight_outcome_training(
+            source_run=args.source_run,
+            scenario_file=args.scenario_file,
+            opponent=args.opponent,
+            seed=args.seed,
+            device=args.device,
+            learner_seat=args.learner_seat,
+            server_cmd=[
+                "dotnet", args.server,
+                "--scenario-file", str(args.scenario_file),
+            ],
+            rollout_decisions=args.rollout_decisions,
+            validation_games=args.validation_games,
+            validation_every_updates=args.validation_every_updates,
+            micro_batch_size=args.micro_batch_size,
+            learning_rate=args.learning_rate,
+        )
+    if args.command == "retry-structured":
+        from .tactical_v3_continuation import run_structured_retry
+
+        return _run_result(
+            (structured_retry_runner or run_structured_retry)(
+                collection_run=Path(args.collection_run),
+                run_name=args.run,
+                runs_root=Path(args.runs_root),
+            )
         )
     if args.command == "resume":
         scenario = _resume_scenario(args)
@@ -892,6 +1182,8 @@ def main(
     *,
     runner: Callable[..., Path] = run_training,
     structured_runner: Callable[..., Path] | None = None,
+    outcome_runner: Callable[..., Path] | None = None,
+    structured_retry_runner: Callable[..., Path] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     stdout: TextIO | None = None,
 ) -> int:
@@ -899,9 +1191,26 @@ def main(
     output = stdout if stdout is not None else sys.stdout
     human_follow = args.command == "status" and args.follow and not args.json
     no_console_output = getattr(args, "no_console_output", False)
+    try:
+        _validate_training_prelog_destination(args)
+    except ValueError as error:
+        if no_console_output:
+            return 1
+        if args.json:
+            _emit_json(
+                output,
+                args.command,
+                {"error": type(error).__name__, "message": str(error)},
+                ok=False,
+            )
+            return 1
+        raise
     with ExitStack() as console_stack:
         stderr_log: TextIO | None = None
-        if args.command in {"train", "train-structured", "resume"}:
+        if args.command in {
+            "train", "train-structured", "train-outcome", "retry-structured",
+            "resume",
+        }:
             stderr_log = console_stack.enter_context(
                 _capture_stderr_to_file(_training_run_dir(args) / "train-err.log")
             )
@@ -917,6 +1226,8 @@ def main(
                 runner=runner,
                 sleeper=sleeper,
                 structured_runner=structured_runner,
+                outcome_runner=outcome_runner,
+                structured_retry_runner=structured_retry_runner,
                 status_update=(
                     (lambda update: _emit_human(output, "status", update))
                     if human_follow

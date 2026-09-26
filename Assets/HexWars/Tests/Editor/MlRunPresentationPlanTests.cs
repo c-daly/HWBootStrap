@@ -64,6 +64,7 @@ namespace HexWars.Presentation.Tests
 
         [TestCase("greedy", "Greedy")]
         [TestCase("random", "Random")]
+        [TestCase("passive", "Passive")]
         public void ScriptedOpponent_RetainsRecordedIdentity(
             string name, string label)
         {

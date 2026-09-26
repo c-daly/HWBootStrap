@@ -9,6 +9,7 @@ using System.Runtime.CompilerServices;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using HexWars.Engine;
 using HexWars.Engine.Rl;
 using NUnit.Framework;
@@ -22,6 +23,9 @@ namespace HexWars.Engine.Tests
 
         private static string MismatchedScenario => RepositoryPath(
             "python", "config", "annihilation-imitation-v1.json");
+
+        private static string TrainingGameTemplates => RepositoryPath(
+            "python", "config", "training-game-templates.json");
 
         public enum WrongReferenceFamily
         {
@@ -507,6 +511,71 @@ namespace HexWars.Engine.Tests
             AssertViewIdentities(next);
         }
 
+        [TestCase(false)]
+        [TestCase(true)]
+        public void Process_CloseStaticTemplateIs4x4OneVsOneAndPassiveOnlyEndsTurn(bool duel)
+        {
+            string scenario = WriteTemplateScenario("tactical-v3-close-static-v1");
+            try
+            {
+                using var server = duel
+                    ? TacticalV3ServerProcess.Start(scenario)
+                    : TacticalV3ServerProcess.StartWithOpponent(scenario, "passive");
+                JsonElement spaces = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = duel ? "duel_spaces" : "spaces",
+                }));
+                JsonElement board = spaces.GetProperty("match").GetProperty("board");
+                JsonElement reset = duel
+                    ? server.Request(JsonSerializer.Serialize(new
+                    {
+                        cmd = "duel_reset", seed = 41,
+                        p0 = "external", p1 = "passive", learner = 0,
+                        start_profile = "conversion-1v1-near", reference_seat = 0,
+                    }))
+                    : server.Request("{\"cmd\":\"reset\",\"seed\":41}");
+                JsonElement units = reset.GetProperty("observation").GetProperty("units");
+                HexCoord selfCell = UnitCell(reset, "self");
+                HexCoord opponentCell = UnitCell(reset, "opponent");
+                int initialRound = RuleValue(reset, "round");
+                JsonElement endTurn = reset.GetProperty("candidates").EnumerateArray()
+                    .Single(candidate =>
+                        candidate.GetProperty("kind").GetString() == "end_turn");
+
+                JsonElement next = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = duel ? "duel_step" : "step",
+                    decision_id = reset.GetProperty("decision_id").GetInt64(),
+                    candidate_id = endTurn.GetProperty("candidate_id").GetInt32(),
+                }));
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(board.GetProperty("width").GetInt32(), Is.EqualTo(4));
+                    Assert.That(board.GetProperty("height").GetInt32(), Is.EqualTo(4));
+                    Assert.That(reset.GetProperty("observation").GetProperty("cells")
+                        .GetArrayLength(), Is.EqualTo(16));
+                    Assert.That(reset.GetProperty("start_profile").GetString(),
+                        Is.EqualTo("conversion-1v1-near"));
+                    Assert.That(units.EnumerateArray().Count(unit =>
+                        unit.GetProperty("owner").GetString() == "self"), Is.EqualTo(1));
+                    Assert.That(units.EnumerateArray().Count(unit =>
+                        unit.GetProperty("owner").GetString() == "opponent"), Is.EqualTo(1));
+                    Assert.That(HexCoord.Distance(selfCell, opponentCell), Is.InRange(2, 3));
+                    Assert.That(next.GetProperty("seat").GetInt32(), Is.EqualTo(0));
+                    Assert.That(RuleValue(next, "round"), Is.EqualTo(initialRound + 1));
+                    Assert.That(next.GetProperty("decision_id").GetInt64(),
+                        Is.EqualTo(reset.GetProperty("decision_id").GetInt64() + 2));
+                    Assert.That(next.GetProperty("observation").GetProperty("units").GetRawText(),
+                        Is.EqualTo(units.GetRawText()));
+                });
+            }
+            finally
+            {
+                if (File.Exists(scenario)) File.Delete(scenario);
+            }
+        }
+
         [Test]
         public void Process_DuelOracleStepReturnsExactSelectionSuccessorAndStatus()
         {
@@ -555,6 +624,157 @@ namespace HexWars.Engine.Tests
             AssertViewIdentities(response.GetProperty("view"));
             Assert.That(server.Request("{\"cmd\":\"duel_status\"}").GetRawText(),
                 Is.EqualTo("{\"internal_fallback_count\":0}"));
+        }
+
+        [TestCase(0)]
+        [TestCase(1)]
+        public void Process_ReachCellOracleUsesTargetSlotAndExactHeuristicProvenance(
+            int learnerSeat)
+        {
+            string scenario = WriteReachScenario();
+            try
+            {
+                using var server = TacticalV3ServerProcess.Start(scenario);
+                JsonElement spaces = server.Request("{\"cmd\":\"spaces\"}");
+                JsonElement objective = spaces.GetProperty("match").GetProperty("objective");
+                AssertProperties(objective, "kind", "target_policy", "radius");
+                Assert.Multiple(() =>
+                {
+                    Assert.That(objective.GetProperty("kind").GetString(),
+                        Is.EqualTo("reach_cell"));
+                    Assert.That(objective.GetProperty("target_policy").GetString(),
+                        Is.EqualTo("seeded_farthest_reachable_unoccupied_v1"));
+                    Assert.That(objective.GetProperty("radius").GetInt32(), Is.Zero);
+                    Assert.That(spaces.GetProperty("encoding_hash").GetString(), Is.EqualTo(
+                        "e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6"));
+                    Assert.That(spaces.GetProperty("capacity_hash").GetString(), Is.EqualTo(
+                        "7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364"));
+                });
+
+                JsonElement view = server.Request(JsonSerializer.Serialize(new
+                {
+                    cmd = "duel_reset",
+                    seed = 6_000_005,
+                    p0 = learnerSeat == 0 ? "external" : "passive",
+                    p1 = learnerSeat == 1 ? "external" : "passive",
+                    learner = learnerSeat,
+                    start_profile = "conversion-1v1-far",
+                    reference_seat = learnerSeat,
+                }));
+                string frozenTarget = view.GetProperty("candidates").EnumerateArray()
+                    .First(candidate => candidate.GetProperty("kind").GetString() == "move")
+                    .GetProperty("target").GetRawText();
+
+                bool completed = false;
+                for (int guard = 0; guard < 128 &&
+                    !view.GetProperty("terminated").GetBoolean(); guard++)
+                {
+                    JsonElement[] moves = view.GetProperty("candidates").EnumerateArray()
+                        .Where(candidate => candidate.GetProperty("kind").GetString() == "move")
+                        .ToArray();
+                    foreach (JsonElement move in moves)
+                    {
+                        Assert.That(move.GetProperty("target").GetRawText(),
+                            Is.EqualTo(frozenTarget));
+                        Assert.That(move.GetProperty("target").GetProperty("table").GetString(),
+                            Is.EqualTo("cells"));
+                    }
+
+                    long decisionId = view.GetProperty("decision_id").GetInt64();
+                    JsonElement response = server.Request(JsonSerializer.Serialize(new
+                    {
+                        cmd = "duel_oracle_step",
+                        decision_id = decisionId,
+                        search_depth = 0,
+                        expansion_budget = 2048,
+                        heuristic_identity = "reach-cell-shortest-path-v1",
+                    }));
+                    JsonElement selection = response.GetProperty("selection");
+                    int candidateId = selection.GetProperty("candidate_id").GetInt32();
+                    JsonElement selected = view.GetProperty("candidates").EnumerateArray()
+                        .Single(candidate =>
+                            candidate.GetProperty("candidate_id").GetInt32() == candidateId);
+                    Assert.Multiple(() =>
+                    {
+                        Assert.That(selection.GetProperty("search_depth").GetInt32(), Is.Zero);
+                        Assert.That(selection.GetProperty("expansion_budget").GetInt32(),
+                            Is.EqualTo(2048));
+                        Assert.That(selection.GetProperty("actual_expansions").GetInt32(), Is.Zero);
+                        Assert.That(selection.GetProperty("heuristic_identity").GetString(),
+                            Is.EqualTo("reach-cell-shortest-path-v1"));
+                        Assert.That(selected.GetProperty("kind").GetString(),
+                            Is.EqualTo(moves.Length == 0 ? "end_turn" : "move"));
+                    });
+
+                    bool reaches = selected.GetProperty("kind").GetString() == "move" &&
+                        selected.GetProperty("cell").GetRawText() == frozenTarget;
+                    if (reaches)
+                    {
+                        Assert.That(selected.GetProperty("projection")
+                            .GetProperty("is_terminal").GetBoolean(), Is.True);
+                    }
+                    view = response.GetProperty("view");
+                    completed |= reaches;
+                }
+
+                Assert.Multiple(() =>
+                {
+                    Assert.That(completed, Is.True);
+                    Assert.That(view.GetProperty("terminated").GetBoolean(), Is.True);
+                    Assert.That(view.GetProperty("truncated").GetBoolean(), Is.False);
+                    Assert.That(view.GetProperty("winner").GetInt32(), Is.EqualTo(learnerSeat));
+                    Assert.That(view.GetProperty("reward").GetProperty("terminal_outcome")
+                        .GetSingle(), Is.EqualTo(1f));
+                    Assert.That(view.GetProperty("candidates").GetArrayLength(), Is.Zero);
+                });
+            }
+            finally
+            {
+                if (File.Exists(scenario)) File.Delete(scenario);
+            }
+        }
+
+        [TestCase(false, false)]
+        [TestCase(false, true)]
+        [TestCase(true, false)]
+        [TestCase(true, true)]
+        public void Process_OracleProtocolRejectsObjectiveMismatchedTuple(
+            bool reachScenario, bool wrongDepth)
+        {
+            string scenario = reachScenario ? WriteReachScenario() : CheckedInScenario;
+            try
+            {
+                using var server = TacticalV3ServerProcess.Start(scenario);
+                int validDepth = reachScenario ? 0 : 4;
+                string validHeuristic = reachScenario
+                    ? "reach-cell-shortest-path-v1"
+                    : BoundedSearchAgent.HeuristicIdentity;
+                string request = JsonSerializer.Serialize(new
+                {
+                    cmd = "duel_oracle_query",
+                    decision_id = 0,
+                    search_depth = wrongDepth
+                        ? (reachScenario ? 4 : 0)
+                        : validDepth,
+                    expansion_budget = 512,
+                    heuristic_identity = wrongDepth
+                        ? validHeuristic
+                        : (reachScenario
+                            ? BoundedSearchAgent.HeuristicIdentity
+                            : "reach-cell-shortest-path-v1"),
+                });
+
+                string error = server.RejectCommand(request);
+
+                Assert.That(error, Does.Contain(
+                    wrongDepth
+                        ? (reachScenario ? "search_depth must be 0" : "search_depth must be 4")
+                        : "heuristic_identity is unsupported"));
+            }
+            finally
+            {
+                if (reachScenario && File.Exists(scenario)) File.Delete(scenario);
+            }
         }
 
         [Test]
@@ -1378,6 +1598,51 @@ namespace HexWars.Engine.Tests
             }
         }
 
+        private static int RuleValue(JsonElement view, string kind) =>
+            view.GetProperty("observation").GetProperty("rules").EnumerateArray()
+                .Single(rule => rule.GetProperty("kind").GetString() == kind)
+                .GetProperty("int_value").GetInt32();
+
+        private static HexCoord UnitCell(JsonElement view, string owner)
+        {
+            JsonElement observation = view.GetProperty("observation");
+            JsonElement unit = observation.GetProperty("units").EnumerateArray()
+                .Single(item => item.GetProperty("owner").GetString() == owner);
+            int row = unit.GetProperty("cell").GetProperty("row").GetInt32();
+            JsonElement cell = observation.GetProperty("cells")[row];
+            return new HexCoord(
+                cell.GetProperty("q").GetInt32(), cell.GetProperty("r").GetInt32());
+        }
+
+        private static string WriteTemplateScenario(string templateId)
+        {
+            using JsonDocument library = JsonDocument.Parse(
+                File.ReadAllText(TrainingGameTemplates));
+            JsonElement template = library.RootElement.GetProperty("templates")
+                .EnumerateArray().Single(item =>
+                    item.GetProperty("id").GetString() == templateId);
+            string path = Path.Combine(TestContext.CurrentContext.WorkDirectory,
+                templateId + "-" + Guid.NewGuid().ToString("N") + ".json");
+            File.WriteAllText(path, template.GetRawText(), new UTF8Encoding(false));
+            return path;
+        }
+
+        private static string WriteReachScenario()
+        {
+            string path = WriteTemplateScenario("tactical-v3-standard");
+            JsonObject scenario = JsonNode.Parse(File.ReadAllText(path))!.AsObject();
+            scenario["id"] = "tactical-v3-reach-cell-test";
+            scenario["name"] = "Tactical V3 Reach Cell Test";
+            scenario["tactical_v3"]!.AsObject()["objective"] = new JsonObject
+            {
+                ["kind"] = "reach_cell",
+                ["target_policy"] = "seeded_farthest_reachable_unoccupied_v1",
+                ["radius"] = 0,
+            };
+            File.WriteAllText(path, scenario.ToJsonString(), new UTF8Encoding(false));
+            return path;
+        }
+
         private static void AssertAuthoritativeGameStatesEqual(
             GameState expected, GameState actual)
         {
@@ -1705,7 +1970,11 @@ namespace HexWars.Engine.Tests
                     SetAutoProperty(candidate, nameof(TacticalV3Candidate.Actor), (TacticalV3TokenRef?)cells);
                     break;
                 case WrongReferenceFamily.CandidateTarget:
-                    SetAutoProperty(candidate, nameof(TacticalV3Candidate.Target), (TacticalV3TokenRef?)cells);
+                    SetAutoProperty(
+                        candidate,
+                        nameof(TacticalV3Candidate.Target),
+                        (TacticalV3TokenRef?)(
+                            candidate.Kind == TacticalV3CandidateKind.Move ? units : cells));
                     break;
                 case WrongReferenceFamily.CandidateTemplate:
                     SetAutoProperty(candidate, nameof(TacticalV3Candidate.Template), (TacticalV3TokenRef?)cells);
@@ -2361,6 +2630,13 @@ namespace HexWars.Engine.Tests
                 new TacticalV3ServerProcess(null,
                     "--environment", MlContract.TacticalV3Version,
                     "--scenario-file", scenario);
+
+            public static TacticalV3ServerProcess StartWithOpponent(
+                string scenario, string opponent) =>
+                new TacticalV3ServerProcess(null,
+                    "--environment", MlContract.TacticalV3Version,
+                    "--scenario-file", scenario,
+                    "--opponent", opponent);
 
             public static TacticalV3ServerProcess StartInWorkingDirectory(
                 string scenario, string workingDirectory) =>

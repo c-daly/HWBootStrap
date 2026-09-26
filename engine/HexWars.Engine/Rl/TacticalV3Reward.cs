@@ -60,7 +60,12 @@ namespace HexWars.Engine.Rl
             _hasReset = true;
         }
 
-        public TacticalV3RewardBreakdown Evaluate(GameState state, bool terminated, bool truncated)
+        public TacticalV3RewardBreakdown Evaluate(
+            GameState state, bool terminated, bool truncated) =>
+            Evaluate(state, terminated, truncated, state?.Winner);
+
+        public TacticalV3RewardBreakdown Evaluate(
+            GameState state, bool terminated, bool truncated, PlayerId? episodeWinner)
         {
             if (state == null) throw new ArgumentNullException(nameof(state));
             if (!_hasReset) throw new InvalidOperationException("reward contract must be reset before evaluation");
@@ -74,7 +79,7 @@ namespace HexWars.Engine.Rl
                 _config.MaterialAdjustmentBound);
             float time = -_config.TimePressureBound * Clamp(
                 (state.Round - 1f) / state.Config.RoundCap, 0f, 1f);
-            float terminal = terminated && state.Winner == _learnerSeat
+            float terminal = terminated && episodeWinner == _learnerSeat
                 ? _config.TerminalWin
                 : _config.TerminalNonWin;
             float total = terminal + material + time;

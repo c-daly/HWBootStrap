@@ -777,6 +777,344 @@ def test_structured_train_forwards_independent_target_scenario_and_tensorboard(
     ]
 
 
+def test_outcome_train_forwards_complete_game_candidate_configuration(
+    tmp_path: Path,
+) -> None:
+    scenario = tmp_path / "minigame.json"
+    scenario.write_text("{}\n", encoding="utf-8")
+    source = tmp_path / "optional-source"
+    received = []
+
+    def outcome_runner(config, *, runs_root: Path, server_cmd: list[str]) -> Path:
+        received.append((config, server_cmd))
+        run_dir = runs_root / config.run_name
+        run_dir.mkdir(exist_ok=True)
+        atomic_write_json(run_dir / "run.json", {
+            "schema_version": 1,
+            "state": "completed",
+            "config": {
+                "algorithm": "structured_policy_gradient",
+                "run_name": config.run_name,
+                "total_timesteps": config.total_decisions,
+                "learner_seat": config.learner_seat,
+            },
+        })
+        return run_dir
+
+    output = StringIO()
+    exit_code = cli_module.main(
+        [
+            "train-outcome",
+            "--run", "close-candidate",
+            "--source-run", str(source),
+            "--scenario-file", str(scenario),
+            "--opponent", "passive",
+            "--timesteps", "51200",
+            "--seed", "311",
+            "--device", "cuda:0",
+            "--learner-seat", "alternating",
+            "--rollout-decisions", "96",
+            "--validation-games", "40",
+            "--validation-every-updates", "5",
+            "--micro-batch-size", "24",
+            "--learning-rate", "0.0007",
+            "--tracker", "local",
+            "--tracker", "tensorboard",
+            "--runs-root", str(tmp_path / "runs"),
+            "--server", "fake-server.dll",
+            "--json",
+        ],
+        outcome_runner=outcome_runner,
+        stdout=output,
+    )
+
+    assert exit_code == 0
+    _assert_envelope(json.loads(output.getvalue()), "train-outcome")
+    config, command = received[0]
+    assert config.source_run == source
+    assert config.scenario_file == scenario
+    assert config.opponent == "passive"
+    assert config.total_decisions == 51_200
+    assert config.seed == 311
+    assert config.device == "cuda:0"
+    assert config.rollout_decisions == 96
+    assert config.validation_games == 40
+    assert config.validation_every_updates == 5
+    assert config.micro_batch_size == 24
+    assert config.learning_rate == pytest.approx(0.0007)
+    assert config.trackers == ({"kind": "local"}, {"kind": "tensorboard"})
+    assert command == [
+        "dotnet", "fake-server.dll", "--scenario-file", str(scenario),
+    ]
+
+
+def test_outcome_train_rejects_run_traversal_before_creating_stderr_log(
+    tmp_path: Path,
+) -> None:
+    scenario = tmp_path / "minigame.json"
+    scenario.write_text("{}\n", encoding="utf-8")
+    called = False
+
+    def outcome_runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("invalid destination must not reach outcome backend")
+
+    runs = tmp_path / "runs"
+    exit_code, payload = _invoke_json(
+        [
+            "train-outcome",
+            "--run", "../escaped",
+            "--scenario-file", str(scenario),
+            "--timesteps", "64",
+            "--runs-root", str(runs),
+            "--json",
+        ],
+        outcome_runner=outcome_runner,
+    )
+
+    assert exit_code == 1
+    assert payload["result"]["error"] == "ValueError"
+    assert "run name" in payload["result"]["message"]
+    assert called is False
+    assert not (tmp_path / "escaped" / "train-err.log").exists()
+
+
+@pytest.mark.parametrize(
+    "protected_kind",
+    (
+        "initialization",
+        "fixed_opponent",
+        "live_opponent",
+        "direct_opponent",
+        "file_opponent",
+    ),
+)
+def test_outcome_train_rejects_source_overlap_before_opening_stderr_log(
+    tmp_path: Path,
+    protected_kind: str,
+) -> None:
+    runs = tmp_path / "runs"
+    source = runs / "protected"
+    source.mkdir(parents=True)
+    stderr_log = source / "train-err.log"
+    stderr_log.write_text("source diagnostics\n", encoding="utf-8")
+    (source / "run.json").write_text("{}\n", encoding="utf-8")
+    scenario = tmp_path / "minigame.json"
+    scenario.write_text("{}\n", encoding="utf-8")
+    spec_file = tmp_path / "opponent.json"
+    spec_file.write_text(
+        json.dumps({"kind": "run", "path": str(source), "mode": "fixed"}),
+        encoding="utf-8",
+    )
+    opponent_values = {
+        "fixed_opponent": f"run:{source}",
+        "live_opponent": json.dumps({
+            "kind": "run", "path": str(source), "mode": "live",
+        }),
+        "direct_opponent": str(source),
+        "file_opponent": f"@{spec_file}",
+    }
+    source_arguments = ["--source-run", str(source)] if (
+        protected_kind == "initialization"
+    ) else ["--opponent", opponent_values[protected_kind]]
+    called = False
+
+    def outcome_runner(*_args, **_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("protected source must not reach the outcome backend")
+
+    exit_code, payload = _invoke_json(
+        [
+            "train-outcome",
+            "--run", source.name,
+            "--scenario-file", str(scenario),
+            "--timesteps", "64",
+            "--runs-root", str(runs),
+            *source_arguments,
+            "--json",
+        ],
+        outcome_runner=outcome_runner,
+    )
+
+    assert exit_code == 1
+    assert payload["result"] == {
+        "error": "ValueError",
+        "message": (
+            "outcome training destination must be outside initialization and "
+            "model-opponent sources"
+        ),
+    }
+    assert called is False
+    assert stderr_log.read_text(encoding="utf-8") == "source diagnostics\n"
+
+
+def test_outcome_train_source_is_optional_and_preflight_shape_matches_unity(
+    tmp_path: Path,
+) -> None:
+    scenario = tmp_path / "minigame.json"
+    train = cli_module.build_parser().parse_args([
+        "train-outcome",
+        "--run", "scratch-candidate",
+        "--scenario-file", str(scenario),
+        "--opponent", "random",
+        "--timesteps", "64",
+        "--no-console-output",
+        "--json",
+    ])
+    preflight = cli_module.build_parser().parse_args([
+        "preflight-outcome",
+        "--scenario-file", str(scenario),
+        "--opponent", "random",
+        "--learner-seat", "1",
+        "--json",
+    ])
+
+    assert train.source_run is None
+    assert train.command == "train-outcome"
+    assert train.timesteps == 64
+    assert train.no_console_output and train.json
+    assert preflight.command == "preflight-outcome"
+    assert preflight.source_run is None
+    assert preflight.seed == 227
+    assert preflight.device == "auto"
+    assert preflight.learner_seat == "1"
+    assert preflight.json
+
+
+def test_structured_retry_parser_accepts_the_unity_launch_shape(
+    tmp_path: Path,
+) -> None:
+    old = tmp_path / "old"
+    runs = tmp_path / "runs"
+
+    args = cli_module.build_parser().parse_args([
+        "retry-structured",
+        "--collection-run", str(old),
+        "--run", "new-retry",
+        "--no-console-output",
+        "--json",
+        "--runs-root", str(runs),
+        "--server", "ignored-server.dll",
+    ])
+
+    assert args.command == "retry-structured"
+    assert args.collection_run == old
+    assert args.run == "new-retry"
+    assert args.runs_root == runs
+    assert args.server == "ignored-server.dll"
+    assert args.no_console_output and args.json
+
+
+def test_structured_retry_dispatches_only_authenticated_collection_inputs(
+    tmp_path: Path,
+) -> None:
+    old = tmp_path / "old"
+    runs = tmp_path / "runs"
+    old.mkdir()
+    direct_source = tmp_path / "archived" / "new-retry"
+    direct_source.mkdir(parents=True)
+    atomic_write_json(old / "collection.json", {
+        "source": {"run": str(direct_source)},
+    })
+    received = []
+
+    def retry_runner(*, collection_run, run_name, runs_root):
+        received.append((collection_run, run_name, runs_root))
+        run_dir = runs_root / run_name
+        run_dir.mkdir(parents=True, exist_ok=True)
+        atomic_write_json(run_dir / "run.json", {
+            "schema_version": 1,
+            "state": "completed",
+            "config": {"run_name": run_name},
+        })
+        return run_dir
+
+    output = StringIO()
+    exit_code = cli_module.main(
+        [
+            "retry-structured",
+            "--collection-run", str(old),
+            "--run", "new-retry",
+            "--runs-root", str(runs),
+            "--server", "must-not-be-forwarded.dll",
+            "--json",
+        ],
+        structured_retry_runner=retry_runner,
+        stdout=output,
+    )
+
+    assert exit_code == 0
+    _assert_envelope(json.loads(output.getvalue()), "retry-structured")
+    assert received == [(old, "new-retry", runs)]
+    assert (runs / "new-retry" / "train-err.log").is_file()
+
+
+@pytest.mark.parametrize("protected_kind", ("selected", "owner", "source"))
+def test_structured_retry_rejects_protected_destination_before_opening_log(
+    tmp_path: Path,
+    protected_kind: str,
+) -> None:
+    runs = tmp_path / "runs"
+    selected = runs / "selected"
+    selected.mkdir(parents=True)
+    manifest: dict[str, object] = {}
+    collection: dict[str, object] = {}
+
+    if protected_kind == "selected":
+        runs_root = selected
+        run_name = "child"
+        destination = selected / run_name
+    elif protected_kind == "owner":
+        destination = runs / "owner"
+        destination.mkdir()
+        # Exercise the same basename fallback used when a recorded absolute path
+        # came from another machine.
+        manifest["collection_source_run"] = r"Z:\archived-runs\owner"
+        runs_root = runs
+        run_name = destination.name
+    else:
+        destination = runs / "source-policy"
+        destination.mkdir()
+        collection["source"] = {"run": r"Z:\archived-runs\source-policy"}
+        runs_root = runs
+        run_name = destination.name
+
+    atomic_write_json(selected / "run.json", manifest)
+    atomic_write_json(selected / "collection.json", collection)
+    called = False
+
+    def retry_runner(**_kwargs):
+        nonlocal called
+        called = True
+        raise AssertionError("retry backend must not run for a protected destination")
+
+    exit_code, payload = _invoke_json(
+        [
+            "retry-structured",
+            "--collection-run", str(selected),
+            "--run", run_name,
+            "--runs-root", str(runs_root),
+            "--json",
+        ],
+        structured_retry_runner=retry_runner,
+    )
+
+    assert exit_code == 1
+    assert payload["result"] == {
+        "error": "ValueError",
+        "message": (
+            "structured retry destination must be outside the selected, "
+            "collection-owner, and source-policy runs"
+        ),
+    }
+    assert called is False
+    assert not (destination / "train-err.log").exists()
+    if protected_kind == "selected":
+        assert not destination.exists()
+
+
 def test_structured_preflight_parser_has_training_compatible_defaults(
     tmp_path: Path,
 ) -> None:

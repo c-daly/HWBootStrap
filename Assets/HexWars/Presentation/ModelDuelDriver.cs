@@ -11,7 +11,15 @@ using HexWars.Engine.Rl;
 
 namespace HexWars.Presentation
 {
-    public enum ModelControllerKind { Greedy, Random, FixedRun, LiveRun }
+    // Explicit values preserve serialized ML Lab Arena selections across enum growth.
+    public enum ModelControllerKind
+    {
+        Greedy = 0,
+        Random = 1,
+        FixedRun = 2,
+        LiveRun = 3,
+        Passive = 4,
+    }
     public enum ModelInferenceMode { Deterministic, Stochastic }
     public enum ModelDuelObserverSeat { Player1, Player2 }
 
@@ -79,6 +87,7 @@ namespace HexWars.Presentation
             switch (Kind)
             {
                 case ModelControllerKind.Random: return "random";
+                case ModelControllerKind.Passive: return "passive";
                 case ModelControllerKind.FixedRun: return "run:" + Path;
                 case ModelControllerKind.LiveRun:
                     return JsonUtility.ToJson(new RunSpec
@@ -95,7 +104,9 @@ namespace HexWars.Presentation
         static string InferenceValue(ModelInferenceMode value) =>
             value == ModelInferenceMode.Stochastic ? "stochastic" : "deterministic";
 
-        public bool IsModel => Kind != ModelControllerKind.Greedy && Kind != ModelControllerKind.Random;
+        public bool IsModel => Kind != ModelControllerKind.Greedy &&
+            Kind != ModelControllerKind.Random &&
+            Kind != ModelControllerKind.Passive;
         public bool IsLive => Kind == ModelControllerKind.LiveRun;
 
         public string ValidationError(string label)
@@ -810,7 +821,11 @@ namespace HexWars.Presentation
             StopDuel();
         }
 
-        public static bool IsModel(string spec) => !string.IsNullOrWhiteSpace(spec) && spec != "greedy" && spec != "random";
+        public static bool IsModel(string spec) =>
+            !string.IsNullOrWhiteSpace(spec) &&
+            spec != "greedy" &&
+            spec != "random" &&
+            spec != "passive";
         public static bool IsLiveRun(string spec)
         {
             if (string.IsNullOrWhiteSpace(spec)) return false;
@@ -820,7 +835,12 @@ namespace HexWars.Presentation
             catch (Exception) { return false; }
         }
 
-        static IAgent Scripted(string spec, int seed) => spec == "random" ? new RandomAgent(seed) : (IAgent)new GreedyAgent(seed);
+        static IAgent Scripted(string spec, int seed)
+        {
+            if (spec == "random") return new RandomAgent(seed);
+            if (spec == "passive") return new PassiveAgent();
+            return new GreedyAgent(seed);
+        }
         [Serializable] sealed class LiveSpec { public string mode; }
     }
 }

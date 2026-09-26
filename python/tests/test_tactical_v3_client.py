@@ -62,7 +62,7 @@ for line in sys.stdin:
             "seed-41-duel-spaces.json").read_text(encoding="utf-8"))
         response = replies.get(request["cmd"], duel_spaces)
     elif request["cmd"] in {"reset", "duel_reset"}:
-        response = minimal_view_payload()
+        response = replies.get(request["cmd"], minimal_view_payload())
     elif request["cmd"] in {"step", "duel_step"}:
         response = minimal_view_payload()
         response["candidates"][0]["decision_id"] = 8
@@ -198,6 +198,110 @@ def test_duel_oracle_query_accepts_frozen_2048_preflight_candidate(
         "search_depth": 4, "expansion_budget": 2048,
         "heuristic_identity": "material-plus-pursuit-v1",
     }
+
+
+def _configure_reach_cell_identity(fake_server: _FakeServer) -> None:
+    from ml_lab.tactical_v3_schema import canonical_sha256
+    from tests.test_tactical_v3_schema import minimal_view_payload
+
+    spaces = json.loads(
+        (Path(__file__).parent / "fixtures" / "tactical_v3" /
+         "seed-41-duel-spaces.json").read_text(encoding="utf-8")
+    )
+    spaces["scenario_id"] = "tactical-v3-reach-cell-v1"
+    spaces["match"]["objective"] = {
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    }
+    spaces["contract_hash"] = canonical_sha256({
+        "encoding_hash": spaces["encoding_hash"],
+        "environment_kind": spaces["environment_kind"],
+        "match": spaces["match"],
+        "schema_version": 1,
+        "version": spaces["contract_version"],
+    })
+    view = minimal_view_payload()
+    view["candidates"][0]["target"] = {"table": "cells", "row": 0}
+    view["candidates"][0]["projection"]["is_terminal"] = True
+    fake_server.reply_with("duel_spaces", spaces)
+    fake_server.reply_with("duel_reset", view)
+
+
+def test_duel_oracle_query_accepts_reach_cell_teacher_without_fake_expansions(
+    fake_server: _FakeServer,
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+
+    _configure_reach_cell_identity(fake_server)
+    fake_server.reply_with("duel_oracle_query", {"selection": {
+        "decision_id": 7,
+        "candidate_id": 0,
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "actual_expansions": 0,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }})
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(
+            41, "external", "passive", 0, "conversion-1v1-far", 0,
+        )
+        selection = client.duel_oracle_query(
+            initial.decision.decision_id,
+            search_depth=0,
+            expansion_budget=512,
+            heuristic_identity="reach-cell-shortest-path-v1",
+        )
+
+    assert selection.actual_expansions == 0
+    assert fake_server.requests[-2] == {
+        "cmd": "duel_oracle_query",
+        "decision_id": 7,
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }
+
+
+@pytest.mark.parametrize(
+    "reach_objective, teacher",
+    (
+        (False, (0, 512, "reach-cell-shortest-path-v1")),
+        (True, (4, 512, "material-plus-pursuit-v1")),
+    ),
+)
+def test_duel_oracle_query_rejects_teacher_from_another_objective_before_rpc(
+    fake_server: _FakeServer,
+    reach_objective: bool,
+    teacher: tuple[int, int, str],
+) -> None:
+    from ml_lab.tactical_v3_client import TacticalV3GymClient
+
+    if reach_objective:
+        _configure_reach_cell_identity(fake_server)
+    with TacticalV3GymClient(fake_server.command, environment_kind="duel") as client:
+        initial = client.duel_reset(
+            41,
+            "external",
+            "passive" if reach_objective else "random",
+            0,
+            "conversion-1v1-far" if reach_objective else "standard-3v3",
+            0,
+        )
+        with pytest.raises(
+            ValueError,
+            match="teacher configuration does not match authenticated objective",
+        ):
+            client.duel_oracle_query(
+                initial.decision.decision_id,
+                search_depth=teacher[0],
+                expansion_budget=teacher[1],
+                heuristic_identity=teacher[2],
+            )
+
+    assert not any(
+        request["cmd"] == "duel_oracle_query" for request in fake_server.requests
+    )
 
 
 def test_duel_greedy_step_sends_exact_request_and_advances_with_greedy_provenance(
@@ -481,6 +585,82 @@ def test_client_fails_closed_on_malformed_or_eof_handshake(tmp_path: Path, reply
     with pytest.raises((ValueError, RuntimeError), match=expected) as raised:
         TacticalV3GymClient([sys.executable, str(script)], environment_kind="tactical")
     assert len(str(raised.value).split("GymServer stderr tail: ")[-1]) <= 8192
+
+
+def _delayed_duel_reset_server(tmp_path: Path, delay_seconds: float) -> list[str]:
+    script = tmp_path / "delayed_duel_reset.py"
+    script.write_text(
+        """import json
+import sys
+import time
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+sys.path.insert(0, sys.argv[2])
+from test_tactical_v3_schema import minimal_view_payload
+
+request = json.loads(sys.stdin.readline())
+if request["cmd"] != "duel_spaces":
+    raise RuntimeError(request["cmd"])
+spaces = json.loads(
+    (Path(sys.argv[1]) / "fixtures" / "tactical_v3" /
+     "seed-41-duel-spaces.json").read_text(encoding="utf-8")
+)
+print(json.dumps(spaces), flush=True)
+request = json.loads(sys.stdin.readline())
+if request["cmd"] != "duel_reset":
+    raise RuntimeError(request["cmd"])
+time.sleep(float(sys.argv[3]))
+print(json.dumps(minimal_view_payload()), flush=True)
+""",
+        encoding="utf-8",
+    )
+    return [
+        sys.executable,
+        str(script),
+        str(Path(__file__).parent),
+        str(Path(__file__).resolve().parents[1]),
+        str(delay_seconds),
+    ]
+
+
+def test_client_accepts_delayed_duel_reset_within_watchdog(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_client as module
+
+    client = module.TacticalV3GymClient(
+        _delayed_duel_reset_server(tmp_path, 0.1), environment_kind="duel",
+    )
+    monkeypatch.setattr(module, "_REPLY_TIMEOUT_SECONDS", 2.0)
+    with client:
+        view = client.duel_reset(
+            41, "external", "passive", 0, "standard-3v3", 0,
+        )
+    assert view.decision.decision_id == 7
+
+
+def test_hanging_duel_reset_names_command_closes_and_reaps(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_client as module
+
+    client = module.TacticalV3GymClient(
+        _delayed_duel_reset_server(tmp_path, 30), environment_kind="duel",
+    )
+    process = client.proc
+    monkeypatch.setattr(module, "_REPLY_TIMEOUT_SECONDS", 0.05)
+
+    with pytest.raises(
+        RuntimeError,
+        match=r"GymServer duel_reset reply timed out after 0\.05 seconds",
+    ):
+        client.duel_reset(
+            41, "external", "passive", 0, "standard-3v3", 0,
+        )
+
+    assert client._closed
+    assert process.poll() is not None
 
 
 def test_client_timeout_is_bounded_and_reaps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

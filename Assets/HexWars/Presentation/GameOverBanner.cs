@@ -21,6 +21,7 @@ namespace HexWars.Presentation
 
         public static void Show(string title, string subtitle, Color accent, System.Action onMainMenu = null, System.Action onRematch = null)
         {
+            TipsService.EndGame();
             Dismiss(); // never stack two
             _shownAt = Time.unscaledTime;
 
@@ -93,7 +94,7 @@ namespace HexWars.Presentation
         public static void Dismiss()
         {
             var old = GameObject.Find(RootName);
-            if (old != null) Object.Destroy(old);
+            if (old != null) { old.SetActive(false); Object.Destroy(old); }
         }
 
         static Text Text(Transform parent, string s, Font font, int size, FontStyle style, Vector2 pos)

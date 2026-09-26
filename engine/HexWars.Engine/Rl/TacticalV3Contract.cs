@@ -81,7 +81,7 @@ namespace HexWars.Engine.Rl
         private static IReadOnlyDictionary<string, object> MatchValues(TacticalV3Config config)
         {
             TacticalV2Config match = config.Match;
-            return Map(new Dictionary<string, object>
+            var values = new Dictionary<string, object>
             {
                 ["board"] = BoardValues(match.BoardGen),
                 ["game"] = GameValues(match.Game),
@@ -93,7 +93,17 @@ namespace HexWars.Engine.Rl
                 ["start_profiles"] = StartProfileValues(match.StartProfiles),
                 ["starting_unit_count"] = match.StartingUnitCount,
                 ["templates"] = TemplateValues(match.Templates),
-            });
+            };
+            if (config.Objective != null)
+            {
+                values["objective"] = Map(new Dictionary<string, object>
+                {
+                    ["kind"] = config.Objective.Kind,
+                    ["radius"] = config.Objective.Radius,
+                    ["target_policy"] = config.Objective.TargetPolicy,
+                });
+            }
+            return Map(values);
         }
 
         private static IReadOnlyDictionary<string, object> BoardValues(BoardGenConfig board) =>

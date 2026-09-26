@@ -15,6 +15,10 @@ namespace HexWars.Engine
             if (state.IsGameOver) return Result.Reject(state, RejectionReason.GameAlreadyOver);
             if (command.Issuer != state.ActivePlayer) return Result.Reject(state, RejectionReason.NotYourTurn);
 
+            if (state.PlacingStartingUnits) return StartingPlacement.Apply(state, command);
+            if (command is PlaceStartingUnit || command is FinishPlacement)
+                return Result.Reject(state, RejectionReason.PlacementAlreadyFinished);
+
             var result = Dispatch(state, command);
             if (!result.Success) return result;
 
@@ -23,12 +27,16 @@ namespace HexWars.Engine
             // One-action turn policies auto-end the turn after a single non-EndTurn action.
             // DeleteTemplate is an administrative barracks edit, not a game move — it must never
             // consume a turn action or trigger an auto-end (see DeleteTemplateTests).
-            if (!newState.IsGameOver && !(command is EndTurn) && !(command is DeleteTemplate)
+            if (!newState.IsGameOver && !(command is EndTurn) && !(command is DeleteTemplate) && !(command is UndoMove)
                 && (newState.Config.TurnPolicy.AutoEndTurnAfter(command, newState)
                     || (newState.Config.TerritoryMode && newState.Config.ClaimEndsTurn && command is CaptureHex)))
             {
                 newState = Finalize(ApplyEndTurn(newState, new EndTurn(command.Issuer)).NewState);
             }
+
+            if (command is MoveUnit move && !state.Config.FogOfWar && !newState.IsGameOver
+                && newState.ActivePlayer == state.ActivePlayer && newState.Round == state.Round)
+                newState = newState.RememberMove(state, move.UnitId);
 
             return Result.Ok(newState);
         }
@@ -43,6 +51,10 @@ namespace HexWars.Engine
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
                 case MoveUnit c: return ApplyMoveUnit(state, c);
+                case UndoMove _:
+                    return state.BeforeLastMove != null && !state.Config.FogOfWar
+                        ? Result.Ok(state.BeforeLastMove.Clone())
+                        : Result.Reject(state, RejectionReason.NoMoveToUndo);
                 case AttackUnit c: return ApplyAttackUnit(state, c);
                 case CaptureHex c: return ApplyCaptureHex(state, c);
                 case BuildGenerator c: return ApplyBuildGenerator(state, c);
@@ -93,7 +105,7 @@ namespace HexWars.Engine
             int fee = state.Config.DesignFee;
             if (player.Points < fee) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
-            var template = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
+            var template = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats, c.ArtId);
             if (state.Config.TemplateSlotCount > 0
                 && player.Barracks.Count >= state.Config.TemplateSlotCount)
                 return Result.Reject(state, RejectionReason.BarracksFull);
@@ -125,7 +137,7 @@ namespace HexWars.Engine
                 return Result.Reject(state, RejectionReason.InsufficientPoints);
 
             var barracks = new List<UnitTemplate>(player.Barracks);
-            barracks[c.TemplateIndex] = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats);
+            barracks[c.TemplateIndex] = new UnitTemplate(UnitTemplate.Sanitize(c.Name), c.Stats, c.ArtId);
             var updated = new PlayerState(player.Id, player.Points - fee, barracks,
                                           player.UnitsOnBoard, player.Generators, player.DestroyedValue);
             return Result.Ok(WithPlayer(state, updated));
@@ -206,7 +218,7 @@ namespace HexWars.Engine
             int cost = Economy.DeployCost(template.Stats, state.Config);
             if (player.Points < cost) return Result.Reject(state, RejectionReason.InsufficientPoints);
 
-            var unit = new Unit(state.NextEntityId, c.Issuer, template.Stats, c.Cell, tile.Elevation, template.Name);
+            var unit = new Unit(state.NextEntityId, c.Issuer, template.Stats, c.Cell, tile.Elevation, template.Name, template.ArtId);
             var units = new List<Unit>(player.UnitsOnBoard) { unit };
 
             // barracks is unchanged — the template is reusable

@@ -1,0 +1,109 @@
+{
+  "date": "2026-09-25T17:21:30.697935+00:00",
+  "branch": "codex/subtle-sound-20260925",
+  "parent_commit": "eddfa0324b8b817711a96b5de2bfb1c55c634f90",
+  "parent_pr": 24,
+  "unity": "6000.5.0f1",
+  "unity_editmode": {
+    "passed": 671,
+    "failed": 0
+  },
+  "unity_playmode": {
+    "passed": 31,
+    "failed": 0,
+    "new_audio_controls": 4
+  },
+  "builds": {
+    "native": {
+      "result": "Succeeded",
+      "errors": 0,
+      "bytes": 115699614,
+      "gameplay_smoke": "Completed automatic move/attack-preview/designer/placement/collection sequence; no runtime errors."
+    },
+    "webgl": {
+      "result": "Succeeded",
+      "errors": 0,
+      "bytes": 26354329,
+      "cache_key": "e3fe15a8",
+      "staged_payloads_match_build": true
+    },
+    "hashes": {
+      "webgl": {
+        "WebGL.data.unityweb": {
+          "sha256": "dd1dafd8d2485ae4f4a1d7e849a1d0cac498cc04cd06d284751f8d352dc0a9eb",
+          "bytes": 9528855
+        },
+        "WebGL.framework.js.unityweb": {
+          "sha256": "e813e2cbbd2b65f26f2db111a70c46a13282dfbb74da6ff00192c4565c82e4c7",
+          "bytes": 80570
+        },
+        "WebGL.loader.js": {
+          "sha256": "c21c9e8d7e40d8de9ba5b0eddd289458e58573b40b5931277de9fcc902e2b281",
+          "bytes": 48105
+        },
+        "WebGL.wasm.unityweb": {
+          "sha256": "9e0bee3cf9178523b4c48f60e466f03b7ffc2c361ffbd38068ea51b795dc6af4",
+          "bytes": 16691710
+        }
+      },
+      "native_exe_sha256": "e113b0d76537e3c1e41aa2623ae145e5869afb9095cf1771c10b43afc0e2918e",
+      "native_assembly_sha256": "055d140692de44ab820890b95288f466e996810e9e3a10e200781a61296c8fa6"
+    }
+  },
+  "samples": {
+    "original_recordings_byte_identical_to_parent": 17,
+    "prepared_pcm_cues": 22,
+    "audition_effects_byte_identical_to_game_source": 11,
+    "max_allowed_peak": 0.221,
+    "endpoints_zero": true,
+    "detailed_receipt": "Library/SoundPolish/sample-checks.json"
+  },
+  "audition": {
+    "buttons_played": 21,
+    "sequence_seconds": 20,
+    "sequence_peak_at_70_percent": 0.1330057680606842,
+    "escape_stops": true,
+    "mobile_horizontal_overflow": false,
+    "browser_errors": 0,
+    "unexpected_failed_requests": 0,
+    "stopped_media_requests": 3
+  },
+  "game_browser": {
+    "browser": "149.0.7827.53",
+    "errors": 0,
+    "unexpected_failed_requests": 0,
+    "warnings": [
+      "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+      "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+      "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n"
+    ],
+    "master_mute_peak": 0,
+    "ambience_and_effects_off_peak_below": 1e-06,
+    "selection_peak_with_ambience_off": 0.019515578,
+    "move_peak_with_ambience_off": 0.074745536,
+    "attack_and_destruction_peak_with_ambience_off": 0.114397109,
+    "turn_change_verified": true,
+    "settings_visually_verified_after_reload": {
+      "master": 0.8,
+      "effects": 0.7,
+      "ambience": 0.2,
+      "music": 0.3,
+      "muted": false
+    },
+    "recording": "sound-game-combat.webm",
+    "method": "Tap only the game AudioContext output. Real canvas clicks, signal measurements and screenshots; no system audio capture."
+  },
+  "limits": [
+    "Subjective taste and speaker/headphone balance are for the audition; automated checks do not establish listening preference.",
+    "Headless Chrome kept the original tab focused when another tab opened. Focus loss is covered by Unity PlayMode tests; real browser focus loss remains unverified.",
+    "This pass did not rerun unrelated research/Gym, Python or server suites. No gameplay engine or multiplayer protocol changed.",
+    "Native preview uses DISABLESTEAMWORKS. Local static WebGL server provides hotseat/AI, not online backend. No production deployment."
+  ],
+  "retained_diagnostics": [
+    "Library/SoundPolish/prepare-audio-initial-compile-failure.log: obsolete importer preload property corrected to sample settings; subsequent import and both suites passed.",
+    "Library/SoundPolish/browser/sound-study-initial-missing-favicon.json: favicon fixed.",
+    "Library/SoundPolish/browser/sound-study-stop-cancels-media-requests.json: intentional Stop cancellations retained separately from unexpected failures.",
+    "Library/SoundPolish/browser/game-sound-checks.json: includes initial out-of-reach clicks and a closed-menu settings attempt before confirmed actions.",
+    "Unity Bee internal ExitCode 4 preceded graph regeneration; final BuildReport Succeeded and editor exit 0 verified before staging."
+  ]
+}

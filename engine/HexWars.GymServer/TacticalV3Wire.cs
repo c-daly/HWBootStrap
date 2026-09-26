@@ -425,7 +425,11 @@ namespace HexWars.GymServer
                 case TacticalV3CandidateKind.Move:
                     RequireReference(candidate.Actor, TacticalV3TableKind.Units,
                         observation, candidateCount, "move.actor");
-                    RequireNull(candidate.Target, "move.target");
+                    if (candidate.Target.HasValue)
+                    {
+                        RequireReference(candidate.Target.Value, TacticalV3TableKind.Cells,
+                            observation, candidateCount, "move.target");
+                    }
                     RequireNull(candidate.Template, "move.template");
                     RequireReference(candidate.Cell, TacticalV3TableKind.Cells,
                         observation, candidateCount, "move.cell");
