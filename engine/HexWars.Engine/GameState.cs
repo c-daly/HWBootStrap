@@ -34,6 +34,21 @@ namespace HexWars.Engine
         /// <summary>Per-unit (horizontal, vertical) movement points consumed this turn by hops.</summary>
         public IReadOnlyDictionary<int, (int H, int V)> MovementSpent { get; }
 
+        /// <summary>One movement checkpoint, rebuilt by command replay. Never crosses a turn or
+        /// another action; deliberately absent under fog to prevent free scouting.</summary>
+        public GameState? BeforeLastMove { get; private set; }
+        public int LastMovedUnitId { get; private set; } = -1;
+
+        internal GameState RememberMove(GameState before, int unitId)
+        {
+            var copy = Clone();
+            copy.BeforeLastMove = before.Clone();
+            copy.BeforeLastMove.BeforeLastMove = null;
+            copy.BeforeLastMove.LastMovedUnitId = -1;
+            copy.LastMovedUnitId = unitId;
+            return copy;
+        }
+
         public GameState(
             Board board,
             GameConfig config,
@@ -68,6 +83,7 @@ namespace HexWars.Engine
         /// <summary>A distinct GameState with the same (immutable) contents.</summary>
         public GameState Clone() =>
             new GameState(Board, Config, Players, ActivePlayer, Round, NextEntityId,
-                          IsGameOver, Winner, MovedUnitIds, AttackedUnitIds, MovementSpent, PlacingStartingUnits);
+                          IsGameOver, Winner, MovedUnitIds, AttackedUnitIds, MovementSpent, PlacingStartingUnits)
+            { BeforeLastMove = BeforeLastMove, LastMovedUnitId = LastMovedUnitId };
     }
 }

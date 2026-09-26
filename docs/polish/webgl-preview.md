@@ -9,12 +9,14 @@ descriptors are removed from the game screens; the eight form names remain.
 
 The latest build differentiates the armies with colored hulls and owner-correct portraits, mirrors
 Player 2's backline placement, hides inactive biomes, and marks attackable enemies before target
-selection. Movement previews label future shots separately. Double-clicking the previewed destination
-or enemy confirms the action; a single click still previews. The canvas no longer treats double-click
-as a fullscreen shortcut.
+selection. Movement previews label future shots separately without hiding current targets.
+Click a reachable hex once to move; **Undo move** takes back the last movement before another action
+or a turn handoff, with fog disabled. An attack is previewed on the first click and confirmed by
+clicking that enemy again or using Fire, with no double-click timing requirement. Squad cards skip
+spent units when a matching piece can still act. See [the control pass](smooth-movement.md).
 
 **Place starting units** in setup allows both players to rearrange their army freely within their
-starting area, including raised hexes. Select a unit and double-click a highlighted empty hex, then
+starting area, including raised hexes. Select a unit and click a highlighted empty hex, then
 press **Ready** when finished. Round one starts after both armies are ready. The default remains
 automatic placement; AI opponents keep that formation. Escape immediately dismisses help and the
 designer, and automatic tips are smaller and expire after six seconds.
@@ -24,10 +26,10 @@ audio, and separate Master / Effects / Ambience / Music controls in **Menu**. Th
 is served at `/sound-study/`. **Music during game** optionally keeps the theme playing through
 matches, with a saved preference and immediate switching.
 
-## Deploy the audio feature branch without merging
+## Deploy the feature branch without merging
 
-`codex/tabletop-audio-20260925` includes the earlier gameplay/UI changes, the Steam-optional web
-server, the audio changes and the compiled browser client. Deploy the whole branch or its latest
+`codex/smooth-movement-20260926` includes the earlier gameplay/UI changes, the Steam-optional web
+server, the audio changes, movement undo and the compiled browser client. Deploy the whole branch or its latest
 commit, rather than cherry-picking the music-setting commit. Unity is not required on the web host.
 
 For the existing Render WebGL service, keep the repository root as the Docker context and use
@@ -36,7 +38,7 @@ and `DATABASE_URL` unset. Set `ALLOWED_WEB_ORIGINS` to the actual HTTPS site ori
 multiplayer. The server exposes `/health/ready` for the health check.
 
 Use **Manual Deploy > Deploy a specific commit** with the feature branch's full SHA, or point the
-service's linked branch at `codex/tabletop-audio-20260925` and deploy its latest commit. The first
+service's linked branch at `codex/smooth-movement-20260926` and deploy its latest commit. The first
 method disables automatic deploys so another branch's next push cannot replace the preview.
 See [Render's deployment documentation](https://render.com/docs/deploys#deploying-a-specific-commit).
 

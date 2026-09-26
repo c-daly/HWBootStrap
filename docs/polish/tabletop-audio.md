@@ -21,7 +21,7 @@ The [music-setting receipt](evidence/music-during-game-checks.json) records the 
 confirm live switching and the saved choice after reload. A clean export of the committed server
 publishes and serves those exact files in Production on .NET 8.0.28 without Steam credentials or
 a database. The Windows player and the broader suites below retain their earlier validation.
-See [branch deployment instructions](webgl-preview.md#deploy-the-audio-feature-branch-without-merging).
+See [branch deployment instructions](webgl-preview.md#deploy-the-feature-branch-without-merging).
 
 ![Music during game enabled in the match menu](evidence/music-during-game.png)
 
