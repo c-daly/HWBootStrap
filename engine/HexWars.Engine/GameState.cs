@@ -24,6 +24,7 @@ namespace HexWars.Engine
 
         public PlayerId ActivePlayer { get; }
         public int Round { get; }
+        public bool PlacingStartingUnits { get; }
         public int NextEntityId { get; }
         public bool IsGameOver { get; }
         public PlayerId? Winner { get; }
@@ -44,13 +45,15 @@ namespace HexWars.Engine
             PlayerId? winner = null,
             IReadOnlyCollection<int>? movedUnitIds = null,
             IReadOnlyCollection<int>? attackedUnitIds = null,
-            IReadOnlyDictionary<int, (int H, int V)>? movementSpent = null)
+            IReadOnlyDictionary<int, (int H, int V)>? movementSpent = null,
+            bool placingStartingUnits = false)
         {
             Board = board;
             Config = config;
             Players = players;
             ActivePlayer = activePlayer;
             Round = round;
+            PlacingStartingUnits = placingStartingUnits;
             NextEntityId = nextEntityId;
             IsGameOver = isGameOver;
             Winner = winner;
@@ -65,6 +68,6 @@ namespace HexWars.Engine
         /// <summary>A distinct GameState with the same (immutable) contents.</summary>
         public GameState Clone() =>
             new GameState(Board, Config, Players, ActivePlayer, Round, NextEntityId,
-                          IsGameOver, Winner, MovedUnitIds, AttackedUnitIds, MovementSpent);
+                          IsGameOver, Winner, MovedUnitIds, AttackedUnitIds, MovementSpent, PlacingStartingUnits);
     }
 }

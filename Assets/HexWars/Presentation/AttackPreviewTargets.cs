@@ -26,6 +26,7 @@ namespace HexWars.Presentation
             HexCoord? previewDestination,
             PlayerId viewer)
         {
+            if (state.PlacingStartingUnits) return new AttackPreviewTarget[0];
             foreach (var unitId in state.AttackedUnitIds)
                 if (unitId == attacker.Id) return new AttackPreviewTarget[0];
 

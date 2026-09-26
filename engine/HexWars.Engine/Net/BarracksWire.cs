@@ -19,7 +19,9 @@ namespace HexWars.Engine
         public static string Write(IReadOnlyList<UnitTemplate> templates)
         {
             var normalized = BarracksCatalog.Normalize(templates ?? Array.Empty<UnitTemplate>());
-            var result = new StringBuilder(Version);
+            bool art = false;
+            foreach (var t in normalized) art |= !string.IsNullOrEmpty(t.ArtId);
+            var result = new StringBuilder(art ? "V2" : Version);
             foreach (var template in normalized)
             {
                 result.Append('\n');
@@ -33,6 +35,7 @@ namespace HexWars.Engine
                 AppendStat(result, template.Stats.RangeArc);
                 AppendStat(result, template.Stats.Vision);
                 AppendStat(result, template.Stats.VisionArc);
+                if (art) result.Append('|').Append(template.ArtId);
             }
 
             string payload = result.ToString();
@@ -47,14 +50,14 @@ namespace HexWars.Engine
                 throw new FormatException("barracks payload exceeds 32 KiB");
 
             string[] lines = payload.Split(new[] { '\n' }, StringSplitOptions.None);
-            if (lines.Length == 0 || lines[0] != Version)
+            if (lines.Length == 0 || (lines[0] != Version && lines[0] != "V2"))
                 throw new FormatException("unsupported barracks payload version");
 
             var parsed = new List<UnitTemplate>(Math.Min(lines.Length - 1, BarracksCatalog.ProtocolMaximumTemplates));
             for (int lineIndex = 1; lineIndex < lines.Length; lineIndex++)
             {
                 string[] fields = lines[lineIndex].Split('|');
-                if (fields.Length != 10)
+                if (fields.Length != (lines[0] == "V2" ? 11 : 10))
                     throw new FormatException("malformed barracks record");
 
                 string name;
@@ -76,7 +79,7 @@ namespace HexWars.Engine
 
                 parsed.Add(new UnitTemplate(name, new UnitStats(
                     stats[0], stats[1], stats[2], stats[3], stats[4],
-                    stats[5], stats[6], stats[7], stats[8])));
+                    stats[5], stats[6], stats[7], stats[8]), fields.Length == 11 ? fields[10] : ""));
             }
 
             return BarracksCatalog.Normalize(parsed);
