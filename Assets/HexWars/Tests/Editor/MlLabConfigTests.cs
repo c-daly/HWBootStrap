@@ -190,9 +190,28 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void OpponentChoices_ExcludeManifestlessCheckpointPaths()
+        public void OpponentChoices_IncludePassiveWithoutRemappingExistingSelections()
         {
-            Assert.That(System.Enum.GetNames(typeof(MlOpponentKind)), Does.Not.Contain("FixedCheckpoint"));
+            string[] choices = System.Enum.GetNames(typeof(MlOpponentKind));
+
+            Assert.That(choices, Does.Contain(nameof(MlOpponentKind.Passive)));
+            Assert.That(choices, Does.Not.Contain("FixedCheckpoint"));
+            Assert.That((int)MlOpponentKind.Greedy, Is.EqualTo(0));
+            Assert.That((int)MlOpponentKind.Random, Is.EqualTo(1));
+            Assert.That((int)MlOpponentKind.FixedRun, Is.EqualTo(2));
+            Assert.That((int)MlOpponentKind.LiveRun, Is.EqualTo(3));
+        }
+
+        [Test]
+        public void BuildTrainArguments_EmitsPassiveOpponentWithoutModelPath()
+        {
+            var config = MlLabConfig.Default();
+            config.OpponentKind = MlOpponentKind.Passive;
+            config.OpponentPath = string.Empty;
+
+            Assert.That(config.Validate(), Has.None.Contains("Opponent path"));
+            Assert.That(config.BuildTrainArguments(),
+                Does.Contain("--opponent passive"));
         }
 
         [Test]
@@ -287,6 +306,47 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void TacticalV3TrainingMode_DefaultsToSerializedDaggerValue()
+        {
+            var config = MlLabConfig.Default();
+
+            Assert.That(config.TacticalV3TrainingMode,
+                Is.EqualTo(MlTacticalV3TrainingMode.DaggerContinuation));
+            Assert.That((int)MlTacticalV3TrainingMode.DaggerContinuation,
+                Is.EqualTo(0));
+            Assert.That((int)MlTacticalV3TrainingMode.OutcomeCandidate,
+                Is.EqualTo(1));
+        }
+
+        [Test]
+        public void OutcomeValidation_UsesDecisionTargetAndAllowsNoInitialModel()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.TacticalV3TrainingMode =
+                MlTacticalV3TrainingMode.OutcomeCandidate;
+            config.ResumeSource = string.Empty;
+            config.TotalTimesteps = 0;
+            config.CheckpointInterval = 0;
+            config.Workers = 0;
+
+            var errors = config.Validate();
+
+            Assert.That(errors,
+                Has.Some.Contains("Outcome learner decision target"));
+            Assert.That(errors, Has.None.Contains("source model"));
+            Assert.That(errors, Has.None.Contains("Checkpoint interval"));
+            Assert.That(errors, Has.None.Contains("Workers"));
+
+            config.TotalTimesteps = 2;
+            Assert.That(config.Validate(), Is.Empty);
+
+            config.ResumeSource = " ";
+            Assert.That(config.Validate(),
+                Has.Some.Contains("Initial model cannot be blank"));
+        }
+
+        [Test]
         public void BuildStructuredTrainArguments_EmitsInitializedContinuationContract()
         {
             var config = MlLabConfig.Default();
@@ -325,8 +385,54 @@ namespace HexWars.Presentation.Tests
             Assert.That(args, Does.Not.Contain("--workers"));
         }
 
+        [Test]
+        public void BuildStructuredRetryArguments_UsesOnlySelectedCollectionAndFreshRun()
+        {
+            string args = MlLabConfig.BuildStructuredRetryArguments(
+                @"C:\runs\stopped collection", "replayed-training");
+
+            Assert.That(args, Does.StartWith(
+                "retry-structured --collection-run \"C:\\runs\\stopped collection\" " +
+                "--run replayed-training"));
+            Assert.That(args, Does.EndWith("--no-console-output --json"));
+            Assert.That(args, Does.Not.Contain("--source-run"));
+            Assert.That(args, Does.Not.Contain("--scenario-file"));
+            Assert.That(args, Does.Not.Contain("--opponent"));
+            Assert.That(args, Does.Not.Contain("--device"));
+            Assert.That(args, Does.Not.Contain("--tracker"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase(" ")]
+        public void BuildStructuredRetryArguments_RequiresSelectedCollectionRun(
+            string collectionRun)
+        {
+            ArgumentException error = Assert.Throws<ArgumentException>(() =>
+                MlLabConfig.BuildStructuredRetryArguments(
+                    collectionRun, "replayed-training"));
+
+            Assert.That(error.ParamName, Is.EqualTo("collectionRun"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase("bad name")]
+        [TestCase("../existing")]
+        public void BuildStructuredRetryArguments_RequiresFreshSafeRunName(
+            string runName)
+        {
+            ArgumentException error = Assert.Throws<ArgumentException>(() =>
+                MlLabConfig.BuildStructuredRetryArguments(
+                    @"C:\runs\stopped", runName));
+
+            Assert.That(error.ParamName, Is.EqualTo("newRunName"));
+            Assert.That(error.Message, Does.Contain("Fresh run name"));
+        }
+
         [TestCase(MlOpponentKind.Greedy, "greedy")]
         [TestCase(MlOpponentKind.Random, "random")]
+        [TestCase(MlOpponentKind.Passive, "passive")]
         [TestCase(MlOpponentKind.FixedRun, "run:C:\\runs\\opponent")]
         public void BuildStructuredTrainArguments_PreservesScriptedAndFixedOpponents(
             MlOpponentKind kind, string expected)
@@ -440,6 +546,90 @@ namespace HexWars.Presentation.Tests
             Assert.That(args, Does.EndWith("--json"));
             Assert.That(args, Does.Not.Contain("--run "));
             Assert.That(args, Does.Not.Contain("--train-labels"));
+        }
+
+        [Test]
+        public void BuildOutcomeTrainArguments_EmitsExactFreshCandidateContract()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.TacticalV3TrainingMode =
+                MlTacticalV3TrainingMode.OutcomeCandidate;
+            config.RunName = "outcome-candidate";
+            config.ResumeSource = string.Empty;
+            config.OpponentKind = MlOpponentKind.Passive;
+            config.TotalTimesteps = 1234;
+            config.Seed = 29;
+            config.Device = "cuda";
+            config.LearnerSeat = MlLearnerSeat.Alternating;
+            config.Trackers.Add(new MlTrackerConfig("tensorboard"));
+
+            string args = config.BuildOutcomeTrainArguments(
+                @"C:\scenarios\close static.json");
+
+            Assert.That(args, Is.EqualTo(
+                "train-outcome --run outcome-candidate " +
+                "--scenario-file \"C:\\scenarios\\close static.json\" " +
+                "--opponent passive --timesteps 1234 --seed 29 " +
+                "--device cuda --learner-seat alternating --tracker local " +
+                "--tracker tensorboard --no-console-output --json"));
+        }
+
+        [Test]
+        public void BuildOutcomeTrainArguments_EmitsOptionalInitialModel()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.TacticalV3TrainingMode =
+                MlTacticalV3TrainingMode.OutcomeCandidate;
+            config.ResumeSource = @"C:\runs\initial model";
+
+            string args = config.BuildOutcomeTrainArguments(
+                @"C:\scenarios\target.json");
+
+            Assert.That(args, Does.Contain(
+                "--source-run \"C:\\runs\\initial model\""));
+        }
+
+        [Test]
+        public void BuildOutcomePreflightArguments_EmitsExactOptionalSourceInputs()
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.TacticalV3TrainingMode =
+                MlTacticalV3TrainingMode.OutcomeCandidate;
+            config.ResumeSource = @"C:\runs\initial model";
+            config.OpponentKind = MlOpponentKind.Random;
+            config.Seed = 41;
+            config.Device = "cuda:0";
+            config.LearnerSeat = MlLearnerSeat.Seat1;
+
+            string args = config.BuildOutcomePreflightArguments(
+                @"C:\scenarios\target scenario.json");
+
+            Assert.That(args, Is.EqualTo(
+                "preflight-outcome " +
+                "--scenario-file \"C:\\scenarios\\target scenario.json\" " +
+                "--opponent random --seed 41 --device cuda:0 " +
+                "--learner-seat 1 " +
+                "--source-run \"C:\\runs\\initial model\" --json"));
+        }
+
+        [TestCase(null)]
+        [TestCase("")]
+        [TestCase(" ")]
+        public void BuildOutcomeArguments_RequireResolvedScenarioPath(
+            string scenarioPath)
+        {
+            var config = MlLabConfig.Default();
+            config.Environment = MlEnvironmentContract.TacticalV3;
+            config.TacticalV3TrainingMode =
+                MlTacticalV3TrainingMode.OutcomeCandidate;
+
+            Assert.Throws<ArgumentException>(
+                () => config.BuildOutcomeTrainArguments(scenarioPath));
+            Assert.Throws<ArgumentException>(
+                () => config.BuildOutcomePreflightArguments(scenarioPath));
         }
 
         [Test]

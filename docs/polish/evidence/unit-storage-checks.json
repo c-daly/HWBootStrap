@@ -1,0 +1,9 @@
+{
+  "checkedAt": "2026-09-24T22:28:32.119Z",
+  "checks": [
+    "Updating an open design keeps one record; a new example creates a separate record",
+    "Renaming and reloading preserves explicit appearance",
+    "Unreadable existing storage remains byte-for-byte untouched after session-only save",
+    "Blocked storage preserves the in-session shelf and reports its limitation"
+  ]
+}

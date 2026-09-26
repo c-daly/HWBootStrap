@@ -1,0 +1,428 @@
+{
+  "date": "2026-09-25T18:53:43.390Z",
+  "browser": "149.0.7827.53",
+  "errors": [],
+  "warnings": [
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n"
+  ],
+  "failed": [],
+  "navigationAborts": [],
+  "actions": [
+    {
+      "action": "click",
+      "x": 50,
+      "y": 50
+    },
+    {
+      "action": "probe",
+      "ms": 3500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.04064089059829712,
+          "sum": 7.280749656205611,
+          "samples": 175104,
+          "activeFrames": 159,
+          "rms": 0.006448222515015119
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 4440.899999976158,
+          "duration": 61.95083900226757,
+          "loop": false
+        },
+        {
+          "at": 4441.700000047684,
+          "duration": 61.95083900226757,
+          "loop": true
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-title.png"
+    },
+    {
+      "action": "record-start",
+      "result": {
+        "state": "recording",
+        "mimeType": ""
+      }
+    },
+    {
+      "action": "wait",
+      "ms": 8000
+    },
+    {
+      "action": "record-stop",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-title-audio.webm",
+      "result": {
+        "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-title-audio.webm"
+      }
+    },
+    {
+      "action": "setup",
+      "territory": false
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-board.png"
+    },
+    {
+      "action": "click",
+      "x": 510,
+      "y": 842
+    },
+    {
+      "action": "key",
+      "key": "f"
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-range.png"
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 43167.5,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 43167.800000071526,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 44167.200000047684,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 44167.700000047684,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 45317.800000071526,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 45318.89999997616,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 46317.200000047684,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 46317.5,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 46939.5,
+          "duration": 61.95083900226757,
+          "loop": true
+        },
+        {
+          "at": 47771.89999997616,
+          "duration": 1.555736961451247,
+          "loop": false
+        },
+        {
+          "at": 47772,
+          "duration": 1.555736961451247,
+          "loop": true
+        },
+        {
+          "at": 69092.20000004768,
+          "duration": 0.13931972789115646,
+          "loop": true
+        },
+        {
+          "at": 69092.20000004768,
+          "duration": 0.13931972789115646,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "record-start",
+      "result": {
+        "state": "recording",
+        "mimeType": ""
+      }
+    },
+    {
+      "action": "probe-click",
+      "x": 785,
+      "y": 410,
+      "double": true,
+      "ms": 4000,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.11355751752853394,
+          "sum": 9.84775538316136,
+          "samples": 192512,
+          "activeFrames": 188,
+          "rms": 0.0071522011997678155
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 94581.80000007153,
+          "duration": 0.23219954648526078,
+          "loop": false
+        },
+        {
+          "at": 94581.80000007153,
+          "duration": 0.23219954648526078,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-after-shot.png"
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "click",
+      "x": 112,
+      "y": 842
+    },
+    {
+      "action": "key",
+      "key": "m"
+    },
+    {
+      "action": "probe-click",
+      "x": 486,
+      "y": 478,
+      "double": true,
+      "ms": 2500,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.026067495346069336,
+          "sum": 5.507440048682788,
+          "samples": 118784,
+          "activeFrames": 116,
+          "rms": 0.006809197268085648
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": []
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-after-move.png"
+    },
+    {
+      "action": "record-stop",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-combat-audio.webm",
+      "result": {
+        "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-combat-audio.webm"
+      }
+    },
+    {
+      "action": "inspect",
+      "result": {
+        "errors": [],
+        "failed": [],
+        "canvas": {
+          "x": 0,
+          "y": 0,
+          "width": 1600,
+          "height": 900
+        }
+      }
+    },
+    {
+      "action": "receipt",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-checks.json",
+      "result": {
+        "errors": [],
+        "failed": []
+      }
+    },
+    {
+      "action": "click",
+      "x": 415,
+      "y": 480
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-move-ready.png"
+    },
+    {
+      "action": "key",
+      "key": "Escape"
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 167707.70000004768,
+          "duration": 0.13931972789115646,
+          "loop": false
+        },
+        {
+          "at": 167715.5,
+          "duration": 0.13931972789115646,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "record-start",
+      "result": {
+        "state": "recording",
+        "mimeType": ""
+      }
+    },
+    {
+      "action": "probe-click",
+      "x": 486,
+      "y": 478,
+      "double": true,
+      "ms": 3000,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.026067495346069336,
+          "sum": 7.000519276390957,
+          "samples": 146432,
+          "activeFrames": 143,
+          "rms": 0.006914282676895542
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": []
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-moved.png"
+    },
+    {
+      "action": "record-stop",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-move-audio.webm",
+      "result": {
+        "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-move-audio.webm"
+      }
+    },
+    {
+      "action": "receipt",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-checks.json",
+      "result": {
+        "errors": [],
+        "failed": []
+      }
+    },
+    {
+      "action": "record-start",
+      "result": {
+        "state": "recording",
+        "mimeType": ""
+      }
+    },
+    {
+      "action": "probe-click",
+      "x": 1398,
+      "y": 750,
+      "ms": 3000,
+      "result": [
+        {
+          "state": "running",
+          "peak": 0.1434786021709442,
+          "sum": 11.280882532805522,
+          "samples": 146432,
+          "activeFrames": 143,
+          "rms": 0.008777150424228282
+        }
+      ]
+    },
+    {
+      "action": "audio-events",
+      "result": [
+        {
+          "at": 251208.89999997616,
+          "duration": 0.23219954648526078,
+          "loop": false
+        },
+        {
+          "at": 251208.89999997616,
+          "duration": 0.23219954648526078,
+          "loop": false
+        }
+      ]
+    },
+    {
+      "action": "capture",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-move-confirmed.png"
+    },
+    {
+      "action": "record-stop",
+      "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-move-confirmed.webm",
+      "result": {
+        "path": "/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924/Library/TabletopAudio/browser/game-move-confirmed.webm"
+      }
+    }
+  ],
+  "cacheKey": "c3d53aea",
+  "observations": {
+    "title": "New piano buffer is 61.950839 seconds; title output measured and recorded.",
+    "shot": "Accepted sniper attack, action consumed, short replacement shot source emitted.",
+    "movement": "Selected Brute on the board, previewed cell 2,1, then confirmed with the Move button; unit moved and movement/climb dropped from 3/2 to 2/1 with the new contact cue.",
+    "earlier_attempts": "An exhausted unit rejected a move; subsequent destination clicks only previewed it until explicit confirmation. Neither attempt is counted as a successful move.",
+    "signals": {
+      "title": {
+        "state": "running",
+        "peak": 0.04064089059829712,
+        "sum": 7.280749656205611,
+        "samples": 175104,
+        "activeFrames": 159,
+        "rms": 0.006448222515015119
+      },
+      "shot": {
+        "state": "running",
+        "peak": 0.11355751752853394,
+        "sum": 9.84775538316136,
+        "samples": 192512,
+        "activeFrames": 188,
+        "rms": 0.0071522011997678155
+      },
+      "confirmed_move": {
+        "state": "running",
+        "peak": 0.1434786021709442,
+        "sum": 11.280882532805522,
+        "samples": 146432,
+        "activeFrames": 143,
+        "rms": 0.008777150424228282
+      }
+    },
+    "note": "Signals include board ambience. Unity can restart a Web Audio node; two start events do not establish double audible playback."
+  }
+}

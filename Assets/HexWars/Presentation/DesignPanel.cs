@@ -22,10 +22,17 @@ namespace HexWars.Presentation
         readonly int[] _stats = new int[9];
         readonly Text[] _valueLabels = new Text[9];
         Text _summary;
+        Text _appearance;
+        string _artId = "";
+        readonly Button[] _artButtons = new Button[8];
+        readonly UnitPortrait[] _artPortraits = new UnitPortrait[8];
         InputField _nameField;
         string _name = "";
         int _placeholderIdx;
         bool _lastTipsEnabled;
+
+        public bool Expanded { get; private set; } = true;
+        public void SetExpanded(bool open) { Expanded = open; if (_canvasGo != null) _canvasGo.SetActive(open && _game != null && !_game.DemoMode && _game.State != null); }
 
         void Start()
         {
@@ -45,7 +52,7 @@ namespace HexWars.Presentation
         {
             if (_game == null || _canvasGo == null) return;
             var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
-            if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
+            if (!UiKit.EscapeHandledThisFrame && DeviceInput.Allowed && UiKit.InputOwnsFocus(_nameField) && Keyboard.current != null)
             {
                 if (Keyboard.current.escapeKey.wasPressedThisFrame)
                 {
@@ -62,11 +69,22 @@ namespace HexWars.Presentation
                     return;
                 }
             }
-            bool hidden = _game.DemoMode || _game.State == null;
+            bool hidden = !Expanded || _game.DemoMode || _game.State == null;
             if (_canvasGo.activeSelf == hidden)
             {
                 _canvasGo.SetActive(!hidden);
                 if (hidden) SoundManager.StopDesignerHum(); else SoundManager.StartDesignerHum();
+            }
+
+            if (!hidden)
+            {
+                var ai = _game.GetComponent<AiOpponent>();
+                var owner = _game.Networked ? (_game.Seat ?? _game.State.ActivePlayer)
+                    : ai != null ? (ai.AiSeat == PlayerId.Player0 ? PlayerId.Player1 : PlayerId.Player0)
+                    : _game.State.ActivePlayer;
+                for (int i = 0; i < _artPortraits.Length; i++)
+                    if (_artPortraits[i] != null && _artPortraits[i].Owner != owner)
+                        _artPortraits[i].SetArt(i, false, owner);
             }
 
             if (TipsService.Enabled != _lastTipsEnabled)
@@ -94,7 +112,7 @@ namespace HexWars.Presentation
             var prt = panelImg.GetComponent<RectTransform>();
             prt.anchorMin = prt.anchorMax = new Vector2(0f, 1f);
             prt.pivot = new Vector2(0f, 1f);
-            prt.sizeDelta = new Vector2(w, rowsTop + rowH * 10 + 104f); // 9 stat rows + the Name row
+            prt.sizeDelta = new Vector2(w, rowsTop + rowH * 10 + 298f); // 9 stat rows + the Name row
                                                                        // + summary/Create padding
             prt.anchoredPosition = new Vector2(8f, -top);
             var panel = panelImg.transform;
@@ -142,7 +160,18 @@ namespace HexWars.Presentation
 
             float sy = nameY - rowH - 6f;
             _summary = UiKit.Label(panel, "", 0f, sy, w - 24f, 42f, 15, TextAnchor.UpperLeft);
-            UiKit.Button(panel, "Create (to Barracks)", 0f, sy - 48f, w - 24f, 30f, OnCreate, UiKit.ButtonStyle.Cta);
+            _appearance = UiKit.Label(panel, "", 0f, sy - 52f, w - 24f, 22f, 12, TextAnchor.MiddleLeft, UiKit.TextDim);
+            for (int i=0;i<8;i++)
+            {
+                int choice=i; float x=-91.5f+(i%4)*61f, y=sy-78f-(i/4)*67f;
+                var button=UiKit.Button(panel,"",x,y,56f,61f,()=>SelectArt(UnitArt.Ids[choice]),UiKit.ButtonStyle.Secondary,10);
+                button.gameObject.name="Choose "+UnitArt.Names[i]; _artButtons[i]=button;
+                _artPortraits[i] = GraphiteWorkshop.Portrait(button.transform,i,0,-1f,43f).GetComponent<UnitPortrait>();
+                UiKit.Label(button.transform,UnitArt.Names[i],0,-43f,56,17,10,TextAnchor.MiddleCenter);
+            }
+            UiKit.Button(panel,"Match role",-62f,sy-214f,118f,26f,()=>SelectArt(""),UiKit.ButtonStyle.Secondary,12);
+            UiKit.Button(panel,"View collection",62f,sy-214f,118f,26f,()=>GraphiteWorkshop.Open(_game),UiKit.ButtonStyle.Secondary,12);
+            UiKit.Button(panel, "Save to barracks", 0f, sy - 248f, w - 24f, 32f, OnCreate, UiKit.ButtonStyle.Cta,17);
         }
 
         /// <summary>Called by GameBootstrap's first-bounty Tips CTA ("Design your answer"). This panel
@@ -152,6 +181,8 @@ namespace HexWars.Presentation
         /// no-op click handler.</summary>
         public void Highlight()
         {
+            if (_game != null) _game.GetComponent<TacticalHud>()?.SetWorkshop(true);
+            SetExpanded(true);
             if (_canvasGo == null || !_canvasGo.activeSelf) return;
             StopAllCoroutines();
             StartCoroutine(PulseRoutine());
@@ -216,9 +247,15 @@ namespace HexWars.Presentation
         {
             if (_summary == null) return;
             var s = ToStats();
+            string resolved = UnitArt.Resolve(_artId, s);
+            if (_appearance != null) _appearance.text = "Appearance: " + UnitArt.Names[UnitArt.Index(resolved)] + (string.IsNullOrEmpty(_artId) ? " · matched to role" : " · selected");
+            for (int i=0;i<8;i++) if(_artButtons[i]!=null) UiKit.SetToggled(_artButtons[i],UnitArt.Ids[i]==resolved);
             string displayName = string.IsNullOrEmpty(_name) ? "Unnamed" : _name;
-            _summary.text = $"Name: {displayName}\nCost {s.PointCost}   Role: {Roles.Dominant(s)}";
+            if (_summary != null) _summary.text = $"Name: {displayName}\nCost {s.PointCost}   Role: {Roles.Dominant(s)}";
         }
+
+        public string AppearanceSelection => _artId;
+        public void SelectArt(string id) { _artId = UnitArt.Normalize(id); RefreshSummary(); }
 
         UnitStats ToStats() =>
             new UnitStats(_stats[0], _stats[1], _stats[2], _stats[3], _stats[4], _stats[5], _stats[6], _stats[7], _stats[8]);
@@ -232,7 +269,7 @@ namespace HexWars.Presentation
             // what's echoed back in APPLY / shown in the barracks matches what the player typed, instead
             // of silently differing only after a round-trip.
             string sanitized = UnitTemplate.Sanitize(_name);
-            if (_game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats(), sanitized)))
+            if (_game.TryApply(new CreateUnit(_game.State.ActivePlayer, ToStats(), sanitized, _artId)))
             {
                 // TryApply's optimistic `true` for a Networked game isn't a server verdict — the server
                 // may yet reject it, so the visible "it worked" cues (sound + clearing the name box)

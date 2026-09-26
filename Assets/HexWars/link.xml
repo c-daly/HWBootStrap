@@ -1,0 +1,9 @@
+<linker>
+  <!-- CreatePrimitive selects these native collider types dynamically. Even decorative
+       primitives need them during construction, before we remove their colliders. -->
+  <assembly fullname="UnityEngine.PhysicsModule">
+    <type fullname="UnityEngine.SphereCollider" preserve="all" />
+    <type fullname="UnityEngine.CapsuleCollider" preserve="all" />
+    <type fullname="UnityEngine.MeshCollider" preserve="all" />
+  </assembly>
+</linker>

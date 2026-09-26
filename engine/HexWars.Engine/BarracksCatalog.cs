@@ -24,7 +24,7 @@ namespace HexWars.Engine
             var result = new List<UnitTemplate>();
             foreach (var raw in source ?? Array.Empty<UnitTemplate>())
             {
-                var item = new UnitTemplate(UnitTemplate.Sanitize(raw.Name), raw.Stats);
+                var item = new UnitTemplate(UnitTemplate.Sanitize(raw.Name), raw.Stats, raw.ArtId);
                 if (item.Stats.Health < 1 || result.Exists(x => Same(x, item))) continue;
                 if (result.Count == limit) break;
                 result.Add(item);
@@ -32,12 +32,13 @@ namespace HexWars.Engine
             return result;
         }
 
-        /// <summary>Templates are equal only when their sanitized names and all nine stats match.</summary>
+        /// <summary>Templates are equal only when their sanitized names all nine stats and cosmetic selections match.</summary>
         public static bool Same(UnitTemplate left, UnitTemplate right)
         {
             var a = left.Stats;
             var b = right.Stats;
             return UnitTemplate.Sanitize(left.Name) == UnitTemplate.Sanitize(right.Name)
+                && UnitArt.Normalize(left.ArtId) == UnitArt.Normalize(right.ArtId)
                 && a.Health == b.Health
                 && a.Damage == b.Damage
                 && a.Defense == b.Defense

@@ -1,0 +1,49 @@
+{
+  "date": "2026-09-25T15:05:30.532Z",
+  "browser": "149.0.7827.53",
+  "errors": [],
+  "warnings": [
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n"
+  ],
+  "failed": [],
+  "screens": [
+    "title",
+    "board",
+    "move",
+    "cancel-preview",
+    "after-move",
+    "attack",
+    "details",
+    "after-fire",
+    "turn-dialog",
+    "menu",
+    "saved-design",
+    "deployed",
+    "1280",
+    "390"
+  ],
+  "method": "Real canvas clicks and keyboard events; screenshots visually inspected alongside Unity state assertions.",
+  "cacheKey": "183ea4f1",
+  "viewports": [
+    {
+      "width": 1600,
+      "height": 900
+    },
+    {
+      "width": 1280,
+      "height": 720
+    },
+    {
+      "width": 390,
+      "height": 844
+    }
+  ],
+  "canvas": {
+    "x": 0,
+    "y": 0,
+    "width": 390,
+    "height": 844
+  }
+}

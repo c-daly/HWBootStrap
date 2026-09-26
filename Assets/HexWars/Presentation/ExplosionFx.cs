@@ -47,6 +47,7 @@ namespace HexWars.Presentation
 
         public static void Spawn(Vector3 pos, Color tint, float scale = 1f, bool debris = true)
         {
+            if (MotionSettings.Reduced) return;
             var go = new GameObject("ExplosionFx");
             go.transform.position = pos;
             var fx = go.AddComponent<ExplosionFx>();

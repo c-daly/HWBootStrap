@@ -46,7 +46,9 @@ namespace HexWars.Presentation.Tests
             Assert.That(plan.LearnerRunDirectory, Is.EqualTo(source));
             Assert.That(plan.Scenario.Environment, Is.EqualTo("tactical-v3"));
             Assert.That(first.P0Spec,
-                Does.Contain(JsonFragment(source)).And.Contain("\"mode\":\"live\""));
+                Does.Contain(JsonFragment(source))
+                    .And.Contain("\"mode\":\"live\"")
+                    .And.Contain("\"inference_mode\":\"deterministic\""));
             Assert.That(first.P1Spec, Is.EqualTo("greedy"));
             Assert.That(second.P0Spec, Is.EqualTo("greedy"));
             Assert.That(second.P1Spec, Does.Contain(JsonFragment(source)));
@@ -68,6 +70,98 @@ namespace HexWars.Presentation.Tests
             Assert.That(game.P0Spec, Does.Contain(JsonFragment(published)));
             Assert.That(game.P1Spec, Is.EqualTo("random"));
             Assert.That(game.OpponentLabel, Is.EqualTo("Random"));
+        }
+
+        [TestCase("running")]
+        [TestCase("stopping")]
+        [TestCase("stopped")]
+        [TestCase("completed")]
+        public void OutcomeCandidate_UsesItsOwnLatestCheckpoint(
+            string state)
+        {
+            string run = WriteOutcomeRun(
+                "outcome-" + state,
+                state,
+                Scripted("greedy"));
+            string checkpoint = Path.GetFullPath(Path.Combine(
+                run, "checkpoints", "policy-update-000003.pt"));
+
+            string revision = MlWatchPresentationTarget.ResolveRevision(run);
+            MlRunPresentationPlan plan = MlRunPresentationPlan.Load(run);
+            MlPresentationGame game = plan.PlanGame(0);
+
+            Assert.That(revision, Is.EqualTo(
+                "outcome-checkpoint:" + checkpoint));
+            Assert.That(
+                MlArenaLaunchPlan.ResolveModelRunSelection(run),
+                Is.EqualTo(run));
+            Assert.That(plan.RunDirectory, Is.EqualTo(Path.GetFullPath(run)));
+            Assert.That(plan.LearnerRunDirectory, Is.EqualTo(Path.GetFullPath(run)));
+            Assert.That(game.P0Spec,
+                Does.Contain(JsonFragment(run))
+                    .And.Contain("\"mode\":\"live\"")
+                    .And.Contain("\"inference_mode\":\"deterministic\""));
+            Assert.That(game.P1Spec, Is.EqualTo("greedy"));
+            Assert.That(game.OpponentLabel, Is.EqualTo("Greedy"));
+        }
+
+        [TestCase("created")]
+        [TestCase("failed")]
+        public void OutcomeCandidate_RejectsNonPresentableRunState(
+            string state)
+        {
+            string run = WriteOutcomeRun(
+                "outcome-" + state,
+                state,
+                Scripted("greedy"));
+
+            Assert.That(
+                MlWatchPresentationTarget.ResolveRevision(run),
+                Is.Empty);
+            Assert.That(
+                () => MlRunPresentationPlan.Load(run),
+                Throws.InvalidOperationException.With.Message.Contains(
+                        "state must be running, stopping, stopped, or completed"));
+        }
+
+        [Test]
+        public void OutcomeCandidate_RejectsCheckpointOutsideItsOwnCheckpointDirectory()
+        {
+            string run = WriteOutcomeRun(
+                "outcome-traversal",
+                "running",
+                Scripted("greedy"));
+            string manifestPath = Path.Combine(run, "run.json");
+            string manifest = File.ReadAllText(manifestPath).Replace(
+                "checkpoints/policy-update-000003.pt",
+                "../foreign.pt");
+            File.WriteAllText(manifestPath, manifest);
+            File.WriteAllText(Path.Combine(_scratch, "foreign.pt"), "checkpoint");
+
+            Assert.That(
+                MlWatchPresentationTarget.ResolveRevision(run),
+                Is.Empty);
+            Assert.That(
+                () => MlRunPresentationPlan.Load(run),
+                Throws.InvalidOperationException.With.Message.Contains(
+                    "checkpoints/*.pt"));
+        }
+
+        [Test]
+        public void PassiveLifecycleOpponent_RemainsLoadableAndViewable()
+        {
+            string source = WriteStructuredModel("source");
+            string lifecycle = WriteLifecycle(
+                publishedRun: null,
+                sourceRun: source,
+                opponentJson: Scripted("passive"));
+
+            MlPresentationGame game =
+                MlRunPresentationPlan.Load(lifecycle).PlanGame(0);
+
+            Assert.That(game.P1Spec, Is.EqualTo("passive"));
+            Assert.That(game.OpponentLabel, Is.EqualTo("Passive"));
+            Assert.That(ModelDuelDriver.IsModel(game.P1Spec), Is.False);
         }
 
         [Test]
@@ -114,6 +208,39 @@ namespace HexWars.Presentation.Tests
             Assert.That(game.P1Spec, Does.Contain("opponent"));
             Assert.That(game.OpponentLabel,
                 Does.Contain("opponent").And.Contain(mode));
+        }
+
+        [TestCase("fixed_run", "fixed", "run:")]
+        [TestCase("live_run", "live", "\"mode\":\"live\"")]
+        public void Lifecycle_AllowsOutcomeCandidateModelOpponent(
+            string kind, string mode, string expectedSpec)
+        {
+            string learner = WriteStructuredModel("learner");
+            string opponent = WriteOutcomeRun(
+                "outcome-opponent-" + mode,
+                "completed",
+                Scripted("passive"));
+            string opponentJson =
+                "{\"kind\":" + Json(kind) +
+                ",\"mode\":" + Json(mode) +
+                ",\"source_run\":" + Json(opponent) +
+                ",\"checkpoint\":" +
+                Json(Path.Combine(
+                    opponent, "checkpoints", "policy-update-000003.pt")) +
+                ",\"checkpoint_sha256\":\"" + new string('a', 64) + "\"" +
+                ",\"step\":3,\"algorithm\":\"structured_policy_gradient\"}";
+            string lifecycle = WriteLifecycle(
+                publishedRun: null,
+                sourceRun: learner,
+                opponentJson: opponentJson);
+
+            MlPresentationGame game =
+                MlRunPresentationPlan.Load(lifecycle).PlanGame(0);
+
+            Assert.That(game.P1Spec, Does.Contain(expectedSpec));
+            Assert.That(game.P1Spec, Does.Contain("outcome-opponent"));
+            Assert.That(game.OpponentLabel,
+                Does.Contain("outcome candidate").And.Contain(mode));
         }
 
         [Test]
@@ -182,6 +309,53 @@ namespace HexWars.Presentation.Tests
                 "\"latest_checkpoint_step\":0," +
                 "\"dataset_manifest_sha256\":\"" + new string('a', 64) + "\"," +
                 "\"best_epoch\":0,\"best_validation_policy_nll\":1.0}");
+            return run;
+        }
+
+        string WriteOutcomeRun(
+            string name,
+            string state,
+            string opponentJson)
+        {
+            string run = Path.Combine(_scratch, name);
+            Directory.CreateDirectory(Path.Combine(run, "checkpoints"));
+            File.Copy(
+                Path.Combine("python", "config",
+                    "annihilation-structured-imitation-v1.json"),
+                Path.Combine(run, "scenario.json"));
+            MlTrainingScenario scenario = MlTrainingScenarioFile.Load(
+                Path.Combine(run, "scenario.json"));
+            TrainingScenario engine = MlTrainingScenarioPreflight.ToEngine(scenario);
+            TacticalV3Contract identity = TacticalV3Contract.Create(
+                engine.BuildTacticalV3(), MlEnvironmentKind.Duel);
+            File.Copy(
+                Path.Combine("python", "tests", "fixtures", "tactical_v3",
+                    "seed-41-duel-spaces.json"),
+                Path.Combine(run, "policy-identity.json"));
+            File.WriteAllText(
+                Path.Combine(
+                    run, "checkpoints", "policy-update-000003.pt"),
+                "checkpoint");
+            File.WriteAllText(
+                Path.Combine(run, "run.json"),
+                "{\"schema_version\":1,\"state\":" + Json(state) + "," +
+                "\"evidence_status\":\"unsealed-experimental\"," +
+                "\"config\":{\"algorithm\":\"structured_policy_gradient\"," +
+                "\"backend\":\"structured_policy_gradient\"," +
+                "\"environment\":\"tactical-v3\"," +
+                "\"learner_seat\":\"alternating\"}," +
+                "\"contract\":{\"environment\":\"tactical-v3\"," +
+                "\"version\":\"tactical-v3\",\"environment_kind\":\"duel\"," +
+                "\"contract_hash\":" + Json(identity.ContractHash) + "," +
+                "\"encoding_hash\":" + Json(identity.EncodingHash) + "," +
+                "\"capacity_hash\":" + Json(identity.CapacityHash) + "}," +
+                "\"scenario\":{\"path\":\"scenario.json\",\"schema_version\":1}," +
+                "\"opponent_snapshot\":" + opponentJson + "," +
+                "\"policy_identity\":\"policy-identity.json\"," +
+                "\"latest_checkpoint\":\"checkpoints/policy-update-000003.pt\"," +
+                "\"latest_checkpoint_step\":3," +
+                "\"published_run\":\"must-not-be-selected\"," +
+                "\"source_policy\":{\"run\":\"must-not-be-selected\"}}" );
             return run;
         }
 

@@ -1,0 +1,218 @@
+{
+  "date": "2026-09-25T16:30:15.151Z",
+  "browser": "149.0.7827.53",
+  "errors": [],
+  "warnings": [
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+    "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:get_additionalLightsCookieFormat()\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n",
+    "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute.\nUnityEngine.DebugLogHandler:Internal_Log_Injected(LogType, LogOption, ManagedSpanWrapper&, IntPtr)\nUnityEngine.DebugLogHandler:Internal_Log(LogType, LogOption, String, Object)\nUnityEngine.DebugLogHandler:LogFormat(LogType, Object, String, Object[])\nUnityEngine.Logger:Log(LogType, Object)\nUnityEngine.Debug:LogWarning(Object)\nUnityEngine.Rendering.Universal.PostProcessUtils:LoadShader(Shader, String)\nUnityEngine.Rendering.Universal.Fsr1UpscalePostProcessPass:.ctor(Shader)\nUnityEngine.Rendering.Universal.PostProcess:.ctor(PostProcessData)\nUnityEngine.Rendering.Universal.UniversalRenderer:.ctor(UniversalRendererData)\nUnityEngine.Rendering.Universal.UniversalRendererData:Create()\nUnityEngine.Rendering.Universal.ScriptableRendererData:InternalCreateRenderer()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreateRenderers()\nUnityEngine.Rendering.Universal.UniversalRenderPipelineAsset:CreatePipeline()\nUnityEngine.Rendering.RenderPipelineAsset:InternalCreatePipeline()\nUnityEngine.Rendering.RenderPipelineManager:TryPrepareRenderPipeline(RenderPipelineAsset)\nUnityEngine.Rendering.RenderPipelineManager:DoRenderLoop_Internal(RenderPipelineAsset, IntPtr, Object)\n\n"
+  ],
+  "failed": [],
+  "navigationAborts": [
+    {
+      "url": "http://127.0.0.1:8196/Build/WebGL.data.unityweb?v=e2e4c688",
+      "error": "net::ERR_ABORTED"
+    }
+  ],
+  "screens": [
+    "placement-option",
+    "placement-player1",
+    "placement-preview",
+    "placement-player1-placed",
+    "placement-player2",
+    "placement-player2-placed",
+    "placement-battle-start",
+    "designer-editing",
+    "designer-escaped",
+    "doubleclick-before",
+    "doubleclick-move-preview",
+    "doubleclick-after-move",
+    "doubleclick-after-shot",
+    "bounty-escaped"
+  ],
+  "actions": [
+    {
+      "click": [
+        800,
+        554
+      ]
+    },
+    {
+      "click": [
+        870,
+        305
+      ]
+    },
+    {
+      "click": [
+        870,
+        350
+      ]
+    },
+    {
+      "click": [
+        870,
+        397
+      ]
+    },
+    {
+      "click": [
+        870,
+        442
+      ]
+    },
+    {
+      "click": [
+        870,
+        538
+      ]
+    },
+    {
+      "click": [
+        800,
+        642
+      ]
+    },
+    {
+      "click": [
+        800,
+        693
+      ]
+    },
+    {
+      "click": [
+        505,
+        390
+      ]
+    },
+    {
+      "doubleclick": [
+        505,
+        390
+      ]
+    },
+    {
+      "click": [
+        1498,
+        846
+      ]
+    },
+    {
+      "click": [
+        1536,
+        621
+      ]
+    },
+    {
+      "click": [
+        1400,
+        753
+      ]
+    },
+    {
+      "click": [
+        1498,
+        846
+      ]
+    },
+    {
+      "click": [
+        1410,
+        29
+      ]
+    },
+    {
+      "click": [
+        185,
+        400
+      ]
+    },
+    {
+      "key": "Escape"
+    },
+    {
+      "click": [
+        800,
+        554
+      ]
+    },
+    {
+      "click": [
+        870,
+        305
+      ]
+    },
+    {
+      "click": [
+        870,
+        350
+      ]
+    },
+    {
+      "click": [
+        870,
+        397
+      ]
+    },
+    {
+      "click": [
+        870,
+        442
+      ]
+    },
+    {
+      "click": [
+        870,
+        538
+      ]
+    },
+    {
+      "click": [
+        800,
+        693
+      ]
+    },
+    {
+      "click": [
+        500,
+        841
+      ]
+    },
+    {
+      "click": [
+        609,
+        381
+      ]
+    },
+    {
+      "doubleclick": [
+        609,
+        381
+      ]
+    },
+    {
+      "doubleclick": [
+        725,
+        500
+      ]
+    },
+    {
+      "key": "Escape"
+    }
+  ],
+  "method": "Actual browser canvas interaction. Screenshots verify gameplay state; engine/PlayMode tests assert rules. DOM assertions verify text-input focus and absence of fullscreen.",
+  "cacheKey": "e2e4c688",
+  "fullscreen": false,
+  "visual_review": [
+    "Player 1 freely placed its Brute at cell 2,3 on height 2; setup retained 40 points.",
+    "Player 2 moved its Brute elsewhere in its outlined starting area; setup retained 40 points.",
+    "After both Ready buttons, Player 1 began round 01 with 40 points, its Brute selected, and full 3 move / 2 climb budgets.",
+    "A normal move preview showed 1 move / 0 climb. Double-click moved the Sniper to cell 2,4, leaving 1 move / 2 climb.",
+    "Double-click on the marked Striker dealt 2 damage and removed it, awarding 10 points (40 to 50); the attack became Used.",
+    "The small bounty notification disappeared on one Escape without opening Menu.",
+    "Escape while the native browser input edited the designer name returned to the tactical HUD; browser input focus was released."
+  ]
+}

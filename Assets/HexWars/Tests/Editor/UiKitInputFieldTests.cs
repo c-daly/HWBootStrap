@@ -38,7 +38,7 @@ namespace HexWars.Presentation.Tests
             Assert.That(image, Is.Not.Null);
             Assert.That(field.targetGraphic, Is.SameAs(image));
             Assert.That(field.colors.normalColor, Is.EqualTo(UiKit.InputBg));
-            Assert.That(image.color, Is.EqualTo(UiKit.InputBg));
+            Assert.That(image.color, Is.EqualTo(Color.white), "The ColorBlock applies the background tint once.");
             Assert.That(field.textComponent, Is.SameAs(text));
             Assert.That(field.placeholder, Is.SameAs(placeholder));
             Assert.That(field.text, Is.EqualTo("Room 42"));

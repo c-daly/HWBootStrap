@@ -33,7 +33,17 @@ namespace HexWars.Presentation
             {
                 var b = ComputeBounds(t);
                 _focus = b.center;
-                Distance = Mathf.Max(b.extents.magnitude * 2.2f, 5f);
+                var camera = GetComponent<Camera>();
+                var rotation = Quaternion.Euler(Pitch, Yaw, 0f);
+                float tangent = Mathf.Tan(camera.fieldOfView * Mathf.Deg2Rad * .5f);
+                float fit = 0f;
+                for (int x=-1;x<=1;x+=2) for (int y=-1;y<=1;y+=2) for (int z=-1;z<=1;z+=2)
+                {
+                    var offset = Quaternion.Inverse(rotation) * Vector3.Scale(b.extents, new Vector3(x,y,z));
+                    fit = Mathf.Max(fit, Mathf.Abs(offset.x)/(tangent*camera.aspect)-offset.z,
+                        Mathf.Abs(offset.y)/tangent-offset.z);
+                }
+                Distance = Mathf.Max(fit * 1.12f, 5f);
             }
             Apply();
         }
@@ -42,6 +52,7 @@ namespace HexWars.Presentation
         /// the first pan/orbit/zoom keypress or touch cancels the glide.</summary>
         public void NudgeToward(Vector3 world)
         {
+            if (MotionSettings.Reduced) return;
             if (_nudge != null) StopCoroutine(_nudge);
             _nudge = StartCoroutine(NudgeSeq(world));
         }
@@ -60,7 +71,7 @@ namespace HexWars.Presentation
 
         public void Shake(float amplitude = 0.18f, float duration = 0.3f)
         {
-            StartCoroutine(ShakeSeq(amplitude, duration));
+            if (!MotionSettings.Reduced) StartCoroutine(ShakeSeq(amplitude, duration));
         }
 
         IEnumerator ShakeSeq(float amplitude, float duration)
@@ -151,7 +162,10 @@ namespace HexWars.Presentation
 
         static Bounds ComputeBounds(Transform t)
         {
-            var renderers = t.GetComponentsInChildren<Renderer>();
+            // Frame the board itself. Pooled route labels, selection and attack lines must not
+            // enlarge the next match's framing while their old state is being released.
+            var columns = t.Find("Columns");
+            var renderers = (columns != null ? columns : t).GetComponentsInChildren<Renderer>();
             if (renderers.Length == 0) return new Bounds(t.position, Vector3.one);
             var b = renderers[0].bounds;
             for (int i = 1; i < renderers.Length; i++) b.Encapsulate(renderers[i].bounds);

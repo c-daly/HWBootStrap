@@ -1,0 +1,92 @@
+{
+  "algorithm": "maskable_ppo",
+  "checkpoint_interval": 25000,
+  "conditions": {
+    "full_draw025": {
+      "hypothesis": "Positive material credit at the cap encourages non-converting draws.",
+      "name": "Full reward, draw credit 0.25",
+      "reward": {
+        "closing_weight": 0.02,
+        "draw_credit_weight": 0.25,
+        "points_weight": 0.5,
+        "shape_scale": 0.01,
+        "step_penalty": 0.005
+      }
+    },
+    "full_nodraw": {
+      "hypothesis": "Removing positive draw credit improves annihilation conversion.",
+      "name": "Full reward, no draw credit",
+      "reward": {
+        "closing_weight": 0.02,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.01,
+        "step_penalty": 0.005
+      }
+    },
+    "minus_closing": {
+      "hypothesis": "The closing-distance term is necessary for contact and conversion.",
+      "name": "No draw credit, minus closing",
+      "reward": {
+        "closing_weight": 0.0,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.01,
+        "step_penalty": 0.005
+      }
+    },
+    "minus_value": {
+      "hypothesis": "Material-delta shaping helps combat but may reward non-terminal advantage.",
+      "name": "No draw credit, minus value delta",
+      "reward": {
+        "closing_weight": 0.02,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.0,
+        "step_penalty": 0.005
+      }
+    },
+    "terminal_only": {
+      "hypothesis": "Terminal wins alone are too sparse at this training budget.",
+      "name": "Pure terminal reward",
+      "reward": {
+        "closing_weight": 0.0,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.0,
+        "step_penalty": 0.0
+      }
+    },
+    "terminal_time": {
+      "hypothesis": "A per-decision cost plus terminal result can learn fast annihilation without dense proxies.",
+      "name": "Terminal plus time pressure",
+      "reward": {
+        "closing_weight": 0.0,
+        "draw_credit_weight": 0.0,
+        "points_weight": 0.5,
+        "shape_scale": 0.0,
+        "step_penalty": 0.005
+      }
+    }
+  },
+  "evaluation_seed_count": 25,
+  "evaluation_seed_start": 3000000,
+  "learner_seat": "alternating",
+  "opponent": "random",
+  "panel": "annihilation-reduced-v1",
+  "policy": "HexCNN",
+  "reciprocal": true,
+  "schema_version": 1,
+  "scope": "tactical-v2 reduced curriculum, 13x9 board, 3 starting units per side",
+  "trackers": [
+    "local",
+    "tensorboard"
+  ],
+  "training_seeds": [
+    11,
+    23,
+    47
+  ],
+  "training_timesteps": 51200,
+  "workers": 4
+}

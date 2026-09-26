@@ -69,7 +69,7 @@ namespace HexWars.Presentation.EditorTools
         }
 
         /// <summary>Add shaders to Graphics ▸ Always Included Shaders so runtime Shader.Find works in the build.</summary>
-        static void EnsureShadersIncluded(params string[] names)
+        internal static void EnsureShadersIncluded(params string[] names)
         {
             var so = new SerializedObject(GraphicsSettings.GetGraphicsSettings());
             var arr = so.FindProperty("m_AlwaysIncludedShaders");

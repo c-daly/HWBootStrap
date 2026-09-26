@@ -30,5 +30,8 @@ namespace HexWars.Engine
         MustClaimFirst,
         DuplicateTemplate,
         BarracksFull,
+        PlacementOnly,
+        PlacementAlreadyFinished,
+        NoMoveToUndo,
     }
 }

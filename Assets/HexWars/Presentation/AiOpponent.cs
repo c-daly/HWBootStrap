@@ -56,7 +56,7 @@ namespace HexWars.Presentation
         {
             if (_game == null || _game.State == null) return;
             var s = _game.State;
-            if (Level == AiLevel.TrainedModel && !_startupRequested)
+            if (!s.PlacingStartingUnits && Level == AiLevel.TrainedModel && !_startupRequested)
                 BeginModelStartup(s);
             bool aiTurn = !s.IsGameOver && s.ActivePlayer == AiSeat;
 
@@ -69,6 +69,7 @@ namespace HexWars.Presentation
             _timer += Time.deltaTime;
             if (_timer < SecondsPerAction) return;
             _timer = 0f;
+            if (s.PlacingStartingUnits) { _game.TryApply(new FinishPlacement(AiSeat)); return; }
             if (Level != AiLevel.TrainedModel)
             {
                 _game.TryApply(_agent.Decide(s));

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "panel": "annihilation-bounded-search-v1",
+  "status": "complete",
+  "retention": {
+    "classification": "historical_decision_evidence",
+    "source_hash_semantics": "execution-time identity; current source paths may have evolved",
+    "generated_artifacts": "binaries and per-match evidence remain local and hash-referenced"
+  },
+  "outcome": "composite_gate_failed_planner_performance_passed",
+  "next_authorized_task": "tactical-v3-afterstate-and-intention-design",
+  "scope": "evaluation-only tactical-v2 conversion search diagnostic",
+  "authority_plan": "docs/superpowers/plans/2026-07-29-annihilation-conversion-curriculum-and-algorithm-decision.md",
+  "source_revision": {
+    "git_commit": "ff8ad35d68ec6ddf002c82f471313c3e3b6caf4e",
+    "working_tree": "dirty; locked identities use content hashes"
+  },
+  "entry_gate": {
+    "curriculum_panel": "python/panels/annihilation-conversion-curriculum-v1/aggregate.json",
+    "sha256": "843428842bfdd019ae1921fa71067419324dbbb672513ff01d8b06c5e8494b8b",
+    "observed_outcome": "curriculum_gate_failed"
+  },
+  "controllers": {
+    "bounded-search": {
+      "algorithm": "deterministic depth-limited minimax",
+      "depth_commands": 4,
+      "expansion_budget_per_decision": 512,
+      "terminal_values": {"win": 1.0, "draw": 0.0, "loss": -1.0},
+      "heuristic_enabled": true,
+      "heuristic_absolute_cap": 0.45,
+      "heuristic": "0.30 health-adjusted material + 0.075 centered persistent-target damage + 0.075 centered persistent-target proximity",
+      "root_tie_break": "search value, immediate afterstate value, stable command identity"
+    },
+    "bounded-search-terminal-only": {
+      "algorithm": "deterministic depth-limited minimax",
+      "depth_commands": 4,
+      "expansion_budget_per_decision": 512,
+      "terminal_values": {"win": 1.0, "draw": 0.0, "loss": -1.0},
+      "heuristic_enabled": false,
+      "root_tie_break": "search value, zero immediate value, stable command identity"
+    }
+  },
+  "source_evidence": [
+    {"path": "engine/HexWars.Engine/BoundedSearchAgent.cs", "sha256": "6114c9d21f85d175bcc37112a6ee95f99acc7846cf8fd69300f7e8782abdb972"},
+    {"path": "engine/HexWars.GymServer/Program.cs", "sha256": "bb383fbb8e2375c291ca9929aed7d20dd625c739ac5e91c1d608e9d9fc788a09"},
+    {"path": "python/ml_lab/controllers.py", "sha256": "99abe008c6430210fa8d3416cfb343422ba0bf11c61743604597e9ea2d418c23"},
+    {"path": "python/ml_lab/evaluation.py", "sha256": "a5b1882bc2cd38f2e918276d63559d9772242fa7bd2301931b6fd5eaf1d636d3"},
+    {"path": "python/panels/annihilation-bounded-search-v1/historical-source/run_annihilation_bounded_search_panel.py.txt", "sha256": "f114d0060d44442e13efe3a1fb97d27bc822cd462b4d4078358544cefa7efc58"},
+    {"path": "python/panels/annihilation-bounded-search-v1/historical-source/test_annihilation_bounded_search_panel.py.txt", "sha256": "4f8d922f059bb568bc464439fb76da27848d2970b7c38f92407cbc0f3c705b92"},
+    {"path": "python/panels/annihilation-bounded-search-v1/PROTOCOL.md", "sha256": "7e256d7f63d15cfa381cbbbced6fcd342e289a8af9e66cc6a42341c96d988900"}
+  ],
+  "binary_evidence": [
+    {"path": "engine/HexWars.GymServer/bin/Release/net8.0/HexWars.GymServer.dll", "sha256": "b6681587acb25c0c224d328552700d6f45388656d0f403ab32ed870cebb130b1"},
+    {"path": "engine/HexWars.Engine/bin/Release/netstandard2.1/HexWars.Engine.dll", "sha256": "5407533c8145055dce42acf34c376ca517c006d8fa9a2fe898edbf3ccae41859"}
+  ],
+  "scenario": {
+    "path": "python/config/experiments/annihilation-profiled-mixed.json",
+    "sha256": "86b55d8ae2016e9cda98490aa5a5a6237c9a2c9805abae2018a2a0bc4f1c8d76",
+    "duel_contract_hash": "24f3c6206ef2a24799edacacbd3bdcba4dd9729d9f2fa6409de807e19fd5bac5",
+    "encoding_hash": "d29d0c5af70a5553a4b31bd15162b8a64ee6356c9d6c4f3e50f54417f2ad880f"
+  },
+  "seed_authority": {
+    "path": "python/panels/annihilation-conversion-curriculum-v1/seed-banks.json",
+    "sha256": "a5fcf9851d1c3d722516a6c98b9aff5cc50310901e4337a0f8bbd910571f798a",
+    "bank": "locked_conversion_evaluation",
+    "confirmation_namespace_consumed": false
+  },
+  "development_evidence": {
+    "path": "python/panels/annihilation-conversion-curriculum-v1/bounded-search-smoke-1v1-far.json",
+    "sha256": "ae8268b060b17423f53c5ff778129e6653d02c89c8a284efeab834bcde2e5e57",
+    "seed": 6000008,
+    "result": "2-0-0 reciprocal",
+    "used_for": "plumbing and deterministic tie-break correction only"
+  },
+  "evaluation": {
+    "opponent": "random",
+    "profiles": "all nine conversion profiles",
+    "maps_per_profile": 10,
+    "reciprocal": true,
+    "games_per_controller": 180,
+    "workers": 4,
+    "retain_every_search_trace_and_replay": true,
+    "comparators": ["greedy", "mixed_conversion PPO seeds 101, 113, 127"]
+  },
+  "positive_control_gate": {
+    "aggregate_win_rate_min": 0.85,
+    "aggregate_win_rate_improvement_over_mixed_ppo_min": 0.10,
+    "cycling_draw_incidence_max": 0.05,
+    "win_rate_each_candidate_seat_min": 0.80,
+    "held_out_medium_win_rate_min": 0.80,
+    "win_rate_improvement_over_terminal_only_min": 0.15
+  },
+  "decision_rules": {
+    "planner_succeeds_where_ppo_cycles": "positive-control gate passes and at least one locked planner-win/PPO-draw disagreement is retained",
+    "planner_no_gain_over_greedy": "planner aggregate wins do not exceed greedy aggregate wins on the paired schedule",
+    "planner_fails": "positive-control gate fails; inspect feasibility, round cap, and profile construction before another learned algorithm",
+    "imitation_entry": "authorized only if the planner positive-control gate passes"
+  },
+  "analysis_erratum": {
+    "added_after_locked_outcomes": true,
+    "locked_runner_sha256": "61b98e867894e8483f2708ed4b58e510cf584d78b87a740db33fe50a9648295b",
+    "corrected_runner_sha256": "f114d0060d44442e13efe3a1fb97d27bc822cd462b4d4078358544cefa7efc58",
+    "scope": "preserve the composite FAIL while separating planner performance from the failed incremental heuristic-effect threshold; add paired exact sign summaries; qualify terminal-only attribution because zero-valued branches retain deterministic ordering and tie-breaking",
+    "evaluation_artifacts_changed": false,
+    "locked_thresholds_changed": false
+  },
+  "result_evidence": [
+    {"path": "python/panels/annihilation-bounded-search-v1/aggregate.json", "sha256": "c83c3a488561d5997ebe75785041e79b2f8f6b7a130f9928b709790bd7d20a68"},
+    {"path": "python/panels/annihilation-bounded-search-v1/REPORT.md", "sha256": "c89f33daa638021eb1150d4f661582820be81e5aece0cd5a1543ca9d1c58d838"},
+    {"path": "docs/superpowers/decisions/2026-07-29-annihilation-learning-path.md", "sha256": "c851300d9a0feca87625d47a98698f30ebc451346f4fe9021593960c0bd045bf"}
+  ]
+}

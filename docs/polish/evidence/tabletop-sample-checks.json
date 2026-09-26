@@ -1,0 +1,194 @@
+{
+  "effects": {
+    "Move": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.01743642770635267,
+      "dc": -1.2627652113834665e-05,
+      "high_frequency_energy_above_4k": 0.005692714424865472
+    },
+    "Move_1": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.017848921117810713,
+      "dc": -1.2564468722271517e-05,
+      "high_frequency_energy_above_4k": 0.0021182971071027367
+    },
+    "Move_2": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.014776560668233336,
+      "dc": -1.2579512386929409e-05,
+      "high_frequency_energy_above_4k": 1.3068470806687213e-06
+    },
+    "Move_3": {
+      "seconds": 0.23,
+      "peak": 0.135009765625,
+      "rms": 0.015844584453935946,
+      "dc": -1.261862591503993e-05,
+      "high_frequency_energy_above_4k": 0.006773219215015217
+    },
+    "Select": {
+      "seconds": 0.13,
+      "peak": 0.045013427734375,
+      "rms": 0.0027906148520525404,
+      "dc": -1.0593054329103436e-05,
+      "high_frequency_energy_above_4k": 0.27206111531577887
+    },
+    "Place": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.017737283477861642,
+      "dc": -1.2727634623560963e-05,
+      "high_frequency_energy_above_4k": 0.004463784374248763
+    },
+    "AttackLight_0": {
+      "seconds": 0.21,
+      "peak": 0.115020751953125,
+      "rms": 0.015673305319381117,
+      "dc": -1.2255142322305907e-05,
+      "high_frequency_energy_above_4k": 7.31724007661071e-07,
+      "previous_high_frequency_energy_above_4k": 0.002761734429680956
+    },
+    "AttackLight_1": {
+      "seconds": 0.21,
+      "peak": 0.114990234375,
+      "rms": 0.012462066655485817,
+      "dc": -1.2284799832631465e-05,
+      "high_frequency_energy_above_4k": 4.5880027715317077e-07
+    },
+    "AttackLight_2": {
+      "seconds": 0.21,
+      "peak": 0.115020751953125,
+      "rms": 0.0156920066229177,
+      "dc": -1.2258437601230968e-05,
+      "high_frequency_energy_above_4k": 7.201664640169858e-07
+    },
+    "AttackLight_3": {
+      "seconds": 0.21,
+      "peak": 0.114990234375,
+      "rms": 0.012958288764786127,
+      "dc": -1.2116740607453298e-05,
+      "high_frequency_energy_above_4k": 5.607550790977068e-07
+    },
+    "AttackMid_0": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.0221113285309262,
+      "dc": -1.2871359481292518e-05,
+      "high_frequency_energy_above_4k": 1.3699580856195182e-07,
+      "previous_high_frequency_energy_above_4k": 0.004933463064507057
+    },
+    "AttackMid_1": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.022580037724278475,
+      "dc": -1.2866036338413571e-05,
+      "high_frequency_energy_above_4k": 1.296048769025859e-07
+    },
+    "AttackMid_2": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.022041545138834554,
+      "dc": -1.2884667338489884e-05,
+      "high_frequency_energy_above_4k": 1.7564704902754766e-07
+    },
+    "AttackMid_3": {
+      "seconds": 0.26,
+      "peak": 0.1500244140625,
+      "rms": 0.02255630333342611,
+      "dc": -1.2932575624400402e-05,
+      "high_frequency_energy_above_4k": 1.2777495567658746e-07
+    },
+    "AttackHeavy_0": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.031128146578641314,
+      "dc": -1.3418478760319232e-05,
+      "high_frequency_energy_above_4k": 6.95423935005829e-08,
+      "previous_high_frequency_energy_above_4k": 0.000867740483512262
+    },
+    "AttackHeavy_1": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.028485710492965836,
+      "dc": -1.3115725009079152e-05,
+      "high_frequency_energy_above_4k": 7.978483060214744e-08
+    },
+    "AttackHeavy_2": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.027491841536179125,
+      "dc": -1.3342790322509212e-05,
+      "high_frequency_energy_above_4k": 9.652859722492174e-08
+    },
+    "AttackHeavy_3": {
+      "seconds": 0.32,
+      "peak": 0.180023193359375,
+      "rms": 0.024435135400766066,
+      "dc": -1.341631623352466e-05,
+      "high_frequency_energy_above_4k": 1.0277258942547075e-07
+    },
+    "Death": {
+      "seconds": 0.36,
+      "peak": 0.149169921875,
+      "rms": 0.026398643331965253,
+      "dc": -1.3492244952089632e-05,
+      "high_frequency_energy_above_4k": 1.1399321785491164e-07
+    },
+    "Deploy": {
+      "seconds": 0.28,
+      "peak": 0.1300048828125,
+      "rms": 0.015637947591766996,
+      "dc": -1.2960332012269194e-05,
+      "high_frequency_energy_above_4k": 0.0011140803747432368
+    },
+    "Design": {
+      "seconds": 0.22,
+      "peak": 0.08502197265625,
+      "rms": 0.004979853890645236,
+      "dc": -1.2575683090471038e-05,
+      "high_frequency_energy_above_4k": 0.20398903358564957
+    },
+    "Build": {
+      "seconds": 0.29,
+      "peak": 0.1400146484375,
+      "rms": 0.016302589618989304,
+      "dc": -1.3181570221479396e-05,
+      "high_frequency_energy_above_4k": 0.0014826379567203587
+    },
+    "EndTurn": {
+      "seconds": 0.54,
+      "peak": 0.05596923828125,
+      "rms": 0.01539593595476183,
+      "dc": -1.4047774057539682e-05,
+      "high_frequency_energy_above_4k": 2.4812519307013953e-07
+    },
+    "Claim": {
+      "seconds": 0.48,
+      "peak": 0.064544677734375,
+      "rms": 0.015318905662982123,
+      "dc": -1.4079491117193405e-05,
+      "high_frequency_energy_above_4k": 3.2321446841967915e-07
+    },
+    "Win": {
+      "seconds": 1.19,
+      "peak": 0.104644775390625,
+      "rms": 0.021627074324231006,
+      "dc": -1.4759554305353093e-05,
+      "high_frequency_energy_above_4k": 1.9868314976019756e-07
+    }
+  },
+  "title": {
+    "seconds": 61.93548752834467,
+    "peak": 0.613189697265625,
+    "rms": 0.07500000210932475,
+    "seam_jump": [
+      3.0517578125e-05,
+      6.103515625e-05
+    ]
+  },
+  "originals_preserved": 17,
+  "repeat_render_identical": true,
+  "audition_effects_match_unity_sources": true
+}

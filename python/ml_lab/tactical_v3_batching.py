@@ -15,7 +15,9 @@ from .tactical_v3_schema import (
     PROJECTED_REFERENCE_FAMILIES,
     Candidate,
     TacticalV3Decision,
+    TacticalV3SemanticIdentity,
     TokenRef,
+    is_reach_cell_identity,
 )
 
 
@@ -181,6 +183,7 @@ class RaggedBatch:
     horizon_target_mask: torch.Tensor
     remaining_turns: torch.Tensor
     remaining_turns_mask: torch.Tensor
+    objective_kind: str = "annihilation"
 
 
 def _validate_horizons(horizons: tuple[int, ...]) -> None:
@@ -250,24 +253,33 @@ def _validate_ref(
     ref: TokenRef | None,
     counts: Mapping[str, int],
     field: str,
-    expected: str | tuple[str, ...] | None,
+    expected: str | tuple[str | None, ...] | None,
 ) -> None:
     if expected is None:
         if ref is not None:
             raise ValueError(f"{field} reference must be absent")
         return
+    optional = type(expected) is tuple and None in expected
+    if ref is None and optional:
+        return
     if ref is None:
         raise ValueError(f"{field} reference is required")
     if type(ref) is not TokenRef:
         raise ValueError(f"{field} reference must be TokenRef")
-    families = (expected,) if type(expected) is str else expected
+    families = (expected,) if type(expected) is str else tuple(
+        family for family in expected if family is not None
+    )
     if ref.table not in families:
         raise ValueError(f"{field} reference has the wrong table")
     if type(ref.row) is not int or ref.row < 0 or ref.row >= counts.get(ref.table, 0):
         raise ValueError(f"{field} reference row is out of range")
 
 
-def _validate_decision(decision: TacticalV3Decision, sample: int) -> None:
+def _validate_decision(
+    decision: TacticalV3Decision,
+    sample: int,
+    objective_kind: str,
+) -> None:
     if type(decision) is not TacticalV3Decision:
         raise ValueError(f"decisions[{sample}] must be TacticalV3Decision")
     _int64(decision.decision_id, f"decisions[{sample}].decision_id")
@@ -348,6 +360,7 @@ def _validate_decision(decision: TacticalV3Decision, sample: int) -> None:
         _boolean(relation.bool_feature, f"relations[{row}].bool_feature")
 
     candidate_ids: set[int] = set()
+    reach_target: TokenRef | None = None
     for row, candidate in enumerate(decision.candidates):
         if type(candidate) is not Candidate:
             raise ValueError(f"candidates[{row}] must be Candidate")
@@ -372,6 +385,47 @@ def _validate_decision(decision: TacticalV3Decision, sample: int) -> None:
             _int32(getattr(candidate.projection, name), f"candidates[{row}].projection.{name}")
         _boolean(candidate.projection.is_lethal, f"candidates[{row}].projection.is_lethal")
         _boolean(candidate.projection.is_terminal, f"candidates[{row}].projection.is_terminal")
+        if candidate.kind == "move":
+            if objective_kind == "annihilation":
+                if candidate.target is not None:
+                    raise ValueError(
+                        f"decisions[{sample}] annihilation move.target must be absent"
+                    )
+            elif objective_kind == "reach_cell":
+                if candidate.target is None:
+                    raise ValueError(
+                        f"decisions[{sample}] reach_cell move.target is required"
+                    )
+                if reach_target is None:
+                    reach_target = candidate.target
+                elif candidate.target != reach_target:
+                    raise ValueError(
+                        f"decisions[{sample}] reach_cell move.target must be consistent"
+                    )
+                destination = candidate.projection.destination_cell
+                if destination is None:
+                    raise ValueError(
+                        f"decisions[{sample}] reach_cell move projection destination is required"
+                    )
+                if (
+                    destination == candidate.target
+                    and not candidate.projection.is_terminal
+                ):
+                    raise ValueError(
+                        f"decisions[{sample}] reach_cell completing move projection must be terminal"
+                    )
+            else:  # pragma: no cover - narrowed by the batching identity gate.
+                raise AssertionError(objective_kind)
+
+
+def _objective_kind(
+    identity: TacticalV3SemanticIdentity | None,
+) -> str:
+    if identity is None:
+        return "annihilation"
+    if type(identity) is not TacticalV3SemanticIdentity:
+        raise ValueError("identity must be TacticalV3SemanticIdentity or None")
+    return "reach_cell" if is_reach_cell_identity(identity) else "annihilation"
 
 
 def _global_ref(
@@ -686,14 +740,17 @@ def _build_neighborhoods(
 
 
 def _collate_features(
-    decisions: Sequence[TacticalV3Decision], horizons: tuple[int, ...]
+    decisions: Sequence[TacticalV3Decision],
+    horizons: tuple[int, ...],
+    identity: TacticalV3SemanticIdentity | None,
 ) -> RaggedBatch:
     _validate_horizons(horizons)
     if isinstance(decisions, (str, bytes)) or not isinstance(decisions, Sequence) or not decisions:
         raise ValueError("decisions must be a non-empty sequence")
     frozen = tuple(decisions)
+    objective_kind = _objective_kind(identity)
     for sample, decision in enumerate(frozen):
-        _validate_decision(decision, sample)
+        _validate_decision(decision, sample, objective_kind)
     tables, table_slices, node_mask, reference_map = _build_tables(frozen)
     candidates = _build_candidates(frozen, reference_map, node_mask)
     neighbor_index, neighbor_mask = _build_cell_neighbors(
@@ -716,14 +773,22 @@ def _collate_features(
         horizon_target_mask=torch.zeros((batch_size, horizon_count), dtype=torch.bool),
         remaining_turns=torch.zeros((batch_size,), dtype=torch.float32),
         remaining_turns_mask=torch.zeros((batch_size,), dtype=torch.bool),
+        objective_kind=objective_kind,
     )
 
 
 def collate_decisions(
-    decisions: Sequence[TacticalV3Decision], horizons: tuple[int, ...]
+    decisions: Sequence[TacticalV3Decision],
+    horizons: tuple[int, ...],
+    *,
+    identity: TacticalV3SemanticIdentity | None = None,
 ) -> RaggedBatch:
-    """Collate inference decisions with sentinel, fully masked supervision targets."""
-    return _collate_features(decisions, horizons)
+    """Collate inference decisions under one explicit semantic identity.
+
+    Omitting ``identity`` selects the backward-compatible annihilation contract.
+    Reach-cell decisions must supply their authenticated semantic identity.
+    """
+    return _collate_features(decisions, horizons, identity)
 
 
 def _validate_target(
@@ -757,7 +822,10 @@ def _validate_target(
 
 
 def collate_examples(
-    examples: Sequence[StructuredExample], horizons: tuple[int, ...]
+    examples: Sequence[StructuredExample],
+    horizons: tuple[int, ...],
+    *,
+    identity: TacticalV3SemanticIdentity | None = None,
 ) -> RaggedBatch:
     """Collate supervised examples through the inference-identical feature path."""
     if isinstance(examples, (str, bytes)) or not isinstance(examples, Sequence) or not examples:
@@ -765,7 +833,28 @@ def collate_examples(
     frozen = tuple(examples)
     if any(type(example) is not StructuredExample for example in frozen):
         raise ValueError("examples must contain only StructuredExample values")
-    batch = _collate_features(tuple(example.decision for example in frozen), horizons)
+    _objective_kind(identity)
+    if identity is not None:
+        expected_identity = (
+            identity.scenario_id,
+            identity.contract_hash,
+            identity.encoding_hash,
+            identity.capacity_hash,
+        )
+        for sample, example in enumerate(frozen):
+            actual_identity = (
+                example.scenario_id,
+                example.contract_hash,
+                example.encoding_hash,
+                example.capacity_hash,
+            )
+            if actual_identity != expected_identity:
+                raise ValueError(
+                    f"examples[{sample}] identity does not match batching identity"
+                )
+    batch = _collate_features(
+        tuple(example.decision for example in frozen), horizons, identity
+    )
     teacher = torch.empty((len(frozen),), dtype=torch.int64)
     outcome = torch.empty((len(frozen),), dtype=torch.int64)
     horizon_targets = torch.zeros((len(frozen), len(horizons)), dtype=torch.float32)
@@ -804,6 +893,13 @@ def validate_ragged_batch(batch: RaggedBatch) -> None:
     """Validate the complete immutable ragged tensor contract."""
     if type(batch) is not RaggedBatch:
         raise ValueError("batch must be RaggedBatch")
+    if (
+        type(batch.objective_kind) is not str
+        or batch.objective_kind not in {"annihilation", "reach_cell"}
+    ):
+        raise ValueError(
+            "batch.objective_kind must be annihilation or reach_cell"
+        )
 
     def require_tensor(value: object, name: str) -> torch.Tensor:
         if not isinstance(value, torch.Tensor):
@@ -1224,6 +1320,7 @@ def validate_ragged_batch(batch: RaggedBatch) -> None:
                 "candidate references do not select valid nodes"
             )
 
+    reach_targets: dict[int, int] = {}
     for sample, row in candidate_mask.nonzero(as_tuple=False).tolist():
         kind_name = _CANDIDATE_KINDS[
             int(candidates.kind[sample, row].item())
@@ -1232,27 +1329,60 @@ def validate_ragged_batch(batch: RaggedBatch) -> None:
             *CANDIDATE_REFERENCE_FAMILIES[kind_name].values(),
             *PROJECTED_REFERENCE_FAMILIES[kind_name].values(),
         )
-        expected_reference_mask = tuple(
-            family is not None for family in families
-        )
         actual_reference_mask = tuple(
             bool(value)
             for value in candidates.reference_mask[sample, row].tolist()
+        )
+        expected_reference_mask = tuple(
+            (
+                batch.objective_kind == "reach_cell"
+                if kind_name == "move" and index == 1
+                else actual_reference_mask[index]
+                if type(family) is tuple and None in family
+                else family is not None
+            )
+            for index, family in enumerate(families)
         )
         if actual_reference_mask != expected_reference_mask:
             raise ValueError(
                 "candidate reference mask does not match candidate kind"
             )
         for slot, family in enumerate(families):
-            if family is None:
+            if family is None or not actual_reference_mask[slot]:
                 continue
             reference = int(
                 candidates.reference_index[sample, row, slot].item()
             )
-            family_slice = batch.table_slices[family]
-            if not family_slice.start <= reference < family_slice.stop:
+            accepted_families = (
+                (family,)
+                if type(family) is str
+                else tuple(item for item in family if item is not None)
+            )
+            if not any(
+                batch.table_slices[item].start
+                <= reference
+                < batch.table_slices[item].stop
+                for item in accepted_families
+            ):
                 raise ValueError(
                     "candidate reference does not select its required table family"
+                )
+        if kind_name == "move" and batch.objective_kind == "reach_cell":
+            target = int(candidates.reference_index[sample, row, 1].item())
+            previous = reach_targets.setdefault(sample, target)
+            if target != previous:
+                raise ValueError(
+                    "reach_cell move targets must be consistent within a sample"
+                )
+            destination = int(
+                candidates.reference_index[sample, row, 5].item()
+            )
+            if (
+                destination == target
+                and not bool(candidates.projection_boolean[sample, row, 1])
+            ):
+                raise ValueError(
+                    "reach_cell completing move projection must be terminal"
                 )
 
     horizon_targets = require_tensor(batch.horizon_targets, "horizon_targets")

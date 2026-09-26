@@ -1,0 +1,494 @@
+"""Run the preregistered reduced-curriculum annihilation reward ablation panel."""
+
+from __future__ import annotations
+
+import argparse
+import csv
+import json
+import math
+import re
+import subprocess
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CLI = ROOT / "python" / "hexwars_ml.py"
+RUNS = ROOT / "python" / "runs"
+PANEL = ROOT / "python" / "panels" / "annihilation-reduced-v1"
+BASE_SCENARIO = ROOT / "python" / "config" / "experiments" / "annihilation-no-draw-credit.json"
+
+TRAINING_SEEDS = (11, 23, 47)
+EVALUATION_SEED_START = 3_000_000
+EVALUATION_SEEDS = 25
+TIMESTEPS = 51_200
+CHECKPOINT_INTERVAL = 25_000
+WORKERS = 4
+
+CONDITIONS: dict[str, dict[str, Any]] = {
+    "full_draw025": {
+        "name": "Full reward, draw credit 0.25",
+        "hypothesis": "Positive material credit at the cap encourages non-converting draws.",
+        "reward": {
+            "shape_scale": 0.01,
+            "closing_weight": 0.02,
+            "draw_credit_weight": 0.25,
+            "points_weight": 0.5,
+            "step_penalty": 0.005,
+        },
+    },
+    "full_nodraw": {
+        "name": "Full reward, no draw credit",
+        "hypothesis": "Removing positive draw credit improves annihilation conversion.",
+        "reward": {
+            "shape_scale": 0.01,
+            "closing_weight": 0.02,
+            "draw_credit_weight": 0.0,
+            "points_weight": 0.5,
+            "step_penalty": 0.005,
+        },
+    },
+    "minus_closing": {
+        "name": "No draw credit, minus closing",
+        "hypothesis": "The closing-distance term is necessary for contact and conversion.",
+        "reward": {
+            "shape_scale": 0.01,
+            "closing_weight": 0.0,
+            "draw_credit_weight": 0.0,
+            "points_weight": 0.5,
+            "step_penalty": 0.005,
+        },
+    },
+    "minus_value": {
+        "name": "No draw credit, minus value delta",
+        "hypothesis": "Material-delta shaping helps combat but may reward non-terminal advantage.",
+        "reward": {
+            "shape_scale": 0.0,
+            "closing_weight": 0.02,
+            "draw_credit_weight": 0.0,
+            "points_weight": 0.5,
+            "step_penalty": 0.005,
+        },
+    },
+    "terminal_time": {
+        "name": "Terminal plus time pressure",
+        "hypothesis": "A per-decision cost plus terminal result can learn fast annihilation without dense proxies.",
+        "reward": {
+            "shape_scale": 0.0,
+            "closing_weight": 0.0,
+            "draw_credit_weight": 0.0,
+            "points_weight": 0.5,
+            "step_penalty": 0.005,
+        },
+    },
+    "terminal_only": {
+        "name": "Pure terminal reward",
+        "hypothesis": "Terminal wins alone are too sparse at this training budget.",
+        "reward": {
+            "shape_scale": 0.0,
+            "closing_weight": 0.0,
+            "draw_credit_weight": 0.0,
+            "points_weight": 0.5,
+            "step_penalty": 0.0,
+        },
+    },
+}
+
+
+def _read_json(path: Path) -> dict[str, Any]:
+    with path.open(encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, dict):
+        raise ValueError(f"expected a JSON object in {path}")
+    return value
+
+
+def _write_json(path: Path, value: Any) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8", newline="\n") as stream:
+        json.dump(value, stream, indent=2, sort_keys=True)
+        stream.write("\n")
+    temporary.replace(path)
+
+
+def _scenario(condition: str) -> Path:
+    definition = CONDITIONS[condition]
+    document = _read_json(BASE_SCENARIO)
+    document["id"] = f"tactical-v2-annihilation-ablation-{condition}"
+    document["name"] = f"Annihilation ablation: {definition['name']}"
+    document["reward"] = dict(definition["reward"])
+    path = PANEL / "scenarios" / f"{condition}.json"
+    _write_json(path, document)
+    return path
+
+
+def _run_name(condition: str, seed: int) -> str:
+    return f"annihilation-ablation-{condition}-seed{seed}-tb-v1"
+
+
+def _invoke(arguments: list[str], log_path: Path) -> None:
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8", newline="\n") as log:
+        completed = subprocess.run(
+            [sys.executable, str(CLI), *arguments],
+            cwd=ROOT,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            check=False,
+        )
+    if completed.returncode != 0:
+        raise RuntimeError(f"command failed with exit code {completed.returncode}; see {log_path}")
+
+
+def _train(condition: str, seed: int, scenario: Path) -> Path:
+    name = _run_name(condition, seed)
+    run_dir = RUNS / name
+    manifest_path = run_dir / "run.json"
+    if manifest_path.is_file():
+        manifest = _read_json(manifest_path)
+        if manifest.get("state") != "completed" or manifest.get("latest_checkpoint_step") != TIMESTEPS:
+            raise RuntimeError(f"existing run is not the required completed checkpoint: {run_dir}")
+        print(f"TRAIN reuse {name}", flush=True)
+        return run_dir
+    print(f"TRAIN start {name}", flush=True)
+    _invoke(
+        [
+            "train",
+            "--run", name,
+            "--environment", "tactical-v2",
+            "--scenario-file", str(scenario),
+            "--algorithm", "maskable_ppo",
+            "--opponent", "random",
+            "--timesteps", str(TIMESTEPS),
+            "--checkpoint-every", str(CHECKPOINT_INTERVAL),
+            "--workers", str(WORKERS),
+            "--seed", str(seed),
+            "--device", "cuda",
+            "--learner-seat", "alternating",
+            "--tracker", "local",
+            "--tracker", "tensorboard",
+            "--no-console-output",
+            "--json",
+        ],
+        PANEL / "logs" / f"train-{name}.log",
+    )
+    manifest = _read_json(manifest_path)
+    if manifest.get("state") != "completed" or manifest.get("latest_checkpoint_step") != TIMESTEPS:
+        raise RuntimeError(f"training did not publish the required checkpoint: {run_dir}")
+    print(f"TRAIN done  {name}", flush=True)
+    return run_dir
+
+
+def _snapshot(run_dir: Path) -> Path:
+    manifest = _read_json(run_dir / "run.json")
+    step = manifest.get("latest_checkpoint_step")
+    checkpoint = manifest.get("latest_checkpoint")
+    config = manifest.get("config", {})
+    if step != TIMESTEPS or not isinstance(checkpoint, str):
+        raise RuntimeError(f"invalid checkpoint metadata in {run_dir}")
+    spec = {
+        "kind": "snapshot",
+        "path": str((run_dir / checkpoint).resolve()),
+        "source_run": str(run_dir.resolve()),
+        "algorithm": config.get("algorithm"),
+        "step": step,
+        "inference_mode": "deterministic",
+    }
+    path = PANEL / "controllers" / f"{run_dir.name}.json"
+    _write_json(path, spec)
+    return path
+
+
+def _evaluate(condition: str, seed: int, run_dir: Path) -> Path:
+    output = PANEL / "evaluations" / f"{run_dir.name}.json"
+    if output.is_file():
+        result = _read_json(output)
+        if result.get("games") == EVALUATION_SEEDS * 2 and result.get("seed_start") == EVALUATION_SEED_START:
+            print(f"EVAL  reuse {run_dir.name}", flush=True)
+            return output
+        raise RuntimeError(f"existing evaluation has the wrong schedule: {output}")
+    controller = _snapshot(run_dir)
+    print(f"EVAL  start {run_dir.name}", flush=True)
+    _invoke(
+        [
+            "evaluate",
+            "--p0", f"@{controller}",
+            "--p1", "random",
+            "--games", str(EVALUATION_SEEDS),
+            "--seed-start", str(EVALUATION_SEED_START),
+            "--both-seats",
+            "--workers", str(WORKERS),
+            "--environment", "tactical-v2",
+            "--output", str(output),
+            "--json",
+        ],
+        PANEL / "logs" / f"evaluate-{run_dir.name}.log",
+    )
+    print(f"EVAL  done  {run_dir.name}", flush=True)
+    return output
+
+
+def _evaluate_control(name: str, p0: str, p1: str, *, reciprocal: bool) -> Path:
+    output = PANEL / "controls" / f"{name}.json"
+    expected_games = EVALUATION_SEEDS * (2 if reciprocal else 1)
+    if output.is_file():
+        result = _read_json(output)
+        if result.get("games") == expected_games and result.get("seed_start") == EVALUATION_SEED_START:
+            return output
+        raise RuntimeError(f"existing control has the wrong schedule: {output}")
+    arguments = [
+        "evaluate",
+        "--p0", p0,
+        "--p1", p1,
+        "--games", str(EVALUATION_SEEDS),
+        "--seed-start", str(EVALUATION_SEED_START),
+        "--workers", str(WORKERS),
+        "--environment", "tactical-v2",
+        "--output", str(output),
+        "--json",
+    ]
+    if reciprocal:
+        arguments.append("--both-seats")
+    print(f"CONTROL start {name}", flush=True)
+    _invoke(arguments, PANEL / "logs" / f"evaluate-control-{name}.log")
+    print(f"CONTROL done  {name}", flush=True)
+    return output
+
+
+def _wilson(successes: int, total: int) -> dict[str, float]:
+    if total <= 0:
+        return {"low": 0.0, "high": 0.0, "confidence": 0.95}
+    z = 1.959963984540054
+    p = successes / total
+    denominator = 1 + z * z / total
+    center = (p + z * z / (2 * total)) / denominator
+    margin = z * math.sqrt((p * (1 - p) + z * z / (4 * total)) / total) / denominator
+    return {"low": center - margin, "high": center + margin, "confidence": 0.95}
+
+
+def _exact_sign_test(left_only: int, right_only: int) -> float:
+    discordant = left_only + right_only
+    if discordant == 0:
+        return 1.0
+    tail = min(left_only, right_only)
+    probability = sum(math.comb(discordant, index) for index in range(tail + 1)) / (2 ** discordant)
+    return min(1.0, 2.0 * probability)
+
+
+def _paired_win_comparison(
+    evaluations: dict[str, list[tuple[int, Path, Path]]],
+    left: str,
+    right: str,
+    question: str,
+) -> dict[str, Any]:
+    left_by_seed = {seed: _read_json(path) for seed, path, _ in evaluations[left]}
+    right_by_seed = {seed: _read_json(path) for seed, path, _ in evaluations[right]}
+    both_win = 0
+    left_only = 0
+    right_only = 0
+    neither_win = 0
+    seed_deltas: dict[str, int] = {}
+    for training_seed in TRAINING_SEEDS:
+        left_matches = left_by_seed[training_seed]["matches"]
+        right_matches = right_by_seed[training_seed]["matches"]
+        if len(left_matches) != len(right_matches):
+            raise RuntimeError("paired evaluations have different lengths")
+        delta = 0
+        for left_match, right_match in zip(left_matches, right_matches, strict=True):
+            left_key = (left_match["seed"], left_match["candidate_seat"])
+            right_key = (right_match["seed"], right_match["candidate_seat"])
+            if left_key != right_key:
+                raise RuntimeError("paired evaluations have different schedules")
+            left_win = left_match["outcome"] == "win"
+            right_win = right_match["outcome"] == "win"
+            if left_win and right_win:
+                both_win += 1
+            elif left_win:
+                left_only += 1
+                delta += 1
+            elif right_win:
+                right_only += 1
+                delta -= 1
+            else:
+                neither_win += 1
+        seed_deltas[str(training_seed)] = delta
+    return {
+        "question": question,
+        "left": left,
+        "right": right,
+        "games": both_win + left_only + right_only + neither_win,
+        "both_win": both_win,
+        "left_only_wins": left_only,
+        "right_only_wins": right_only,
+        "neither_wins": neither_win,
+        "net_left_wins": left_only - right_only,
+        "seed_net_left_wins": seed_deltas,
+        "two_sided_exact_sign_p": _exact_sign_test(left_only, right_only),
+    }
+
+
+def _last_training_diagnostics(run_dir: Path) -> dict[str, float]:
+    text = (run_dir / "train.log").read_text(encoding="utf-8")
+    diagnostics: dict[str, float] = {}
+    for field in ("approx_kl", "clip_fraction", "explained_variance", "entropy_loss"):
+        matches = re.findall(rf"\|\s+{field}\s+\|\s+([^\s|]+)", text)
+        if matches:
+            diagnostics[field] = float(matches[-1])
+    progress_path = run_dir / "progress.csv"
+    if progress_path.is_file():
+        with progress_path.open(newline="", encoding="utf-8") as stream:
+            rows = list(csv.DictReader(stream))
+        if rows:
+            diagnostics["training_mean_reward"] = float(rows[-1]["mean_reward"])
+            diagnostics["steps_per_second"] = float(rows[-1]["steps_per_second"])
+    return diagnostics
+
+
+def _aggregate(evaluations: dict[str, list[tuple[int, Path, Path]]], controls: dict[str, Path]) -> Path:
+    aggregate: dict[str, Any] = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "training_seeds": list(TRAINING_SEEDS),
+        "training_timesteps": TIMESTEPS,
+        "evaluation_seed_start": EVALUATION_SEED_START,
+        "evaluation_seed_count": EVALUATION_SEEDS,
+        "reciprocal_games_per_model": EVALUATION_SEEDS * 2,
+        "conditions": {},
+        "controls": {},
+    }
+    for condition, rows in evaluations.items():
+        models: list[dict[str, Any]] = []
+        totals = {"games": 0, "wins": 0, "losses": 0, "draws": 0}
+        seat_totals = {
+            "candidate_as_p0": {"wins": 0, "losses": 0, "draws": 0},
+            "candidate_as_p1": {"wins": 0, "losses": 0, "draws": 0},
+        }
+        for seed, evaluation_path, run_dir in rows:
+            result = _read_json(evaluation_path)
+            record = {
+                "training_seed": seed,
+                "run": run_dir.name,
+                "games": result["games"],
+                "wins": result["wins"],
+                "losses": result["losses"],
+                "draws": result["draws"],
+                "seat_results": result["seat_results"],
+                "diagnostics": _last_training_diagnostics(run_dir),
+                "evaluation": str(evaluation_path.relative_to(ROOT)),
+            }
+            models.append(record)
+            for key in totals:
+                totals[key] += int(result[key])
+            for seat, values in result["seat_results"].items():
+                for outcome in ("wins", "losses", "draws"):
+                    seat_totals[seat][outcome] += int(values[outcome])
+        totals["win_rate"] = totals["wins"] / totals["games"]
+        totals["draw_rate"] = totals["draws"] / totals["games"]
+        totals["win_interval"] = _wilson(totals["wins"], totals["games"])
+        aggregate["conditions"][condition] = {
+            "name": CONDITIONS[condition]["name"],
+            "hypothesis": CONDITIONS[condition]["hypothesis"],
+            "reward": CONDITIONS[condition]["reward"],
+            "models": models,
+            "totals": totals,
+            "seat_totals": seat_totals,
+        }
+    for name, path in controls.items():
+        aggregate["controls"][name] = _read_json(path)
+    aggregate["paired_win_comparisons"] = [
+        _paired_win_comparison(
+            evaluations,
+            "full_nodraw",
+            "full_draw025",
+            "effect of removing draw credit",
+        ),
+        _paired_win_comparison(
+            evaluations,
+            "minus_closing",
+            "full_nodraw",
+            "effect of removing closing-distance shaping",
+        ),
+        _paired_win_comparison(
+            evaluations,
+            "full_nodraw",
+            "minus_value",
+            "effect of retaining value-delta shaping",
+        ),
+        _paired_win_comparison(
+            evaluations,
+            "terminal_time",
+            "terminal_only",
+            "effect of adding per-decision time pressure to terminal reward",
+        ),
+        _paired_win_comparison(
+            evaluations,
+            "full_nodraw",
+            "terminal_time",
+            "combined effect of closing and value shaping over terminal plus time",
+        ),
+    ]
+    output = PANEL / "aggregate.json"
+    _write_json(output, aggregate)
+    return output
+
+
+def _write_manifest() -> None:
+    _write_json(
+        PANEL / "panel.json",
+        {
+            "schema_version": 1,
+            "panel": "annihilation-reduced-v1",
+            "scope": "tactical-v2 reduced curriculum, 13x9 board, 3 starting units per side",
+            "algorithm": "maskable_ppo",
+            "policy": "HexCNN",
+            "opponent": "random",
+            "learner_seat": "alternating",
+            "trackers": ["local", "tensorboard"],
+            "training_seeds": list(TRAINING_SEEDS),
+            "training_timesteps": TIMESTEPS,
+            "checkpoint_interval": CHECKPOINT_INTERVAL,
+            "workers": WORKERS,
+            "evaluation_seed_start": EVALUATION_SEED_START,
+            "evaluation_seed_count": EVALUATION_SEEDS,
+            "reciprocal": True,
+            "conditions": CONDITIONS,
+        },
+    )
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--train-only", action="store_true")
+    arguments = parser.parse_args()
+    _write_manifest()
+    scenarios = {condition: _scenario(condition) for condition in CONDITIONS}
+    if arguments.prepare_only:
+        print(PANEL / "panel.json")
+        return 0
+
+    runs: dict[str, list[tuple[int, Path]]] = {condition: [] for condition in CONDITIONS}
+    for condition, scenario in scenarios.items():
+        for seed in TRAINING_SEEDS:
+            runs[condition].append((seed, _train(condition, seed, scenario)))
+    if arguments.train_only:
+        return 0
+
+    evaluations: dict[str, list[tuple[int, Path, Path]]] = {condition: [] for condition in CONDITIONS}
+    for condition, condition_runs in runs.items():
+        for seed, run_dir in condition_runs:
+            evaluations[condition].append((seed, _evaluate(condition, seed, run_dir), run_dir))
+    controls = {
+        "greedy_vs_random": _evaluate_control("greedy-v-random", "greedy", "random", reciprocal=True),
+        "random_vs_random": _evaluate_control("random-v-random", "random", "random", reciprocal=False),
+    }
+    output = _aggregate(evaluations, controls)
+    print(f"AGGREGATE {output}", flush=True)
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

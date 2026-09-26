@@ -1,0 +1,109 @@
+{
+  "algorithm": "maskable_ppo",
+  "conditions": {
+    "full_combined": {
+      "cli_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 3,
+        "target_kl": 0.02
+      },
+      "effective_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 3,
+        "target_kl": 0.02
+      },
+      "name": "Full no-draw reward, conservative combined PPO",
+      "scenario": "full_nodraw.json"
+    },
+    "full_default": {
+      "cli_options": {},
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": null
+      },
+      "existing_run": "annihilation-ablation-full_nodraw-seed{seed}-tb-v1",
+      "name": "Full no-draw reward, PPO defaults",
+      "scenario": "full_nodraw.json"
+    },
+    "value_combined": {
+      "cli_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 3,
+        "target_kl": 0.02
+      },
+      "effective_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 3,
+        "target_kl": 0.02
+      },
+      "name": "Value-only shaping, conservative combined PPO",
+      "scenario": "minus_closing.json"
+    },
+    "value_default": {
+      "cli_options": {},
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": null
+      },
+      "existing_run": "annihilation-ablation-minus_closing-seed{seed}-tb-v1",
+      "name": "Value-only shaping, PPO defaults",
+      "scenario": "minus_closing.json"
+    },
+    "value_epochs3": {
+      "cli_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 3
+      },
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 3,
+        "target_kl": null
+      },
+      "name": "Value-only shaping, 3 epochs",
+      "scenario": "minus_closing.json"
+    },
+    "value_low_lr": {
+      "cli_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 10
+      },
+      "effective_options": {
+        "learning_rate": 0.0001,
+        "n_epochs": 10,
+        "target_kl": null
+      },
+      "name": "Value-only shaping, learning rate 1e-4",
+      "scenario": "minus_closing.json"
+    },
+    "value_targetkl": {
+      "cli_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": 0.02
+      },
+      "effective_options": {
+        "learning_rate": 0.0003,
+        "n_epochs": 10,
+        "target_kl": 0.02
+      },
+      "name": "Value-only shaping, target KL 0.02",
+      "scenario": "minus_closing.json"
+    }
+  },
+  "evaluation_seed_count": 25,
+  "evaluation_seed_start": 4000000,
+  "opponent": "random",
+  "panel": "annihilation-optimizer-v1",
+  "policy": "HexCNN",
+  "reciprocal": true,
+  "schema_version": 1,
+  "scope": "tactical-v2 reduced curriculum, 13x9, three starting units",
+  "training_seeds": [
+    11,
+    23,
+    47
+  ],
+  "training_timesteps": 51200
+}

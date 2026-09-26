@@ -12,6 +12,7 @@ if (-not (Test-Path (Join-Path $src "Build"))) { throw "No build at $src - run H
 if (Test-Path (Join-Path $dst "Build")) { Remove-Item (Join-Path $dst "Build") -Recurse -Force }
 Copy-Item (Join-Path $src "Build") (Join-Path $dst "Build") -Recurse
 Copy-Item (Join-Path $src "index.html") $dst -Force
+Copy-Item (Join-Path $src "hexwars-mark.svg") $dst -Force
 if (Test-Path (Join-Path $src "StreamingAssets")) {
     Copy-Item (Join-Path $src "StreamingAssets\*") (Join-Path $dst "StreamingAssets\") -Recurse -Force
 }
@@ -20,7 +21,12 @@ if (Test-Path (Join-Path $src "StreamingAssets")) {
 # keys by URL — after a redeploy a browser can pair an old cached .data with the new .wasm and die
 # at boot ("RuntimeError: memory access out of bounds" in callMain). A per-deploy ?v= makes every
 # build's URLs unique so old and new can never mix.
-$v = (Get-FileHash (Join-Path $dst "Build\WebGL.data.unityweb") -Algorithm SHA256).Hash.Substring(0, 8).ToLower()
+# Code-only builds may leave .data unchanged; bind the cache key to every payload, including wasm.
+$fingerprint = [string]::Join('', @(Get-ChildItem (Join-Path $dst 'Build') -File | Sort-Object Name | ForEach-Object { (Get-FileHash $_.FullName -Algorithm SHA256).Hash }))
+$sha = [System.Security.Cryptography.SHA256]::Create()
+try {
+    $v = ([System.BitConverter]::ToString($sha.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($fingerprint)))).Replace('-', '').Substring(0, 8).ToLower()
+} finally { $sha.Dispose() }
 $idx = Join-Path $dst "index.html"
 # Read/write via System.IO with explicit BOM-less UTF-8: PowerShell 5.1's Get-Content decodes
 # BOM-less files through the SYSTEM CODEPAGE, mojibake-ing the template's own non-ASCII (the
@@ -45,9 +51,9 @@ if ($html -notmatch 'og:title') {
     <meta name="twitter:description" content="Design your army from raw points. Outbuild, outthink, dominate." />
     <meta name="twitter:image" content="https://hwbootstrap.onrender.com/preview.png" />
     <link rel="manifest" href="/manifest.json" />
-    <meta name="theme-color" content="#0A0E1C" />
+    <meta name="theme-color" content="#10171B" />
     <link rel="apple-touch-icon" href="/icon-192.png" />
-    <link rel="icon" type="image/png" href="/favicon.png" />
+    <link rel="icon" type="image/svg+xml" href="/hexwars-mark.svg" />
 </head>
 "@
     $html = $html -replace '</head>', $headInject

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from dataclasses import replace
 import hashlib
 import json
@@ -7,6 +8,7 @@ from pathlib import Path
 from types import MappingProxyType, SimpleNamespace
 
 import pytest
+import torch
 
 from ml_lab.tactical_v3_client import OracleStepResult, TeacherSelection
 from ml_lab.tactical_v3_schema import parse_spaces, parse_view
@@ -31,6 +33,49 @@ def _transfer_identity():
         contract_hash="f" * 64,
         match=MappingProxyType(match),
     )
+
+
+def _reach_identity():
+    identity = _identity()
+    match = dict(identity.match)
+    match["objective"] = MappingProxyType({
+        "kind": "reach_cell",
+        "target_policy": "seeded_farthest_reachable_unoccupied_v1",
+        "radius": 0,
+    })
+    return replace(
+        identity,
+        scenario_id="reach-cell-curriculum-v1",
+        contract_hash="e" * 64,
+        match=MappingProxyType(match),
+    )
+
+
+def test_reach_curriculum_teacher_contract_has_no_fake_search_expansions() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    identity = _reach_identity()
+    assert module._teacher_evidence_contract(identity, 2048) == (
+        "reach-cell-shortest-path-v1",
+        0,
+        2048,
+        "reach-cell-shortest-path-v1",
+    )
+    decision = _view(7).decision
+    valid = TeacherSelection(
+        7, decision.candidates[0].candidate_id,
+        0, 2048, 0, "reach-cell-shortest-path-v1",
+    )
+    module._validate_selection(
+        valid, decision, 2048, identity=identity,
+    )
+    with pytest.raises(ValueError, match="teacher metadata drifted"):
+        module._validate_selection(
+            replace(valid, actual_expansions=1),
+            decision,
+            2048,
+            identity=identity,
+        )
 
 
 def _view(decision_id: int, *, seat: int = 0, profile: str = "standard-3v3",
@@ -74,6 +119,37 @@ def _view_with_two_candidates(
         second["candidate_id"] = 1
         payload["candidates"].append(second)
     return parse_view(payload, _identity())
+
+
+def _reach_view_with_two_candidates(
+    decision_id: int,
+    *,
+    profile: str = "conversion-1v1-near",
+    terminal: bool = False,
+):
+    payload = minimal_view_payload()
+    payload["decision_id"] = decision_id
+    payload["start_profile"] = profile
+    payload["candidates"][0]["decision_id"] = decision_id
+    if terminal:
+        payload["candidates"] = []
+        payload["terminated"] = True
+        payload["winner"] = 0
+        payload["reward"]["finalized"] = True
+    else:
+        target_cell = copy.deepcopy(payload["observation"]["cells"][0])
+        target_cell["q"] = 1
+        payload["observation"]["cells"].append(target_cell)
+        payload["candidates"][0]["target"] = {"table": "cells", "row": 1}
+        completing = copy.deepcopy(payload["candidates"][0])
+        completing["candidate_id"] = 1
+        completing["cell"] = {"table": "cells", "row": 1}
+        completing["projection"]["destination_cell"] = {
+            "table": "cells", "row": 1,
+        }
+        completing["projection"]["is_terminal"] = True
+        payload["candidates"].append(completing)
+    return parse_view(payload, _reach_identity())
 
 
 class _FakeClient:
@@ -194,6 +270,59 @@ class _SelectiveDaggerClient(_DaggerClient):
             ("c" if self._index == 0 else "d") * 64,
             1, -0.25 if self._index == 0 else 0.25,
             3 if self._index == 0 else 1,
+            2,
+        )
+
+
+class _ReachDaggerClient(_DaggerClient):
+    def __init__(self) -> None:
+        self._identity = _reach_identity()
+        self._views = (
+            _reach_view_with_two_candidates(7),
+            _reach_view_with_two_candidates(8),
+            _reach_view_with_two_candidates(9, terminal=True),
+        )
+        self._index = 0
+        self.events = []
+        self.oracle_budgets = []
+
+    def duel_oracle_query(
+        self,
+        decision_id,
+        *,
+        search_depth,
+        expansion_budget,
+        heuristic_identity,
+    ):
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        assert search_depth == 0
+        assert heuristic_identity == "reach-cell-shortest-path-v1"
+        self.events.append(("query", decision_id, 1))
+        self.oracle_budgets.append(expansion_budget)
+        return TeacherSelection(
+            decision_id,
+            1,
+            0,
+            expansion_budget,
+            0,
+            heuristic_identity,
+        )
+
+    def duel_dagger_inspect(self, decision_id, learner_candidate_id):
+        from ml_lab.tactical_v3_client import SelectiveDaggerInspection
+
+        current = self._views[self._index]
+        assert decision_id == current.decision.decision_id
+        self.events.append(("inspect", decision_id, learner_candidate_id))
+        return SelectiveDaggerInspection(
+            decision_id,
+            learner_candidate_id,
+            (),
+            ("8" if self._index == 0 else "9") * 64,
+            1,
+            0.0,
+            1,
             2,
         )
 
@@ -501,7 +630,7 @@ def test_selective_collection_stops_only_after_complete_pair_at_fixed_target(
         )
         return module.PilotDaggerEpisode(
             _identity(), (None,) * labels_per_game, summary,
-            "a" * 64, "b" * 64, 3, 0.125,
+            "a" * 64, "b" * 64, 3, 0.125, _identity(),
         )
 
     result = module.collect_selective_dagger_partition(
@@ -523,6 +652,7 @@ def test_selective_collection_fails_when_frozen_ceiling_cannot_reach_target() ->
         summary = module.PilotDaggerGameSummary(item, -1, False, True, 0, 0, 0, 0)
         return module.PilotDaggerEpisode(
             _identity(), (), summary, "a" * 64, "b" * 64, 3, 0.125,
+            _identity(),
         )
 
     with pytest.raises(RuntimeError, match="20,000.*2,000"):
@@ -639,11 +769,16 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
         json.loads(line)
         for line in (output / "decisions.jsonl").read_text(encoding="utf-8").splitlines()
     ]
-    assert manifest["schema_version"] == 1
+    assert manifest["schema_version"] == 2
     assert manifest["kind"] == "tactical-v3-dagger-episode"
     assert manifest["records"]["count"] == 2
     assert manifest["summary"]["disagreements"] == 1
-    assert manifest["actor"] == {
+    assert parse_spaces(manifest["actor"]["semantic_identity"]) == _identity()
+    assert {
+        key: value
+        for key, value in manifest["actor"].items()
+        if key != "semantic_identity"
+    } == {
         "algorithm": "structured_imitation",
         "best_epoch": 3,
         "best_validation_policy_nll": 0.125,
@@ -660,6 +795,76 @@ def test_dagger_episode_queries_teacher_then_steps_learner_and_persists_records(
     assert rows[0]["teacher_candidate_id"] == 1
     assert rows[0]["disagreement"] is True
     assert rows[0]["teacher_intervened"] is False
+
+
+def test_reach_curriculum_labels_every_visited_state_and_roundtrips(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    actor_identity = _identity()
+    identity = _reach_identity()
+    item = module.ContinuationScheduleItem(
+        "train", "conversion-1v1-near", 65_100_000, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=actor_identity,
+            model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64,
+            best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _ReachDaggerClient()
+
+    episode = module.collect_dagger_game(
+        client,
+        actor,
+        item,
+        opponent="passive",
+        allow_compatible_identity_transfer=True,
+    )
+
+    assert client.events[1:] == [
+        ("inspect", 7, 0), ("query", 7, 1), ("step", 7, 0),
+        ("inspect", 8, 0), ("query", 8, 1), ("step", 8, 0),
+    ]
+    assert len(episode.records) == 2
+    assert episode.actor_identity == actor_identity
+    assert all(
+        record.eligibility_reasons == ("curriculum_reach_cell",)
+        for record in episode.records
+    )
+    assert all(
+        record.example.teacher.identity == "reach-cell-shortest-path-v1"
+        and record.example.teacher.search_depth == 0
+        and record.example.teacher.expansion_budget == 512
+        and record.example.teacher.actual_expansions == 0
+        and record.example.teacher.heuristic_identity
+        == "reach-cell-shortest-path-v1"
+        for record in episode.records
+    )
+
+    output = module.write_dagger_episode(tmp_path / "reach-episode", episode)
+    manifest = json.loads((output / "episode.json").read_text(encoding="utf-8"))
+    assert manifest["teacher"] == {
+        "identity": "reach-cell-shortest-path-v1",
+        "search_depth": 0,
+        "expansion_budget": 512,
+        "heuristic_identity": "reach-cell-shortest-path-v1",
+    }
+    assert parse_spaces(
+        manifest["actor"]["semantic_identity"]
+    ) == actor_identity
+    assert module.load_dagger_episode(
+        output,
+        identity,
+        oracle_expansion_budget=512,
+        expected_schedule=item,
+        expected_actor_identity=actor_identity,
+    ) == episode
 
 
 def test_dagger_episode_reader_roundtrips_and_rejects_record_tamper(
@@ -691,6 +896,132 @@ def test_dagger_episode_reader_roundtrips_and_rejects_record_tamper(
     records.write_bytes(records.read_bytes() + b" ")
     with pytest.raises(ValueError, match="records|canonical|hash"):
         load(output, _identity(), oracle_expansion_budget=2048)
+
+
+def test_dagger_episode_schema1_reopens_with_unknown_actor_and_cannot_attest_transfer(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 65_000_002, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episode = module.collect_dagger_game(_DaggerClient(), actor, item)
+    output = module.write_dagger_episode(tmp_path / "legacy-episode", episode)
+    manifest_path = output / "episode.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["schema_version"] = 1
+    del manifest["actor"]["semantic_identity"]
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+
+    reopened = module.load_dagger_episode(
+        output,
+        _identity(),
+        oracle_expansion_budget=512,
+        expected_schedule=item,
+    )
+
+    assert reopened == replace(episode, actor_identity=None)
+    with pytest.raises(ValueError, match="cannot authenticate actor semantic identity"):
+        module.load_dagger_episode(
+            output,
+            _identity(),
+            oracle_expansion_budget=512,
+            expected_schedule=item,
+            expected_actor_identity=_transfer_identity(),
+        )
+
+
+def test_dagger_episode_schema2_authenticates_actor_compatibility_and_exact_source(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    actor_identity = _identity()
+    target_identity = _reach_identity()
+    item = module.ContinuationScheduleItem(
+        "train", "conversion-1v1-near", 65_100_001, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=actor_identity, model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episode = module.collect_dagger_game(
+        _ReachDaggerClient(), actor, item, opponent="passive",
+        allow_compatible_identity_transfer=True,
+    )
+    output = module.write_dagger_episode(tmp_path / "transferred", episode)
+
+    with pytest.raises(ValueError, match="does not match the expected actor"):
+        module.load_dagger_episode(
+            output,
+            target_identity,
+            oracle_expansion_budget=512,
+            expected_actor_identity=_transfer_identity(),
+        )
+
+    manifest_path = output / "episode.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["actor"]["semantic_identity"]["environment_kind"] = "tactical"
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    with pytest.raises(ValueError, match="requires duel policy identities"):
+        module.load_dagger_episode(
+            output,
+            target_identity,
+            oracle_expansion_budget=512,
+        )
+
+
+def test_dagger_episode_reader_preserves_continuation_medium_profile(
+    tmp_path: Path,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    item = module.ContinuationScheduleItem(
+        "train", "conversion-1v1-medium", 65_000_001, 0, 0,
+    )
+    actor = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    episode = module.collect_dagger_game(
+        _DaggerClient(profile=item.profile_id), actor, item,
+    )
+    output = module.write_dagger_episode(tmp_path / "medium", episode)
+
+    loaded = module.load_dagger_episode(
+        output,
+        _identity(),
+        oracle_expansion_budget=512,
+        expected_schedule=item,
+    )
+
+    assert loaded == episode
+    assert type(loaded.summary.schedule) is module.ContinuationScheduleItem
 
 
 def test_selective_partition_reader_reopens_exact_overlay_and_rejects_manifest_tamper(
@@ -864,6 +1195,32 @@ def test_dagger_collection_uses_selected_greedy_opponent() -> None:
     assert episode.summary.schedule == item
 
 
+def test_dagger_collection_uses_selected_passive_opponent() -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    loaded = SimpleNamespace(
+        model=_EvaluationPolicy(),
+        metadata=SimpleNamespace(
+            identity=_identity(), model_state_sha256="a" * 64,
+            corpus_sha256="b" * 64, best_epoch=3,
+            best_validation_policy_nll=0.125,
+        ),
+    )
+    client = _DaggerClient(seat=1)
+    item = module.PilotScheduleItem(
+        "train", "standard-3v3", 34_540_001, 1, 1,
+    )
+
+    episode = module.collect_dagger_game(
+        client, loaded, item, opponent="passive",
+    )
+
+    assert client.events[0] == (
+        "reset", (34_540_001, "passive", "external", 1, "standard-3v3", 1),
+    )
+    assert episode.summary.schedule == item
+
+
 def test_dagger_compatible_transfer_is_explicit_and_model_facing_only() -> None:
     import ml_lab.tactical_v3_pilot as module
 
@@ -898,6 +1255,7 @@ def test_dagger_compatible_transfer_is_explicit_and_model_facing_only() -> None:
     )
 
     assert episode.identity == target_identity
+    assert episode.actor_identity == source_identity
     assert episode.actor_model_state_sha256 == "a" * 64
 
 
@@ -1443,7 +1801,13 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     import ml_lab.tactical_v3_pilot as module
     from ml_lab.tactical_v3_layers import TacticalV3ModelConfig
     from ml_lab.tactical_v3_model import TacticalV3Policy
-    from ml_lab.tactical_v3_training import EpochMetrics, StepMetrics, TrainingResult
+    from ml_lab.tactical_v3_training import (
+        EpochMetrics,
+        StepMetrics,
+        TrainingResult,
+        _checkpoint_state,
+        _snapshot_state,
+    )
 
     collection = _canonical_collection()
     output = tmp_path / "pilot"
@@ -1453,10 +1817,13 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
     def fake_train(
         train, validation, model_config, objective_config, trainer_config,
         *, epoch_callback, step_callback, deadline_monotonic,
-        initial_state_dict, training_batch_provider,
+        initial_state_dict, training_batch_provider, checkpoint_callback,
+        resume_state, identity,
     ):
+        assert identity == collection.identity
         assert initial_state_dict is None
         assert training_batch_provider is None
+        assert resume_state is None
         captured.update(train=train, validation=validation, model=model_config,
                         objective=objective_config, trainer=trainer_config,
                         deadline=deadline_monotonic)
@@ -1470,6 +1837,29 @@ def test_train_pilot_uses_exact_configs_reloads_cpu_and_writes_exact_history(
         step_callback(StepMetrics("train", 0, 1, 2, 1, metrics))
         step_callback(StepMetrics("validation", 0, 0, 1, 2, metrics))
         step_callback(StepMetrics("validation", 0, 1, 2, 1, metrics))
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=trainer_config.learning_rate,
+        )
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(trainer_config.seed)
+        checkpoint_callback(_checkpoint_state(
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            model_config=model_config,
+            objective_config=objective_config,
+            trainer_config=trainer_config,
+            micro_batch_size=None,
+            next_epoch=1,
+            best_state=_snapshot_state(model),
+            history=list(history),
+            best_epoch=0,
+            best_nll=1.0,
+            epochs_without_improvement=0,
+            train_global_step=1,
+            validation_global_step=1,
+            uses_external_batch_provider=False,
+        ))
         epoch_callback(history[0])
         return TrainingResult(model, model_config, objective_config, trainer_config,
                               0, 1.0, False, history)
@@ -1558,6 +1948,39 @@ def test_policy_target_metrics_honors_training_deadline_before_a_batch() -> None
         )
 
 
+def test_pilot_training_accepts_an_explicitly_disabled_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    collection = _canonical_collection()
+    output = tmp_path / "training"
+    output.mkdir()
+    observed = []
+
+    def inspect_deadline(model, examples, *, deadline_monotonic, **kwargs):
+        observed.append(deadline_monotonic)
+        raise RuntimeError("deadline inspected")
+
+    monkeypatch.setattr(module, "_policy_target_metrics", inspect_deadline)
+
+    with pytest.raises(RuntimeError, match="deadline inspected"):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            training_deadline_seconds=None,
+            tensorboard_enabled=False,
+        )
+
+    assert observed == [None]
+
+
 def test_pilot_training_honors_cooperative_stop_without_tensorboard(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1612,8 +2035,159 @@ def test_pilot_training_honors_cooperative_stop_without_tensorboard(
     assert (output / "steps.jsonl").is_file()
 
 
+def test_pilot_stop_after_completed_epoch_retains_best_and_resume_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+    from ml_lab.tactical_v3_model import TacticalV3Policy
+    from ml_lab.tactical_v3_training import (
+        EpochMetrics,
+        TrainingResult,
+        _checkpoint_state,
+        _snapshot_state,
+    )
+
+    collection = _canonical_collection()
+    stopped = {"value": False}
+    metrics = MappingProxyType({
+        "total": 1.0,
+        "policy": 1.0,
+        "outcome": 0.0,
+        "horizon": 0.0,
+        "remaining_turns": 0.0,
+    })
+
+    def fake_policy_metrics(model, examples, **kwargs):
+        callback = kwargs.get("progress_callback")
+        if callback is not None:
+            callback(len(examples), len(examples))
+        return module.PolicyTargetMetrics(1.0, 0.5, len(examples), len(examples))
+
+    def fake_train(
+        train, validation, model_config, objective_config, trainer_config,
+        *, checkpoint_callback, epoch_callback, **kwargs,
+    ):
+        del train, validation, kwargs
+        model = TacticalV3Policy(model_config).eval()
+        metric = EpochMetrics(0, metrics, metrics, 1.0, True)
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=trainer_config.learning_rate,
+        )
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(trainer_config.seed)
+        checkpoint_callback(_checkpoint_state(
+            model=model,
+            optimizer=optimizer,
+            generator=generator,
+            model_config=model_config,
+            objective_config=objective_config,
+            trainer_config=trainer_config,
+            micro_batch_size=None,
+            next_epoch=1,
+            best_state=_snapshot_state(model),
+            history=[metric],
+            best_epoch=0,
+            best_nll=1.0,
+            epochs_without_improvement=0,
+            train_global_step=1,
+            validation_global_step=1,
+            uses_external_batch_provider=False,
+        ))
+        stopped["value"] = True
+        epoch_callback(metric)
+        return TrainingResult(
+            model, model_config, objective_config, trainer_config,
+            0, 1.0, False, (metric,),
+        )
+
+    monkeypatch.setattr(module, "_policy_target_metrics", fake_policy_metrics)
+    monkeypatch.setattr(module, "train_offline", fake_train)
+    output = tmp_path / "training"
+    output.mkdir()
+
+    with pytest.raises(
+        module.PilotTrainingStopRequested,
+        match="training stop requested",
+    ):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            tensorboard_enabled=False,
+            stop_requested=lambda: stopped["value"],
+        )
+
+    assert (output / "checkpoints" / "best.pt").is_file()
+    assert (output / "checkpoints" / "last.pt").is_file()
+    assert (output / "metrics.jsonl").read_text(encoding="utf-8") == (
+        output / "telemetry.jsonl"
+    ).read_text(encoding="utf-8")
+
+
+def test_pilot_honors_deferred_stop_during_restored_metrics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import ml_lab.tactical_v3_pilot as module
+
+    collection = _canonical_collection()
+    original_metrics = module._policy_target_metrics
+    metric_pass = {"count": 0}
+    deferred_stop = {"requested": False}
+
+    def request_during_restored_metrics(model, examples, **kwargs):
+        metric_pass["count"] += 1
+        progress_callback = kwargs.get("progress_callback")
+        if metric_pass["count"] == 3:
+            def request_then_report(completed, total):
+                deferred_stop["requested"] = True
+                progress_callback(completed, total)
+
+            kwargs["progress_callback"] = request_then_report
+        return original_metrics(model, examples, **kwargs)
+
+    monkeypatch.setattr(
+        module, "_policy_target_metrics", request_during_restored_metrics,
+    )
+    _, _, default_trainer = module._pilot_configs(227, "cpu")
+    trainer = replace(
+        default_trainer, max_epochs=1, patience_epochs=1,
+    )
+    output = tmp_path / "training"
+    output.mkdir()
+
+    with pytest.raises(
+        module.PilotTrainingStopRequested,
+        match="stop-after-checkpoint requested",
+    ):
+        module._train_pilot_dataset(
+            _identity(),
+            collection.train,
+            collection.validation,
+            "a" * 64,
+            output,
+            227,
+            "cpu",
+            trainer_config=trainer,
+            tensorboard_enabled=False,
+            stop_after_checkpoint_requested=(
+                lambda: deferred_stop["requested"]
+            ),
+        )
+
+    assert metric_pass["count"] == 3
+    assert (output / "checkpoints" / "best.pt").is_file()
+    assert (output / "checkpoints" / "last.pt").is_file()
+
+
 class _EvaluationClient:
     def __init__(self) -> None:
+        self.identity = _identity()
         self.resets = []
         self.steps = []
         self.status_calls = 0
@@ -2007,10 +2581,11 @@ def test_run_pilot_diagnostics_reuses_frozen_evidence_and_writes_game_rows(
     breakdown = {"standard-3v3": {"all": {"examples": 2}, "seats": {}}}
     monkeypatch.setattr(module, "TacticalV3GymClient", Client)
     monkeypatch.setattr(module, "load_structured_checkpoint", fake_load)
-    monkeypatch.setattr(
-        module, "validation_metric_breakdown",
-        lambda model, examples: breakdown,
-    )
+    def fake_breakdown(model, examples, *, identity):
+        assert identity == collection.identity
+        return breakdown
+
+    monkeypatch.setattr(module, "validation_metric_breakdown", fake_breakdown)
     controllers = []
 
     def fake_evaluate(client, actual_loaded, controller, schedule):

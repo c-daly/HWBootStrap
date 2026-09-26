@@ -203,6 +203,17 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
+        public void Build_LabelsPassiveAsScriptedWithoutLoadingCheckpoint()
+        {
+            ModelArenaSeatIdentity row = ModelArenaIdentity.Build(
+                "passive", "greedy", null, null, 0, 0, 0, 0)[0];
+
+            Assert.That(row.Controller, Is.EqualTo("Passive"));
+            Assert.That(row.Checkpoint, Is.Empty);
+            Assert.That(row.Algorithm, Is.Empty);
+        }
+
+        [Test]
         public void Build_UsesResolvedCheckpointAndMirrorsRecords()
         {
             var resolved = PolicyBridge.ParseReady(
@@ -217,6 +228,33 @@ namespace HexWars.Presentation.Tests
             Assert.That(rows[0].Step, Is.EqualTo("step 20,480"));
             Assert.That(rows[0].Record, Is.EqualTo("3-1-1 (60%)"));
             Assert.That(rows[1].Record, Is.EqualTo("1-3-1 (20%)"));
+        }
+
+        [Test]
+        public void Build_LabelsStructuredPolicyGradientAsOutcomeCandidate()
+        {
+            var resolved = PolicyBridge.ParseReady(
+                "{\"ready\":true,\"model_seats\":[0]," +
+                "\"seat_models\":[{\"seat\":0,\"kind\":\"run\"," +
+                "\"path\":\"C:/runs/candidate/checkpoints/policy-update-000003.pt\"," +
+                "\"algorithm\":\"structured_policy_gradient\",\"step\":3}]}"
+            ).Seats[0];
+
+            ModelArenaSeatIdentity row = ModelArenaIdentity.Build(
+                "run:C:/runs/candidate",
+                "greedy",
+                resolved,
+                null,
+                0,
+                0,
+                0,
+                0)[0];
+
+            Assert.That(row.Controller, Is.EqualTo("candidate"));
+            Assert.That(row.Algorithm, Is.EqualTo("Outcome candidate"));
+            Assert.That(row.Checkpoint,
+                Is.EqualTo("policy-update-000003.pt"));
+            Assert.That(row.Step, Is.EqualTo("step 3"));
         }
 
         [Test]

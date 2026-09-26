@@ -257,6 +257,21 @@ namespace HexWars.GymServer
                     RequireText(source.PlacementPolicy, "tactical_v3.placement_policy", errors);
                     Require(source.StartProfiles, "tactical_v3.start_profiles", errors);
                     Require(source.StartDistribution, "tactical_v3.start_distribution", errors);
+                    if (source.Objective != null)
+                    {
+                        RequireText(
+                            source.Objective.Kind,
+                            "tactical_v3.objective.kind",
+                            errors);
+                        RequireText(
+                            source.Objective.TargetPolicy,
+                            "tactical_v3.objective.target_policy",
+                            errors);
+                        Require(
+                            source.Objective.Radius,
+                            "tactical_v3.objective.radius",
+                            errors);
+                    }
                     if (source.StartProfiles != null)
                         for (int i = 0; i < source.StartProfiles.Count; i++)
                         {
@@ -460,6 +475,14 @@ namespace HexWars.GymServer
                     StartProfiles = source.StartProfiles!.Select(MapTacticalV2StartProfile).ToList(),
                     StartDistribution = source.StartDistribution!.Select(MapTacticalV2StartWeight).ToList(),
                     Templates = source.Templates!.Select(MapTacticalV2Template).ToList(),
+                    Objective = source.Objective == null
+                        ? null
+                        : new TrainingTacticalV3ObjectiveConfig
+                        {
+                            Kind = source.Objective.Kind!,
+                            TargetPolicy = source.Objective.TargetPolicy!,
+                            Radius = source.Objective.Radius!.Value,
+                        },
                     Capacity = new TrainingTacticalV3CapacityConfig
                     {
                         MaxCells = source.Capacity!.MaxCells!.Value,
@@ -632,6 +655,14 @@ namespace HexWars.GymServer
             public List<TacticalV2Wire.TacticalV2StartWeightWire>? StartDistribution { get; set; }
             [JsonPropertyName("templates")] public List<TacticalV2TemplateWire>? Templates { get; set; }
             [JsonPropertyName("capacity")] public TacticalV3CapacityWire? Capacity { get; set; }
+            [JsonPropertyName("objective")] public TacticalV3ObjectiveWire? Objective { get; set; }
+        }
+
+        private sealed class TacticalV3ObjectiveWire
+        {
+            [JsonPropertyName("kind")] public string? Kind { get; set; }
+            [JsonPropertyName("target_policy")] public string? TargetPolicy { get; set; }
+            [JsonPropertyName("radius")] public int? Radius { get; set; }
         }
 
         private sealed class TacticalV3CapacityWire

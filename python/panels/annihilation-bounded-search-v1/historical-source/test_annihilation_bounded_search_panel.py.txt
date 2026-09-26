@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+import pytest
+
+import run_annihilation_bounded_search_panel as panel
+
+
+def _match(
+    seed: int,
+    seat: int,
+    outcome: str,
+    *,
+    profile: str = "conversion-1v1-far",
+    flags: list[str] | None = None,
+) -> dict:
+    value = {
+        "seed": seed,
+        "candidate_seat": seat,
+        "start_profile": profile,
+        "outcome": outcome,
+    }
+    if flags is not None:
+        value["classification"] = {"flags": flags}
+    return value
+
+
+def test_locked_panel_definitions_validate() -> None:
+    manifest, seeds, profiles = panel.validate_definitions()
+
+    assert manifest["status"] == "complete"
+    assert seeds["confirmation"]["assigned"] is False
+    assert len(profiles) == 9
+    assert sum(len(values) * 2 for values in profiles.values()) == 180
+
+
+def test_summary_keeps_outcomes_seats_profiles_and_draw_classes() -> None:
+    result = panel.summarize([
+        _match(1, 0, "win"),
+        _match(1, 1, "draw", flags=["cycling", "failed_conversion"]),
+        _match(2, 0, "loss", profile="conversion-2v1-near"),
+        _match(2, 1, "draw", profile="conversion-2v1-near", flags=["cycling"]),
+    ])
+
+    assert (result["wins"], result["losses"], result["draws"]) == (1, 1, 2)
+    assert result["cycling_draws"] == 2
+    assert result["failed_conversion_draws"] == 1
+    assert result["by_seat"]["0"] == {"win": 1, "loss": 1}
+    assert result["by_profile"]["conversion-1v1-far"] == {"win": 1, "draw": 1}
+
+
+def test_paired_comparison_uses_map_profile_and_candidate_seat() -> None:
+    left = [_match(1, 0, "win"), _match(1, 1, "draw")]
+    right = [_match(1, 1, "win"), _match(1, 0, "draw")]
+
+    assert panel.paired(left, right) == {
+        "games": 2,
+        "transitions": {"draw_to_win": 1, "win_to_draw": 1},
+        "left_only_wins": 1,
+        "right_only_wins": 1,
+        "net_left_wins": 0,
+        "two_sided_exact_sign_p": 1.0,
+    }
+
+
+def test_paired_comparison_rejects_duplicate_or_mismatched_schedules() -> None:
+    match = _match(1, 0, "draw")
+    with pytest.raises(RuntimeError, match="duplicate comparator"):
+        panel.paired([match, dict(match)], [match])
+    with pytest.raises(RuntimeError, match="not pairable"):
+        panel.paired([match], [_match(2, 0, "draw")])

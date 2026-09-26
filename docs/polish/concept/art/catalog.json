@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "kind": "vector-form-study",
+  "art": [
+    {
+      "id": "relay-01",
+      "name": "Relay",
+      "role": "Generalist",
+      "cue": "A balanced, faceted core.",
+      "shape": "relay",
+      "files": {
+        "porcelain": "relay-01-porcelain.svg",
+        "graphite": "relay-01-graphite.svg"
+      }
+    },
+    {
+      "id": "atlas-01",
+      "name": "Atlas",
+      "role": "Brute",
+      "cue": "Broad shoulders. A low center of gravity.",
+      "shape": "atlas",
+      "files": {
+        "porcelain": "atlas-01-porcelain.svg",
+        "graphite": "atlas-01-graphite.svg"
+      }
+    },
+    {
+      "id": "edge-01",
+      "name": "Edge",
+      "role": "Striker",
+      "cue": "A single forward-cutting plane.",
+      "shape": "edge",
+      "files": {
+        "porcelain": "edge-01-porcelain.svg",
+        "graphite": "edge-01-graphite.svg"
+      }
+    },
+    {
+      "id": "bastion-01",
+      "name": "Bastion",
+      "role": "Bulwark",
+      "cue": "Two sheltering plates. One narrow seam.",
+      "shape": "bastion",
+      "files": {
+        "porcelain": "bastion-01-porcelain.svg",
+        "graphite": "bastion-01-graphite.svg"
+      }
+    },
+    {
+      "id": "glide-01",
+      "name": "Glide",
+      "role": "Runner",
+      "cue": "A low hull, split into sweeping runners.",
+      "shape": "glide",
+      "files": {
+        "porcelain": "glide-01-porcelain.svg",
+        "graphite": "glide-01-graphite.svg"
+      }
+    },
+    {
+      "id": "crux-01",
+      "name": "Crux",
+      "role": "Climber",
+      "cue": "A tall arch on three planted feet.",
+      "shape": "crux",
+      "files": {
+        "porcelain": "crux-01-porcelain.svg",
+        "graphite": "crux-01-graphite.svg"
+      }
+    },
+    {
+      "id": "lance-01",
+      "name": "Lance",
+      "role": "Sniper",
+      "cue": "A quiet body with one unmistakable reach.",
+      "shape": "lance",
+      "files": {
+        "porcelain": "lance-01-porcelain.svg",
+        "graphite": "lance-01-graphite.svg"
+      }
+    },
+    {
+      "id": "halo-01",
+      "name": "Halo",
+      "role": "Spotter",
+      "cue": "An open ring, lifted clear of its base.",
+      "shape": "halo",
+      "files": {
+        "porcelain": "halo-01-porcelain.svg",
+        "graphite": "halo-01-graphite.svg"
+      }
+    }
+  ]
+}
