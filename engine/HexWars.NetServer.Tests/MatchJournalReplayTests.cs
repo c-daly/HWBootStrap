@@ -16,7 +16,7 @@ namespace HexWars.NetServer.Tests
     /// prove almost nothing, so the reader here builds its own connection pool and its own store, reads the
     /// journal cold, and replays it through the same deterministic engine the client runs.
     ///
-    /// The two commands are the pair SelfTest.cs uses, and they are legal on the default seed for the same
+    /// The two commands are the pair SelfTest.cs uses, and they are legal on the replay fixture seed for the same
     /// reason: the deterministic army placement puts a striker of Player0 within reach of one of Player1.
     /// </summary>
     [TestFixture]
@@ -50,12 +50,12 @@ namespace HexWars.NetServer.Tests
                 var writer = new PostgresMatchStore(writerPool, NullLogger<PostgresMatchStore>.Instance);
 
                 CreateMatchResult created = await writer.CreateMatchForLobbyAsync(new CreateMatchRequest(
-                    "109775240000000042", GameSetup.Default.ToWire(), "hexwars-engine/1", 2, "test-build",
+                    "109775240000000042", SelfTest.ReplaySetup.ToWire(), "hexwars-engine/1", 2, "test-build",
                     new[] { (seat0, 0), (seat1, 1) }, Created), CancellationToken.None);
                 matchId = created.Match.MatchId;
 
                 string startReplay =
-                    ReplayFile.Write(GameFactory.Build(GameSetup.Default), Array.Empty<Command>());
+                    ReplayFile.Write(GameFactory.Build(SelfTest.ReplaySetup), Array.Empty<Command>());
                 Assert.That(
                     await writer.TryStartMatchAsync(
                         matchId, startReplay, Created.AddMinutes(1), CancellationToken.None),
@@ -81,7 +81,7 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(journal, Is.Not.Null);
             Assert.That(journal.Match.Status, Is.EqualTo(MatchStatus.Active));
-            Assert.That(journal.Match.SetupWire, Is.EqualTo(GameSetup.Default.ToWire()));
+            Assert.That(journal.Match.SetupWire, Is.EqualTo(SelfTest.ReplaySetup.ToWire()));
             Assert.That(journal.Match.StartReplay, Is.Not.Null);
             Assert.That(journal.Commands, Has.Count.EqualTo(2));
             Assert.That(journal.Commands.Select(c => c.Sequence), Is.EqualTo(new[] { 1, 2 }));
@@ -98,7 +98,7 @@ namespace HexWars.NetServer.Tests
 
             // The comparison is the serialised state rather than a handful of fields: it is the same text the
             // server would deal to a reconnecting client, so an equal string means an equal game.
-            GameState direct = GameFactory.Build(GameSetup.Default);
+            GameState direct = GameFactory.Build(SelfTest.ReplaySetup);
             direct = GameEngine.Apply(direct, FirstMove).NewState;
             direct = GameEngine.Apply(direct, ThenAttack).NewState;
 

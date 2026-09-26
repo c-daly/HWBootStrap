@@ -22,6 +22,10 @@ namespace HexWars.NetServer
         const string Url = "http://127.0.0.1:5234";
         const string Ws = "ws://127.0.0.1:5234/ws?room=test";
 
+        // A compact combat fixture keeps the move-and-damage replay proof independent of the
+        // public default board size. Both players still use the real mirrored starting areas.
+        internal static GameSetup ReplaySetup => new(GameMode.Annihilation, 5, 5, 0, 7);
+
         public static async Task<int> Run()
         {
             var builder = WebApplication.CreateBuilder(new WebApplicationOptions
@@ -70,7 +74,7 @@ namespace HexWars.NetServer
 
                 // Reconnect: kill A's socket, reconnect with the SAME token, and confirm the server
                 // seats it back into P0 and re-deals START (the game must survive a background/refresh).
-                using var ra = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a");
+                using var ra = await Connect("ws://127.0.0.1:5234/ws?room=reconnect&token=tok-a&setup=" + Uri.EscapeDataString(ReplaySetup.ToWire()));
                 string rSeatA = await Recv(ra);               // SEAT 0
                 string rCatalogRequestA = await Recv(ra);
                 await Send(ra, NetProtocol.Catalog(BarracksWire.Write(BarracksCatalog.DefaultTemplates)));
@@ -81,7 +85,7 @@ namespace HexWars.NetServer
                 string rStartA = await Recv(ra);
                 string rStartB = await Recv(rb);
 
-                // C1: damage a unit BEFORE the drop — the default (9x7, seed 7) army placement lets
+                // C1: damage a unit BEFORE the drop — the explicit (5x5, seed 7) replay fixture lets
                 // P0's Striker (unit 2) close to (3,0) and land a legal hit on P1's Striker (unit 5);
                 // exact coordinates come from GameFactory's deterministic seed, not a guess.
                 await Send(ra, NetProtocol.Cmd(new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0))));
@@ -113,8 +117,8 @@ namespace HexWars.NetServer
                     fastForwarded = fr.NewState;
                 }
 
-                var freshP0PointsBefore = GameFactory.Build(GameSetup.Default).Player(PlayerId.Player0).Points;
-                var direct = GameEngine.Apply(GameFactory.Build(GameSetup.Default), new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0)));
+                var freshP0PointsBefore = GameFactory.Build(ReplaySetup).Player(PlayerId.Player0).Points;
+                var direct = GameEngine.Apply(GameFactory.Build(ReplaySetup), new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0)));
                 direct = GameEngine.Apply(direct.NewState, new AttackUnit(PlayerId.Player0, 2, 5));
                 var expected = direct.NewState;
 
@@ -124,7 +128,7 @@ namespace HexWars.NetServer
                 bool pointsMatch = fastForwarded.Player(PlayerId.Player0).Points == expected.Player(PlayerId.Player0).Points;
                 bool attackActuallyLanded = expected.Player(PlayerId.Player0).Points > freshP0PointsBefore // bounty proves the hit landed
                     || expected.Player(PlayerId.Player1).UnitsOnBoard.Single(u => u.Id == 5).CurrentHp
-                       < GameFactory.Build(GameSetup.Default).Player(PlayerId.Player1).UnitsOnBoard.Single(u => u.Id == 5).CurrentHp;
+                       < GameFactory.Build(ReplaySetup).Player(PlayerId.Player1).UnitsOnBoard.Single(u => u.Id == 5).CurrentHp;
                 bool reDealReflectsDamage = fastForwardOk && targetPresenceMatches && pointsMatch && attackActuallyLanded;
 
                 await Send(ra2, NetProtocol.Cmd(new EndTurn(PlayerId.Player0)));
@@ -215,7 +219,7 @@ namespace HexWars.NetServer
         internal const string SelfTestProtocolVersion = "2";
 
         /// <summary>
-        /// The same deterministic opening the rest of the repository uses: on seed 7 the Striker of Player0
+        /// The compact replay fixture uses seed 7 so the Striker of Player0
         /// can close on one of Player1 and land a hit, so these three commands are legal and their effect on
         /// the state is real rather than a pass that changes nothing.
         /// </summary>
@@ -537,7 +541,7 @@ namespace HexWars.NetServer
         {
             IReadOnlyList<UnitTemplate> barracks =
                 BarracksWire.Read(BarracksWire.Write(BarracksCatalog.DefaultTemplates));
-            GameState state = GameFactory.Build(GameSetup.Default, barracks, barracks);
+            GameState state = GameFactory.Build(ReplaySetup, barracks, barracks);
 
             for (var i = 0; i < commands; i++)
             {
@@ -682,7 +686,7 @@ namespace HexWars.NetServer
                 [SteamLobbyKeys.Protocol] = SelfTest.SelfTestProtocolVersion,
                 [SteamLobbyKeys.Build] = SelfTest.SelfTestBuildId,
                 [SteamLobbyKeys.Ruleset] = SteamLobbyRules.CustomRuleset,
-                [SteamLobbyKeys.Setup] = GameSetup.Default.ToWire(),
+                [SteamLobbyKeys.Setup] = SelfTest.ReplaySetup.ToWire(),
             };
 
             var members = new[]

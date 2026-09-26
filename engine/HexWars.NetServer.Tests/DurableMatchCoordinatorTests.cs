@@ -379,7 +379,7 @@ namespace HexWars.NetServer.Tests
         {
             await StartTheMatch();
             await Cmd("c0", new MoveUnit(PlayerId.Player0, 2, new HexCoord(3, 0)));
-            await Cmd("c0", new AttackUnit(PlayerId.Player0, 2, 5));
+            await Cmd("c0", new EndTurn(PlayerId.Player0));
             _sink.Clear();
 
             DurableMatchCoordinator.AuthOutcome outcome = await Auth("c0-again", _credential0);
@@ -508,9 +508,10 @@ namespace HexWars.NetServer.Tests
             Assert.That(live.Log.Select(CommandWire.Write), Is.EqualTo(new[] { "M 0 2 3 0" }));
 
             _sink.Clear();
-            await Cmd("c0", new AttackUnit(PlayerId.Player0, 2, 5));
+            var retry = new EndTurn(PlayerId.Player0);
+            await Cmd("c0", retry);
 
-            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { "APPLY A 0 2 5" }));
+            Assert.That(_sink.MessagesFor("c0"), Is.EqualTo(new[] { NetProtocol.Apply(retry) }));
             Assert.That((await _store.LoadJournalAsync(_matchId, Ct))!.Commands.Select(c => c.Sequence),
                 Is.EqualTo(new[] { 1, 2 }));
         }
@@ -720,6 +721,7 @@ namespace HexWars.NetServer.Tests
         public async Task AKillBetweenTheWinningAppendAndTheCompletion_IsHealedByTheNextHandshake()
         {
             (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+            int issuer = (int)played.Commands[^1].Issuer;
 
             // The winning command commits and no attempt to record the win lands. That is exactly the state
             // a process killed in the gap leaves behind: a game the engine calls over and the database calls
@@ -734,7 +736,7 @@ namespace HexWars.NetServer.Tests
                 Is.False, "the command is durable, so the issuer must never be invited to send it again");
             Assert.That(_sink.Closed, Is.EqualTo(new[]
             {
-                ("c0", DurableMatchCoordinator.ResyncCloseStatus,
+                ($"c{issuer}", DurableMatchCoordinator.ResyncCloseStatus,
                     DurableMatchCoordinator.ResyncCloseReason),
             }), "the issuer is disconnected instead, and learns the ending on its reconnect");
 
@@ -757,7 +759,7 @@ namespace HexWars.NetServer.Tests
             _sink.Clear();
 
             DurableMatchCoordinator.AuthOutcome back =
-                await restarted.AuthenticateAsync("c2", _matchId.ToString(), _credential0, Ct);
+                await restarted.AuthenticateAsync("c2", _matchId.ToString(), issuer == 0 ? _credential0 : _credential1, Ct);
 
             Assert.That(back.Ok, Is.True, back.FailCode);
 
@@ -768,7 +770,7 @@ namespace HexWars.NetServer.Tests
 
             Assert.That(_sink.MessagesFor("c2"), Is.EqualTo(new[]
             {
-                "SEAT 0",
+                $"SEAT {issuer}",
                 NetProtocol.Start(ReplayFile.Write(start, played.Commands)),
             }), "the reconnecting seat is fast-forwarded to the position the game ended in");
         }
@@ -1407,6 +1409,8 @@ namespace HexWars.NetServer.Tests
         public async Task ARebuildThatFindsTheGameOver_TellsTheOpponentTooNotJustTheReconnectingSeat()
         {
             (MatchRecord played, GameState start) = await PlayToTheBrinkAsync();
+            int issuer = (int)played.Commands[^1].Issuer;
+            string issuerConnection = $"c{issuer}", opponentConnection = $"c{1 - issuer}";
 
             // The completion COMMITS and its answer is lost, twice. The row is terminal, this host has no
             // way of knowing, and the issuer is disconnected. What must not happen next is the opponent -
@@ -1416,7 +1420,7 @@ namespace HexWars.NetServer.Tests
             _sink.Clear();
             await Cmd(played.Commands[^1]);
 
-            Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EqualTo(new[] { "c0" }));
+            Assert.That(_sink.Closed.Select(c => c.ConnectionId), Is.EqualTo(new[] { issuerConnection }));
             Assert.That((await _store.GetMatchAsync(_matchId, Ct))!.Status, Is.EqualTo(MatchStatus.Completed),
                 "the completion did land; only the answer was lost");
             Assert.That(Live().Stale, Is.True);
@@ -1425,15 +1429,15 @@ namespace HexWars.NetServer.Tests
             // counter is about calls that did not answer, not about rows that did not move.
             AssertOnlyCompletionsFailed(2);
 
-            // c1 never went away. c0 comes back on a new socket.
+            // The opponent stays connected; the actual final issuer returns on a new socket.
             _sink.Clear();
-            DurableMatchCoordinator.AuthOutcome back = await Auth("c0-again", _credential0);
+            DurableMatchCoordinator.AuthOutcome back = await Auth("issuer-again", issuer == 0 ? _credential0 : _credential1);
             Assert.That(back.Ok, Is.True, back.FailCode);
 
             string terminal = NetProtocol.Start(ReplayFile.Write(start, played.Commands));
-            Assert.That(_sink.MessagesFor("c1"), Is.EqualTo(new[] { terminal }),
+            Assert.That(_sink.MessagesFor(opponentConnection), Is.EqualTo(new[] { terminal }),
                 "the seat that stayed connected is dealt the ending it never heard about");
-            Assert.That(_sink.MessagesFor("c0-again"), Is.EqualTo(new[] { "SEAT 0", terminal }));
+            Assert.That(_sink.MessagesFor("issuer-again"), Is.EqualTo(new[] { $"SEAT {issuer}", terminal }));
 
             Assert.That(ReplayFile.Read(terminal["START ".Length..]).Start, Is.Not.Null);
             Assert.That(Live().State!.IsGameOver, Is.True);

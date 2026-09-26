@@ -25,8 +25,8 @@ namespace HexWars.NetServer.Tests
     /// sockets, its coordinator and its in-memory projection all go with it - and host B is built from
     /// nothing but the rows A left behind.
     ///
-    /// The scripted game is the deterministic default-seed sequence the rest of this repository uses. The
-    /// lobby advertises the custom ruleset carrying GameSetup.Default rather than quick-v1, because the
+    /// The scripted game is the deterministic compact replay sequence the rest of this repository uses. The
+    /// lobby advertises the custom ruleset carrying SelfTest.ReplaySetup rather than quick-v1, because the
     /// legality of the opening move is a fact about seed 7 and the quick ruleset pins a different seed.
     /// </summary>
     [TestFixture]
@@ -40,7 +40,7 @@ namespace HexWars.NetServer.Tests
         const string GuestTicketAfterRestart = "b5f60718";
 
         /// <summary>
-        /// Five legal commands from the default start state, in order.
+        /// Five legal commands from the explicit compact start state, in order.
         ///
         /// The first two are the pair SelfTest and MatchJournalReplayTests both use: on seed 7 the
         /// deterministic placement puts the Striker of Player0 within reach of one of Player1, so the move
@@ -66,7 +66,7 @@ namespace HexWars.NetServer.Tests
         // ---- hosts ------------------------------------------------------------
 
         /// <summary>
-        /// A host over the shared Postgres whose lobby advertises the default setup.
+        /// A host over the shared Postgres whose lobby advertises the compact replay setup.
         /// </summary>
         /// <param name="reset">False for the host that takes over: the database it inherits is the point.</param>
         static async Task<SteamServerFactory> HostAsync(bool reset)
@@ -74,7 +74,7 @@ namespace HexWars.NetServer.Tests
             SteamServerFactory factory = await SteamServerFactory.PostgresAsync(reset);
 
             factory.Steam.Lobbies[LobbyId] = FakeSteamWebApiClient.ReadyLobby(
-                ruleset: SteamLobbyRules.CustomRuleset, setupWire: GameSetup.Default.ToWire());
+                ruleset: SteamLobbyRules.CustomRuleset, setupWire: SelfTest.ReplaySetup.ToWire());
 
             factory.Steam.Identify(OwnerTicketAfterRestart, FakeSteamWebApiClient.OwnerSteamId);
             factory.Steam.Identify(GuestTicketAfterRestart, FakeSteamWebApiClient.GuestSteamId);
@@ -201,7 +201,7 @@ namespace HexWars.NetServer.Tests
         /// </summary>
         static string DirectReplayText(int commands)
         {
-            GameState state = GameFactory.Build(GameSetup.Default, Barracks, Barracks);
+            GameState state = GameFactory.Build(SelfTest.ReplaySetup, Barracks, Barracks);
 
             for (var i = 0; i < commands; i++)
             {

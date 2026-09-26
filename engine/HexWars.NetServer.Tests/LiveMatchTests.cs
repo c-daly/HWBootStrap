@@ -25,10 +25,10 @@ namespace HexWars.NetServer.Tests
         static readonly Command ThenAttack = new AttackUnit(PlayerId.Player0, 2, 5);
 
         static GameState FreshStart() =>
-            GameFactory.Build(GameSetup.Default, BarracksCatalog.DefaultTemplates, BarracksCatalog.DefaultTemplates);
+            GameFactory.Build(SelfTest.ReplaySetup, BarracksCatalog.DefaultTemplates, BarracksCatalog.DefaultTemplates);
 
         static PersistedMatch Row(MatchStatus status, string? startReplay) => new(
-            MatchId, "109775240000000042", status, GameSetup.Default.ToWire(), startReplay,
+            MatchId, "109775240000000042", status, SelfTest.ReplaySetup.ToWire(), startReplay,
             "hexwars-engine/1", 2, "test-build", Begin, startReplay is null ? null : Begin,
             null, Begin, null);
 

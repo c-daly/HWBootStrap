@@ -1,0 +1,32 @@
+# Browser deployment only. On web-main this is also the root render.yaml.
+# The main branch retains the separate Steam/Postgres blueprint in render.yaml.
+# Existing service plan and region are left unchanged; no database is provisioned here.
+# Reference: https://render.com/docs/blueprint-spec
+services:
+  - type: web
+    name: hwbootstrap
+    runtime: docker
+    branch: web-main
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    numInstances: 1
+    healthCheckPath: /health/ready
+    autoDeployTrigger: "off"
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: INCLUDE_WEBGL
+        value: "true"
+      - key: LOBBY_PROVIDER
+        value: Legacy
+      - key: ASPNETCORE_ENVIRONMENT
+        value: Production
+      - key: DOTNET_HOSTBUILDER__RELOADCONFIGONCHANGE
+        value: "false"
+      - key: ALLOWED_WEB_ORIGINS
+        value: https://hwbootstrap.onrender.com
+      - key: MATCH_PUBLIC_BASE_URL
+        value: https://hwbootstrap.onrender.com
+      - key: MATCH_TRUST_FORWARDED_HEADERS
+        value: "true"
+      - key: MATCH_TRUST_ALL_PROXIES
+        value: "true"

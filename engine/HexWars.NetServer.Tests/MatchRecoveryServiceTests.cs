@@ -59,7 +59,7 @@ namespace HexWars.NetServer.Tests
         // ---- fixtures --------------------------------------------------------
 
         static GameState FreshStart() =>
-            GameFactory.Build(GameSetup.Default, BarracksCatalog.DefaultTemplates, BarracksCatalog.DefaultTemplates);
+            GameFactory.Build(SelfTest.ReplaySetup, BarracksCatalog.DefaultTemplates, BarracksCatalog.DefaultTemplates);
 
         static string FreshStartReplay() => ReplayFile.Write(FreshStart(), Array.Empty<Command>());
 
@@ -69,7 +69,7 @@ namespace HexWars.NetServer.Tests
             string? startReplay,
             string engineVersion = "hexwars-engine/1",
             int protocolVersion = 2) => new(
-            matchId, LobbyId, status, GameSetup.Default.ToWire(), startReplay, engineVersion, protocolVersion,
+            matchId, LobbyId, status, SelfTest.ReplaySetup.ToWire(), startReplay, engineVersion, protocolVersion,
             "test-build", Begin, startReplay is null ? null : Begin, null, Begin, null);
 
         static PersistedPlayer Player(Guid matchId, int seat) =>
@@ -354,7 +354,7 @@ namespace HexWars.NetServer.Tests
         static async Task<Guid> SeedAnOpenMatchAsync(InMemoryMatchStore store)
         {
             CreateMatchResult created = await store.CreateMatchForLobbyAsync(new CreateMatchRequest(
-                LobbyId, GameSetup.Default.ToWire(), EngineContract.Version, ProtocolContract.Version,
+                LobbyId, SelfTest.ReplaySetup.ToWire(), EngineContract.Version, ProtocolContract.Version,
                 "test-build", new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
 
             Assert.That(
@@ -371,7 +371,7 @@ namespace HexWars.NetServer.Tests
             InMemoryMatchStore store, bool dropLast = false)
         {
             CreateMatchResult created = await store.CreateMatchForLobbyAsync(new CreateMatchRequest(
-                LobbyId, GameSetup.Default.ToWire(), EngineContract.Version, ProtocolContract.Version,
+                LobbyId, SelfTest.ReplaySetup.ToWire(), EngineContract.Version, ProtocolContract.Version,
                 "test-build", new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
 
             Guid matchId = created.Match.MatchId;
@@ -876,7 +876,7 @@ namespace HexWars.NetServer.Tests
                     NullLogger<MatchCredentialService>.Instance);
 
                 CreateMatchResult created = await store.CreateMatchForLobbyAsync(new CreateMatchRequest(
-                    LobbyId, GameSetup.Default.ToWire(), EngineContract.Version, 2, "test-build",
+                    LobbyId, SelfTest.ReplaySetup.ToWire(), EngineContract.Version, 2, "test-build",
                     new[] { (Seat0Steam, 0), (Seat1Steam, 1) }, Begin), Ct);
 
                 Guid matchId = created.Match.MatchId;
