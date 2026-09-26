@@ -25,6 +25,11 @@ namespace HexWars.NetServer.Hosting
         /// </summary>
         public const long MaxRequestBodyBytes = 16 * 1024;
 
+        // Kestrel counts HTTP/1 chunk framing as well as payload. Allow even one-byte chunks
+        // ("1\r\nx\r\n" per payload byte, plus the final "0\r\n\r\n") while retaining a wire cap.
+        // The application probe still accepts at most MaxRequestBodyBytes of decoded content.
+        public const long MaxChunkedRequestBytes = 6 * MaxRequestBodyBytes + 5;
+
         public const int MaxConcurrentConnections = 2000;
 
         public const int MaxConcurrentUpgradedConnections = 1000;
@@ -33,11 +38,23 @@ namespace HexWars.NetServer.Hosting
 
         public static readonly TimeSpan KeepAliveTimeout = TimeSpan.FromSeconds(120);
 
-        public static readonly TimeSpan BodyReadTimeout = TimeSpan.FromSeconds(5);
+        // A maximum-size upload at Kestrel's minimum rate, plus its initial grace period.
+        // This bounds total work without rejecting a progressing upload after only five seconds.
+        public const int MinimumBodyBytesPerSecond = 240;
+        public static readonly TimeSpan BodyReadGracePeriod = TimeSpan.FromSeconds(5);
+        public static readonly TimeSpan BodyReadTimeout = BodyReadGracePeriod
+            + TimeSpan.FromSeconds(Math.Ceiling((double)MaxRequestBodyBytes / MinimumBodyBytesPerSecond));
 
         /// <summary>Says the size was the problem and nothing else. A caller that sent a large body either
         /// has a bug or is probing, and neither is helped by a more specific sentence.</summary>
         public const string TooLargeMessage = "That request was too large.";
+
+        // Opt in only handlers that actually read a body. A POST method alone is not evidence of a
+        // consumer: routing may have selected a 405 rejection, or there may be no endpoint at all.
+        sealed class BodyConsumerMetadata { }
+
+        public static RouteHandlerBuilder WithHexWarsRequestBody(this RouteHandlerBuilder endpoint) =>
+            endpoint.WithMetadata(new BodyConsumerMetadata());
 
         /// <summary>The Kestrel side: the limits the server itself enforces, before any middleware runs.</summary>
         public static void Configure(KestrelServerOptions kestrel)
@@ -49,6 +66,8 @@ namespace HexWars.NetServer.Hosting
             kestrel.Limits.MaxConcurrentUpgradedConnections = MaxConcurrentUpgradedConnections;
             kestrel.Limits.RequestHeadersTimeout = RequestHeadersTimeout;
             kestrel.Limits.KeepAliveTimeout = KeepAliveTimeout;
+            kestrel.Limits.MinRequestBodyDataRate = new MinDataRate(
+                MinimumBodyBytesPerSecond, BodyReadGracePeriod);
 
             // The server header names the software and its version to everyone who asks, including the
             // people writing the scanner. It buys nothing.
@@ -58,15 +77,15 @@ namespace HexWars.NetServer.Hosting
         /// <summary>
         /// Refuses an over-large body up front, with the error shape every other refusal uses.
         ///
-        /// Kestrel enforces the same bound, but only when the application READS that far, and this one never
+        /// Kestrel enforces its bound only when the application READS that far, and this one never
         /// does: the endpoints stop at their own, much tighter JSON cap. So a body that simply omits
         /// Content-Length would sail past the transport limit and be answered 400 by the JSON reader, which
         /// is the wrong answer and, worse, means the documented 16 KB ceiling was never actually a ceiling.
         ///
         /// A declared length is answered from the header, without a byte being pulled off the socket. An
-        /// undeclared one is measured within five seconds: the body is buffered and read one byte past
-        /// the cap, then rewound for the endpoint. The independent deadline also bounds slow bodies
-        /// on public GET routes. Requests without body framing, including normal upgrades, pay nothing.
+        /// undeclared body for an explicitly marked consumer is measured within a window sufficient to
+        /// send the maximum body at the transport minimum rate, then rewound for the endpoint. Other
+        /// routes have their undeclared bodies rejected without reading them.
         /// </summary>
         public static IApplicationBuilder UseHexWarsRequestLimits(this IApplicationBuilder app)
         {
@@ -95,7 +114,18 @@ namespace HexWars.NetServer.Hosting
                 }
                 else if (CarriesAnUndeclaredBody(context.Request))
                 {
-                    using var deadline = new CancellationTokenSource(BodyReadTimeout);
+                    if (context.GetEndpoint()?.Metadata.GetMetadata<BodyConsumerMetadata>() is null)
+                    {
+                        context.Response.Headers.Connection = "close";
+                        await RefuseAsync(context, StatusCodes.Status400BadRequest, ApiErrors.InvalidRequestMessage)
+                            .ConfigureAwait(false);
+                        return;
+                    }
+                    if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } transport)
+                        transport.MaxRequestBodySize = MaxChunkedRequestBytes;
+
+                    TimeProvider time = context.RequestServices.GetRequiredService<TimeProvider>();
+                    using var deadline = new CancellationTokenSource(BodyReadTimeout, time);
                     using var read = CancellationTokenSource.CreateLinkedTokenSource(
                         deadline.Token, context.RequestAborted);
                     try
@@ -136,7 +166,7 @@ namespace HexWars.NetServer.Hosting
         /// handled by the caller, or a Transfer-Encoding, with the server feature as the backstop.
         ///
         /// A websocket upgrade is a GET with neither and is untouched, and so is the legacy /ws route for
-        /// the same reason. An upgrade that DOES carry a body is measured like anything else, because at
+        /// the same reason. An upgrade that DOES carry a body is refused before the handshake, because at
         /// that point it is not the handshake it is presenting itself as.
         /// </summary>
         static bool CarriesAnUndeclaredBody(HttpRequest request)
@@ -177,9 +207,8 @@ namespace HexWars.NetServer.Hosting
             catch (Microsoft.AspNetCore.Http.BadHttpRequestException failure)
                 when (failure.StatusCode == StatusCodes.Status413PayloadTooLarge)
             {
-                // Kestrel enforces the same ceiling and reaches it first, one byte earlier than this probe
-                // does. Its own answer is a 413 with an exception page rather than the error body every
-                // other refusal on this server uses, so the exception is caught and answered here instead.
+                // Excessive framing can hit Kestrel's wire cap before the decoded probe fills.
+                // Keep the same error shape as a payload that exceeds the application cap.
                 return true;
             }
 

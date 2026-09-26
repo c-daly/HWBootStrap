@@ -63,7 +63,7 @@ namespace HexWars.NetServer.Operations
 
         CancellationTokenRegistration _stopping;
         int _quiesced;
-        int _saidGoodbye;
+        Task? _goodbye;
 
         public GracefulShutdownService(
             ServiceReadiness readiness,
@@ -118,17 +118,19 @@ namespace HexWars.NetServer.Operations
         /// work started there runs unobserved and unbounded, which is how a wedged store used to carry
         /// shutdown past the platform kill deadline.
         /// </summary>
-        public async Task StopAsync(CancellationToken cancellationToken)
+        public Task StopAsync(CancellationToken cancellationToken)
+        {
+            // Concurrent host stop paths must await the same drain and summary. Returning
+            // immediately from the second call can let the process exit during the first.
+            lock (_gate) return _goodbye ??= StopCoreAsync(cancellationToken);
+        }
+
+        async Task StopCoreAsync(CancellationToken cancellationToken)
         {
             _stopping.Dispose();
 
             // A host stopped some way that did not raise ApplicationStopping still owes its players this.
             Quiesce();
-
-            // Once, however many times the host asks. A second pass would spend the budget again and send
-            // a second SERVER RESTART to clients that are already closing, and the interesting case - a
-            // host disposed after it was stopped - takes this path twice by construction.
-            if (Interlocked.Exchange(ref _saidGoodbye, 1) != 0) return;
 
             long started = _time.GetTimestamp();
             int matches = _coordinator?.LiveMatchCount ?? 0;

@@ -338,8 +338,9 @@ namespace HexWars.NetServer.Tests
             {
                 var host = fixture.Services.GetRequiredService<IHost>();
 
-                await host.StopAsync(CancellationToken.None).WaitAsync(Deadline);
-                await host.StopAsync(CancellationToken.None).WaitAsync(Deadline);
+                Task first = host.StopAsync(CancellationToken.None);
+                Task second = host.StopAsync(CancellationToken.None);
+                await Task.WhenAll(first, second).WaitAsync(Deadline);
 
                 foreach (DurableFlowClient seat in new[] { zero, one })
                 {
