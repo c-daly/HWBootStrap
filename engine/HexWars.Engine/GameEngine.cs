@@ -27,12 +27,16 @@ namespace HexWars.Engine
             // One-action turn policies auto-end the turn after a single non-EndTurn action.
             // DeleteTemplate is an administrative barracks edit, not a game move — it must never
             // consume a turn action or trigger an auto-end (see DeleteTemplateTests).
-            if (!newState.IsGameOver && !(command is EndTurn) && !(command is DeleteTemplate)
+            if (!newState.IsGameOver && !(command is EndTurn) && !(command is DeleteTemplate) && !(command is UndoMove)
                 && (newState.Config.TurnPolicy.AutoEndTurnAfter(command, newState)
                     || (newState.Config.TerritoryMode && newState.Config.ClaimEndsTurn && command is CaptureHex)))
             {
                 newState = Finalize(ApplyEndTurn(newState, new EndTurn(command.Issuer)).NewState);
             }
+
+            if (command is MoveUnit move && !state.Config.FogOfWar && !newState.IsGameOver
+                && newState.ActivePlayer == state.ActivePlayer && newState.Round == state.Round)
+                newState = newState.RememberMove(state, move.UnitId);
 
             return Result.Ok(newState);
         }
@@ -47,6 +51,10 @@ namespace HexWars.Engine
                 case DeployGenerator c: return ApplyDeployGenerator(state, c);
                 case DeployUnit c: return ApplyDeployUnit(state, c);
                 case MoveUnit c: return ApplyMoveUnit(state, c);
+                case UndoMove _:
+                    return state.BeforeLastMove != null && !state.Config.FogOfWar
+                        ? Result.Ok(state.BeforeLastMove.Clone())
+                        : Result.Reject(state, RejectionReason.NoMoveToUndo);
                 case AttackUnit c: return ApplyAttackUnit(state, c);
                 case CaptureHex c: return ApplyCaptureHex(state, c);
                 case BuildGenerator c: return ApplyBuildGenerator(state, c);

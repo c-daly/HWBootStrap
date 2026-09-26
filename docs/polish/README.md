@@ -2,7 +2,9 @@
 
 The [implemented tactical interface](gameplay-visual-language.md) gives the board more space,
 keeps the squad compact, and places full stats and combat arithmetic behind **Unit details**.
-A single click previews destinations and attacks; a double-click or the panel button confirms. The eight existing appearances now use recognizable
+The [latest control pass](smooth-movement.md) makes movement a single click with **Undo move**,
+keeps current targets visible during route previews, and lets squad cards skip spent units.
+Attacks retain a damage preview, with no double-click timing requirement. The eight existing appearances now use recognizable
 machine forms, and the dark palette and H-in-hex mark remain.
 
 The latest pass adds distinct team hulls and portraits, mirrored backline starts, and automatic

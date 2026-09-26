@@ -108,6 +108,65 @@ namespace HexWars.Presentation.PlayModeTests
             yield return null;
         }
 
+        [UnityTest]
+        public IEnumerator OnlineUndoWaitsForTheServerAndReplayedMovesRestoreTheUndoOption()
+        {
+            var start = _game.State;
+            var move = new MoveUnit(PlayerId.Player0, 1, new HexCoord(1, 1));
+            EnableDeferredNetworkSubmission();
+            _game.OnNetStart(ReplayFile.Write(start, new Command[] { move }));
+            Assert.That(_input.CanUndoMove, Is.True);
+            var moved = _game.State;
+            Assert.That(_input.UndoLastMove(), Is.True);
+            Assert.That(_input.AwaitingServer, Is.True);
+            Assert.That(_game.State, Is.SameAs(moved), "Undo must not rewind locally before acknowledgement.");
+            Assert.That(_input.UndoLastMove(), Is.False);
+            _game.OnNetApply(new UndoMove(PlayerId.Player0));
+            _game.Presenter.FastForward();
+            Assert.That(_input.AwaitingServer, Is.False);
+            Assert.That(_game.State.Player(PlayerId.Player0).UnitsOnBoard[0].Cell, Is.EqualTo(new HexCoord(0, 1)));
+            Assert.That(_game.State.MovementSpent, Is.Empty);
+            Assert.That(_input.CanUndoMove, Is.False);
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator ASpentSquadCardSelectsAReadyMatchingUnitButBoardSelectionStaysExact()
+        {
+            var s = _game.State;
+            var original = s.Player(PlayerId.Player0).UnitsOnBoard[0];
+            var ready = new Unit(3, original.Owner, original.Stats, new HexCoord(1, 0), 0, original.Name, original.ArtId);
+            var players = new[] { new PlayerState(original.Owner, 30, unitsOnBoard: new[] { original, ready }), s.Players[1] };
+            typeof(GameBootstrap).GetProperty("State").SetValue(_game, new GameState(s.Board, s.Config, players,
+                PlayerId.Player0, 1, 4, attackedUnitIds: new[] { 1 }));
+            _host.GetComponent<BoardRenderer>().RenderEntities(_game.State);
+            _host.AddComponent<TacticalHud>(); yield return null; yield return null;
+            _host.GetComponentsInChildren<Button>().Single(b => b.name == "Select unit 1").onClick.Invoke();
+            Assert.That(_input.SelectedId, Is.EqualTo(3));
+            Assert.That(_input.Mode, Is.EqualTo(UnitInputController.Intent.Move));
+            _input.SelectById(1); Assert.That(_input.SelectedId, Is.EqualTo(1));
+            typeof(GameBootstrap).GetProperty("State").SetValue(_game, new GameState(s.Board, s.Config, players,
+                PlayerId.Player0, 1, 4, attackedUnitIds: new[] { 1, 3 }));
+            _input.SelectReadyUnitOfKind(1); Assert.That(_input.SelectedId, Is.EqualTo(1), "Spent pieces remain inspectable when none can act.");
+            yield return null;
+        }
+
+        [UnityTest]
+        public IEnumerator CardSkipsAMatchingUnitWithNeitherMovementNorAnAttackAvailable()
+        {
+            var s = _game.State;
+            var stats = new UnitStats(4, 2, 0, 3, 1, 1, 1, 6, 1);
+            var first = new Unit(1, PlayerId.Player0, stats, new HexCoord(0, 1), 0, "Runner");
+            var second = new Unit(3, PlayerId.Player0, stats, new HexCoord(1, 0), 0, "Runner");
+            var players = new[] { new PlayerState(PlayerId.Player0, 30, unitsOnBoard: new[] { first, second }), s.Players[1] };
+            typeof(GameBootstrap).GetProperty("State").SetValue(_game, new GameState(s.Board, s.Config, players,
+                PlayerId.Player0, 1, 4, movedUnitIds: new[] { 1 }, movementSpent: new Dictionary<int,(int H,int V)> { [1]=(3,0) }));
+            _host.GetComponent<BoardRenderer>().RenderEntities(_game.State);
+            _input.SelectReadyUnitOfKind(1);
+            Assert.That(_input.SelectedId, Is.EqualTo(3));
+            yield return null;
+        }
+
         void SetOpponentTurn(PlayerId human)
         {
             var state=_game.State;
@@ -154,7 +213,9 @@ namespace HexWars.Presentation.PlayModeTests
                 GameConfig.Default(territoryMode:true,claimEndsTurn:false,buildAnywhere:true),state.Players,
                 state.ActivePlayer,state.Round,state.NextEntityId));
             var hud=_host.AddComponent<TacticalHud>();yield return null;yield return null;
-            _input.SelectById(1);RefreshTerritoryAction();
+            _input.SelectById(1);
+            Assert.That(_input.PreviewAttack(2),Is.True); // Attack confirmation still occupies its footer slot.
+            RefreshTerritoryAction();
             // RefreshTerritoryAction can activate this graphic for the first time in a headless
             // input fixture. Raycast only after its canvas has rendered and assigned draw depth.
             yield return null;

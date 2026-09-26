@@ -1,0 +1,149 @@
+{
+  "date": "2026-09-26",
+  "sourceCommit": "35e5ea90cf2e384949fbabd76a18940c1fd7cc80",
+  "branch": "codex/smooth-movement-20260926",
+  "unityVersion": "6000.5.0f1",
+  "webgl": {
+    "sourceCommit": "35e5ea90cf2e384949fbabd76a18940c1fd7cc80",
+    "cacheKey": "159b83e6",
+    "payloads": [
+      {
+        "name": "WebGL.data.unityweb",
+        "sha256": "226ea1ed4d171832046b00ce15a726f2cba390f39bde57c64d63d409cb04e830",
+        "bytes": 10747998
+      },
+      {
+        "name": "WebGL.framework.js.unityweb",
+        "sha256": "048ddbde467e3b493fcb64f9f59aff5ca448d8d65f0712734badd76ab3af4092",
+        "bytes": 80570
+      },
+      {
+        "name": "WebGL.loader.js",
+        "sha256": "63e91fccfa6440c2457945b0d24457fdc646811f4603f597fec106ab92ab1582",
+        "bytes": 48105
+      },
+      {
+        "name": "WebGL.wasm.unityweb",
+        "sha256": "c1191aa6e0dad2f30cb6aa716a3cb2c8ed79a744d3a51becd25a07cfe9198f7a",
+        "bytes": 16698387
+      }
+    ],
+    "stagedMatchesBuild": true
+  },
+  "tests": {
+    "engine": {
+      "total": 1192,
+      "passed": 1192,
+      "failed": 0
+    },
+    "editMode": {
+      "total": 671,
+      "passed": 671,
+      "failed": 0,
+      "durationSeconds": 6.1850709
+    },
+    "playMode": {
+      "total": 48,
+      "passed": 48,
+      "failed": 0,
+      "durationSeconds": 11.2190884
+    }
+  },
+  "coplay": {
+    "editor": "{\"playMode\":false,\"selectedGameObjects\":[],\"hasCompilationErrors\":false,\"activeAssetPath\":\"Assets/Readme.asset\",\"sceneViewIs2D\":false}",
+    "compile": "No compile errors",
+    "logs": ""
+  },
+  "transport": {
+    "result": "Passed",
+    "runtime": "8.0.28",
+    "twoRealWebSocketClients": true,
+    "privateRoom": true,
+    "moveAndUndoBroadcasts": true,
+    "positionAndBudgetsRestored": true,
+    "forgedSeatRejected": true,
+    "reconnectRetainsUndo": true,
+    "undoAfterHandoffRejected": true
+  },
+  "browser": {
+    "url": "http://127.0.0.1:8201/",
+    "backendRuntime": "Linux .NET 10.0.12 with explicit major roll-forward; the separate transport check used Windows .NET 8.0.28",
+    "contexts": 2,
+    "cacheKeys": [
+      "159b83e6",
+      "159b83e6"
+    ],
+    "identicalStartReplaySha256": "5e16f703b5342fb8d3a4d7b91d565a461391a38eef4c67c720eda427148ef6c2",
+    "hostCommands": [
+      "CMD M 0 1 2 1",
+      "CMD UNDO 0",
+      "CMD A 0 1 4"
+    ],
+    "identicalBroadcasts": true,
+    "errors": [],
+    "failedRequests": [],
+    "warnings": [
+      "Additional Lights Cookie Format (GrayscaleHigh) is not supported by the platform. Falling back to 32-bit format (RGBA8 UNorm)",
+      "Manual synchronization of Unity Application.persistentDataPath via JS_FileSystem_Sync() is deprecated and will be later removed in a future Unity version. The persistent data directory will be automatically synchronized instead on file modification. Pass config.autoSyncPersistentDataPath = true; to configuration in createUnityInstance() to opt in to the new behavior.",
+      "Shader 'Hidden/Universal Render Pipeline/Edge Adaptive Spatial Upsampling' is not supported (in 'Blit FSR Upscaling'). PostProcessing render passes will not execute."
+    ],
+    "observed": [
+      "Single click moves a piece without a confirmation button.",
+      "Undo button restores position, both movement budgets and action allowance in both clients.",
+      "IN RANGE remains visible in movement mode and while hovering a route.",
+      "First enemy click previews damage without sending a command; a second click more than a second later sends one attack.",
+      "After firing, clicking the spent first Sniper card selects the ready second Sniper; it sends no command.",
+      "HUD inspected at 1600x900 and 1280x720; H mark remains visible."
+    ],
+    "keyboardAndAdditionalRangeCheck": {
+      "mode": "Hotseat",
+      "key": "Ctrl+Z",
+      "syntheticHoldMilliseconds": 180,
+      "result": "Passed",
+      "restored": "Brute returned from Cell 2,1 (2 move / 1 climb) to Cell 1,1 (3 move / 2 climb).",
+      "range": "Selected Sniper shows two IN RANGE targets and an additional AFTER MOVE target during hover.",
+      "localReceipt": "Library/SmoothFlow/browser-keyboard-checks.json"
+    }
+  },
+  "earlierRuns": [
+    {
+      "check": "Unity PlayMode",
+      "result": "47 passed, 1 failed",
+      "cause": "The territory footer fixture searched for the Move confirmation button that direct movement now hides. The fixture now previews an attack and retains the same footer geometry/raycast assertions; the full rerun passed 48/48.",
+      "localReceipt": "Library/SmoothFlow/before-footer-check-play-tests.xml"
+    },
+    {
+      "check": "Production transport with private-room assertion",
+      "result": "One connection attempt failed before either WebSocket reached the server. Earlier and subsequent runs passed.",
+      "cause": "Unproven. The server log showed readiness HTTP 200 and no WebSocket request; harness error capture was improved before repeating the same product binaries. This is retained as an unresolved transient test connection failure.",
+      "localReceipt": "Library/SmoothFlow/failed-private-check-transport-server.log"
+    },
+    {
+      "check": "Browser keyboard harness",
+      "result": "A zero-duration synthetic Ctrl+Z press did not send a command.",
+      "cause": "The 180 ms synthetic hold succeeded without a product-code change. Setup fields also required waiting for Unity to focus the native input before sending select-all. The initial zero-duration harness is retained as insufficient keyboard evidence."
+    }
+  ],
+  "limits": [
+    "No production deployment or merge.",
+    "No native Windows player built during this pass.",
+    "Only the latest move can be undone, before an accepted non-move action or turn handoff; fog disables undo.",
+    "Command+Z on macOS is implemented but not exercised on macOS.",
+    "No balance or long-session enjoyability study is claimed."
+  ],
+  "localReceipts": [
+    "Library/SmoothFlow/engine-full.trx",
+    "Library/SmoothFlow/edit-tests.xml",
+    "Library/SmoothFlow/play-tests.xml",
+    "Library/SmoothFlow/webgl-build.log",
+    "Library/SmoothFlow/browser-checks.json",
+    "Library/SmoothFlow/transport-check.log"
+  ],
+  "screenshots": [
+    "smooth-movement-1280.png",
+    "smooth-movement-moved.png",
+    "smooth-movement-range.png",
+    "smooth-movement-ready-card.png",
+    "smooth-movement-undone.png"
+  ]
+}

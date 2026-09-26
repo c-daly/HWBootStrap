@@ -230,6 +230,18 @@ namespace HexWars.Presentation
             switch (item.Cmd)
             {
                 case MoveUnit mv: yield return PlayMove(item, mv, viewer); break;
+                case UndoMove undo:
+                {
+                    int id = item.Prev.LastMovedUnitId;
+                    var moved = FindUnit(item.Prev, undo.Issuer, id);
+                    var original = FindUnit(item.Next, undo.Issuer, id);
+                    if (!moved.HasValue || !original.HasValue) break;
+                    var path = new List<HexCoord>(MovementPresentationRoute.Resolve(item.Next,
+                        new MoveUnit(undo.Issuer, id, moved.Value.Cell)));
+                    path.Reverse();
+                    yield return PlayMove(item, new MoveUnit(undo.Issuer, id, original.Value.Cell), viewer, path);
+                    break;
+                }
                 case AttackUnit atk: yield return PlayAttack(item, atk, viewer); break;
                 case DeployUnit dep: yield return PlayDeploy(item, dep, viewer); break;
                 case CaptureHex cap: yield return PlayClaim(item, cap, viewer); break;
@@ -239,9 +251,9 @@ namespace HexWars.Presentation
             }
         }
 
-        IEnumerator PlayMove(Item item, MoveUnit mv, PlayerId? viewer)
+        IEnumerator PlayMove(Item item, MoveUnit mv, PlayerId? viewer, IReadOnlyList<HexCoord> reversedPath = null)
         {
-            var path = MovementPresentationRoute.Resolve(item.Prev, mv);
+            var path = reversedPath ?? MovementPresentationRoute.Resolve(item.Prev, mv);
             if (path.Count == 0) yield break;
             // own units are always fully visible to their viewer; enemy paths are clipped to vision
             bool ownAction = !viewer.HasValue || mv.Issuer == viewer.Value;
