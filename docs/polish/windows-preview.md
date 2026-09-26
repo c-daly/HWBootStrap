@@ -11,7 +11,7 @@ Biome decoration is hidden while its rules are off. Enable **Place starting unit
 each army on empty highlighted hexes, then choose **Ready**. See the
 [latest validation receipt](evidence/polish-integration-checks.json).
 
-The [sound pass](sound-direction.md) adds quieter effects and fading background audio.
+The [tabletop sound pass](tabletop-audio.md) adds quieter effects and fading background audio.
 Adjust **Master**, **Effects**, **Ambience** and **Music** independently in **Menu**.
 
 The [integration review](integration-review.md) records the final audio, Escape and coaching fixes.

@@ -13,7 +13,7 @@ namespace HexWars.Presentation.PlayModeTests
     {
         readonly string[] _keys = { "HexWars.Volume", "HexWars.EffectsVolume", "HexWars.AtmosphereVolume", "HexWars.MusicVolume" };
         readonly Dictionary<string, float?> _before = new Dictionary<string, float?>();
-        bool _hadMute, _wasMuted, _demoMuted; float _listenerVolume;
+        bool _hadMute, _wasMuted, _demoMuted, _hadGameMusic, _gameMusic; float _listenerVolume;
         GameObject _host; SoundMixDriver _driver; AudioClip _longClip;
         SoundMixDriver _previousDriver;
         static readonly FieldInfo DriverField = typeof(SoundManager).GetField("_driver", BindingFlags.Static | BindingFlags.NonPublic);
@@ -22,6 +22,8 @@ namespace HexWars.Presentation.PlayModeTests
         {
             _listenerVolume=AudioListener.volume; _hadMute=PlayerPrefs.HasKey("HexWars.MuteAll");
             _wasMuted=SoundSettings.MuteAll; _demoMuted=SoundManager.Muted;
+            _hadGameMusic=PlayerPrefs.HasKey("HexWars.MusicDuringGame"); _gameMusic=SoundSettings.MusicDuringGame;
+            PlayerPrefs.DeleteKey("HexWars.MusicDuringGame");
             foreach(var key in _keys) _before[key]=PlayerPrefs.HasKey(key)?PlayerPrefs.GetFloat(key):(float?)null;
             SoundSettings.MuteAll=false;SoundSettings.Volume=0;SoundSettings.Effects=1;SoundSettings.Music=.5f;SoundSettings.Atmosphere=.5f;
             _host=new GameObject("Sound mix test");_driver=_host.AddComponent<SoundMixDriver>();
@@ -37,11 +39,90 @@ namespace HexWars.Presentation.PlayModeTests
             Object.Destroy(_host);Object.Destroy(_longClip);
             foreach(var pair in _before)if(pair.Value.HasValue)PlayerPrefs.SetFloat(pair.Key,pair.Value.Value);else PlayerPrefs.DeleteKey(pair.Key);
             if(_hadMute)PlayerPrefs.SetInt("HexWars.MuteAll",_wasMuted?1:0);else PlayerPrefs.DeleteKey("HexWars.MuteAll");
+            if(_hadGameMusic)PlayerPrefs.SetInt("HexWars.MusicDuringGame",_gameMusic?1:0);else PlayerPrefs.DeleteKey("HexWars.MusicDuringGame");
             PlayerPrefs.Save();SoundManager.Muted=_demoMuted;AudioListener.volume=_listenerVolume;
             yield return null;
         }
         void Tick(float dt) => typeof(SoundMixDriver).GetMethod("Tick",BindingFlags.Instance|BindingFlags.NonPublic).Invoke(_driver,new object[]{dt});
         AudioSource Source(string name)=>_host.transform.Find(name).GetComponent<AudioSource>();
+
+        [UnityTest]
+        public IEnumerator MusicContinuesAtTheSamePositionAcrossTitleAndMatchWhenEnabled()
+        {
+            SoundSettings.MusicDuringGame = true;
+            SoundManager.StartTitleMusic(); Tick(1); yield return null;
+            var music = Source("Music");
+            Assert.That(music.isPlaying, Is.True);
+            var clip = music.clip;
+            music.time = 8f;
+            SoundManager.StopTitleMusic(); Tick(3);
+            Assert.That(music.isPlaying, Is.True, "Waiting for the server's initial state must keep the music playing.");
+            Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f));
+            Assert.That(Source("Ambience").isPlaying, Is.False, "Waiting does not start board ambience.");
+            SoundManager.StartAmbience(); Tick(1);
+            Assert.That(music.isPlaying, Is.True);
+            Assert.That(music.clip, Is.SameAs(clip));
+            Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f), "Entering a match must not restart the theme.");
+            Assert.That(Source("Ambience").isPlaying, Is.True);
+            SoundManager.StartTitleMusic(); SoundManager.StopAmbience(); Tick(3);
+            Assert.That(music.time, Is.GreaterThanOrEqualTo(7.9f), "Returning to the title must keep the playhead too.");
+            Assert.That(Source("Ambience").isPlaying, Is.False);
+        }
+
+        [UnityTest]
+        public IEnumerator GameMusicIsOptionalAndChangesLiveWithoutChangingOtherBuses()
+        {
+            Assert.That(SoundSettings.MusicDuringGame, Is.False);
+            SoundManager.StartTitleMusic(); Tick(1); yield return null;
+            Assert.That(Source("Music").isPlaying, Is.True, "The existing title default is retained.");
+            SoundManager.StopTitleMusic(); SoundManager.StartAmbience(); Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False, "Music stays title-only until enabled.");
+            SoundSettings.MusicDuringGame = true; Tick(.25f);
+            Assert.That(Source("Music").isPlaying, Is.True);
+            Assert.That(Source("Music").volume, Is.GreaterThan(0));
+            SoundSettings.Music = 0; Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False);
+            Assert.That(Source("Ambience").isPlaying, Is.True);
+            Assert.That(_driver.Play("move", _longClip, 1, 0, 1), Is.True);
+            SoundSettings.Music = .5f; Tick(.25f);
+            SoundSettings.MuteAll = true; Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False);
+            Assert.That(SoundSettings.MusicDuringGame, Is.True);
+            SoundSettings.MuteAll = false; Tick(.25f);
+            Assert.That(Source("Music").isPlaying, Is.True);
+            SoundSettings.MusicDuringGame = false; Tick(3);
+            Assert.That(Source("Music").isPlaying, Is.False);
+            Assert.That(Source("Ambience").isPlaying, Is.True);
+            Assert.That(SoundSettings.Music, Is.EqualTo(.5f));
+            Assert.That(SoundSettings.Effects, Is.EqualTo(1));
+        }
+
+        [UnityTest]
+        public IEnumerator MovementUsesDifferentRecordedTakesWithoutChangingGameplayRandomness()
+        {
+            foreach (var name in new[] { "Move", "Move_1", "Move_2", "Move_3" })
+                Assert.That(Resources.Load<AudioClip>("Audio/Soft/" + name), Is.Not.Null,
+                    "The recorded movement take must be present: " + name);
+            SoundManager.Muted = false;
+            string previous = null;
+            var heard = new HashSet<string>();
+            for (int i = 0; i < 12; i++)
+            {
+                foreach (var source in _host.GetComponentsInChildren<AudioSource>()) source.Stop();
+                var randomBefore = Random.state;
+                SoundManager.Play(SoundKind.Move);
+                var voice = _host.GetComponentsInChildren<AudioSource>().Single(s => !s.loop && s.isPlaying);
+                Assert.That(voice.clip.name, Does.StartWith("Move"));
+                Assert.That(voice.clip.name, Is.Not.EqualTo(previous), "Consecutive moves must use different takes.");
+                heard.Add(voice.clip.name); previous = voice.clip.name;
+                SoundManager.Play(SoundKind.Move);
+                Assert.That(_host.GetComponentsInChildren<AudioSource>().Count(s => !s.loop && s.isPlaying), Is.EqualTo(1),
+                    "A same-frame repeated call must still respect the shared movement cooldown.");
+                Assert.That(Random.state, Is.EqualTo(randomBefore));
+                yield return new WaitForSecondsRealtime(.09f);
+            }
+            Assert.That(heard.Count, Is.GreaterThan(1));
+        }
 
         [UnityTest]
         public IEnumerator FastForwardKeepsOneConclusionAcrossQueuedDeaths()
@@ -212,6 +293,7 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(SoundSettings.Effects,Is.EqualTo(1));Assert.That(SoundSettings.Music,Is.EqualTo(.5f));
             SoundSettings.Atmosphere=.5f;_driver.Title(true);Tick(.25f);yield return null;
             Assert.That(Source("Music").clip,Is.Not.Null);
+            Assert.That(Source("Music").clip.name,Is.EqualTo("TitleTheme"),"Title playback must use the new piano arrangement.");
             Assert.That(bed.isPlaying,Is.False,"Opening the title must not restart ambience.");
             SoundSettings.MuteAll=true;Tick(3);
             Assert.That(Source("Music").isPlaying,Is.False);
@@ -238,7 +320,7 @@ namespace HexWars.Presentation.PlayModeTests
         public IEnumerator PreparedClipsHaveHeadroomAndAudioDoesNotConsumeGameplayRandomness()
         {
             var clips = Resources.LoadAll<AudioClip>("Audio/Soft");
-            Assert.That(clips.Length, Is.EqualTo(22), "The complete mastered palette must be imported.");
+            Assert.That(clips.Length, Is.EqualTo(25), "The complete palette, including four movement takes, must be imported.");
             foreach(var clip in clips)
             {
                 var samples=new float[clip.samples*clip.channels];Assert.That(clip.GetData(samples,0),Is.True);

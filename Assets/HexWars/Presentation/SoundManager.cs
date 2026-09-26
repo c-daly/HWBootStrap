@@ -16,6 +16,8 @@ namespace HexWars.Presentation
         static readonly Dictionary<int, bool[]> _attackPrepared = new Dictionary<int, bool[]>();
         static readonly string[] AttackFamilies = { "Light", "Mid", "Heavy" };
         static readonly int[] PreviousAttack = { -1, -1, -1 };
+        static AudioClip[] _moves;
+        static int _previousMove = -1;
         // Audio variation must not consume Unity's gameplay/cosmetic random stream.
         static readonly System.Random Variation = new System.Random(25419);
 
@@ -26,11 +28,27 @@ namespace HexWars.Presentation
         {
             if (Muted || SoundSettings.MuteAll || SoundSettings.Effects <= 0f) return;
             if (kind == SoundKind.Attack) { PlayAttack(1); return; }
+            if (kind == SoundKind.Move) { PlayMove(); return; }
             Ensure();
             var clip = Clip(kind);
             float cooldown = kind == SoundKind.Select ? .09f : kind == SoundKind.EndTurn ? .3f : .075f;
             int priority = kind == SoundKind.Win ? 3 : kind == SoundKind.Death ? 2 : kind == SoundKind.Select ? 0 : 1;
             _driver.Play(kind.ToString(), clip, _prepared.Contains(kind) ? 1f : .18f, cooldown, priority);
+        }
+
+        static void PlayMove()
+        {
+            Ensure();
+            if (_moves == null)
+            {
+                _moves = new AudioClip[4];
+                _moves[0] = Clip(SoundKind.Move);
+                for (int i = 1; i < _moves.Length; i++)
+                    _moves[i] = Resources.Load<AudioClip>("Audio/Soft/Move_" + i) ?? _moves[0];
+            }
+            int pick = _previousMove < 0 ? Variation.Next(4) : (_previousMove + 1 + Variation.Next(3)) % 4;
+            if (_driver.Play("Move", _moves[pick], _prepared.Contains(SoundKind.Move) ? 1f : .18f, .075f, 1))
+                _previousMove = pick;
         }
 
         public static void PlayAttack(int tier)

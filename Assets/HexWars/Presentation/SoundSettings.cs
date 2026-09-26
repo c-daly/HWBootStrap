@@ -29,6 +29,11 @@ namespace HexWars.Presentation
             get => PlayerPrefs.GetFloat("HexWars.MusicVolume", .5f);
             set => Save("HexWars.MusicVolume", value);
         }
+        public static bool MusicDuringGame
+        {
+            get => PlayerPrefs.GetInt("HexWars.MusicDuringGame", 0) == 1;
+            set { PlayerPrefs.SetInt("HexWars.MusicDuringGame", value ? 1 : 0); PlayerPrefs.Save(); }
+        }
         public static bool MuteAll
         {
             get => PlayerPrefs.GetInt(MuteKey, 0) == 1;

@@ -1,3 +1,6 @@
+The current [tabletop revision](tabletop-audio.md) replaces the shot texture and title music.
+The notes below describe the first sound pass.
+
 # A quieter HexWars
 
 Sound should give actions a little physical weight and make the board pleasant to spend time with.
