@@ -11,11 +11,13 @@ namespace HexWars.Engine
     public readonly struct UnitTemplate
     {
         public readonly string Name;
+        public readonly string ArtId;
         public readonly UnitStats Stats;
 
-        public UnitTemplate(string name, UnitStats stats)
+        public UnitTemplate(string name, UnitStats stats, string artId = "")
         {
             Name = name;
+            ArtId = UnitArt.Normalize(artId);
             Stats = stats;
         }
 

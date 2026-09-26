@@ -125,11 +125,11 @@ UNITS
 Brute, Striker, Sniper, Artillery, Scout — these are just ideas that come pre-loaded in your barracks
 (delete them if you like). Any allocation you can imagine is a unit. Name it what it is.
 Each unit has: Health, Damage, Defense, Move, Vertical (climb), Range, Range Arc, Vision, and Vision Arc.
-Tap any stat name in the Designer, or hover/touch a unit in-game, to see what it does and why you'd buy it.
+Tap any stat name in the Designer, or select a unit in-game, to see what it does and why you'd buy it.
 
 DESIGN YOUR OWN
 Everything is points. See what your opponent built; build the answer.
-  Create — open the Designer, put points into whichever stats fit the plan, name it, and it lands in
+  Create — select Design army, put points into whichever stats fit the plan, name it, and it lands in
     your barracks as a reusable template.
   Deploy — pick a template in the barracks and place a paid clone of it — the template itself is never
     consumed, so deploy it again next turn or next game.
@@ -167,8 +167,17 @@ How many actions you take before the turn passes:
     tactical; also makes the claim-ends-turn tax proportionate.
 
 CONTROLS
-  Phone — drag to pan, pinch to zoom. Tap a unit to select; tap a hex to move; tap an enemy to attack.
-  Desktop — WASD / arrows to pan, scroll to zoom; click to select / move / attack.
-  End your turn with the End Turn button (bottom-left).";
+  Select a unit, then click a highlighted hex to move. Hovering previews the route and its cost.
+  Undo move (Ctrl+Z) restores the last move and its budget, before another action or the turn ends.
+  Undo is unavailable with fog of war, so scouting information cannot be taken back.
+  Gold brackets mark enemies in range now. AFTER MOVE marks additional targets from a previewed hex.
+  Click an enemy to preview damage, then click it again or press Fire to attack. Escape cancels.
+  Squad cards prefer a matching unit that can still act. Board clicks select the exact piece.
+  Move [M] shows reachable cells and costs. Attack [F] focuses the target list.
+  Attacking ends that unit's movement. The squad shows which units can still act.
+  Phone — drag to pan, pinch to zoom. Use the preview arrows to choose a destination or target.
+  Desktop — WASD / arrows to pan, Q/E to orbit, scroll to zoom.
+  End turn is in the unit panel. The confirmation lets you keep playing.
+  Menu includes sound settings and Reduced motion.";
     }
 }

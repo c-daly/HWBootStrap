@@ -1,0 +1,15 @@
+{
+  "checkedAt": "2026-09-24T19:51:23.757Z",
+  "browser": "149.0.7827.53",
+  "checks": [
+    "Three direction controls and desktop screenshots",
+    "Forecast comparison: 3 damage / 2 HP and 2 damage / 3 HP",
+    "Three templates, point totals, health floor, upper input bound and all nine stats",
+    "Three teaching moments advance and reset",
+    "No horizontal overflow across 27 direction/screen/viewport combinations",
+    "Keyboard screen activation and reduced-motion preference",
+    "No console/page errors and no HTTP(S) requests from the concept"
+  ],
+  "errors": [],
+  "requests": []
+}

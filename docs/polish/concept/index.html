@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HexWars — player polish study</title>
+  <link rel="stylesheet" href="study.css">
+  <script src="study.js" defer></script>
+</head>
+<body data-direction="orbital">
+  <header class="review-bar">
+    <div><strong>HEXWARS / POLISH STUDY</strong><span>24 September 2026 · interactive concept, not gameplay</span></div>
+    <a href="units.html">New: dark unit workshop ↗</a>
+  </header>
+  <main>
+    <section class="intro" aria-labelledby="study-title">
+      <div><p class="eyebrow">A game about the army you invent</p><h1 id="study-title">Design the army.<br>Find the counter.</h1></div>
+      <div class="direction-picker">
+        <p class="eyebrow">Compare art direction</p>
+        <div class="choices" role="group" aria-label="Art direction">
+          <button data-direction="workshop" aria-pressed="false">01 The Workshop</button>
+          <button data-direction="atlas" aria-pressed="false">02 Field Atlas</button>
+          <button data-direction="orbital" aria-pressed="true">03 Orbital Foundry</button>
+        </div>
+        <p id="direction-note">Modular machines, altitude marks, restrained industrial contrast. Extend the floating battlefield into an orbital foundry.</p>
+      </div>
+    </section>
+    <nav class="screen-picker" aria-label="Concept screens">
+      <button data-screen="battle" aria-pressed="true">01 Read the battlefield</button>
+      <button data-screen="design" aria-pressed="false">02 Build an answer</button>
+      <button data-screen="learn" aria-pressed="false">03 Learn by playing</button>
+    </nav>
+    <section class="game-frame" aria-label="Illustrative HexWars interface">
+      <header class="game-bar">
+        <div class="wordmark"><svg viewBox="0 0 40 40" aria-hidden="true"><path d="M20 2 36 11v18L20 38 4 29V11zM12 13v14m16-14v14M12 20h16"/></svg>HEXWARS</div>
+        <div class="battle-name">Greywater Ridge<span>Annihilation · Defeat the enemy army</span></div>
+        <div class="turn"><span class="dot"></span>Your turn<span class="round">Round 4</span></div>
+      </header>
+      <div class="game-body">
+        <div class="battlefield">
+          <div class="field-label"><span class="eyebrow" id="field-kicker">Selected / 01</span><h2 id="field-heading">Longshot</h2><p id="field-copy">A little height goes a long way.</p></div>
+          <svg id="board" viewBox="0 0 900 580" role="img" aria-labelledby="board-title board-desc">
+            <title id="board-title">Illustrative raised hex battlefield</title>
+            <desc id="board-desc">Three teal pieces face two rust pieces across a stepped battlefield. A dashed line connects Longshot to a target. This is a concept fixture, not an engine simulation.</desc>
+            <defs><pattern id="paper-grid" width="44" height="44" patternUnits="userSpaceOnUse"><path d="M44 0H0V44" fill="none" stroke="currentColor" stroke-width=".45"/></pattern></defs>
+            <rect width="900" height="580" fill="url(#paper-grid)" class="board-grid"/>
+            <g id="tiles"></g><g id="routes"></g><g id="pieces"></g>
+          </svg>
+          <div class="field-bottom"><span><i class="team-key friendly"></i>You · solid rim <i class="team-key enemy"></i>Opponent · notched rim</span><span>Height is a resource.</span></div>
+        </div>
+        <aside class="inspector" aria-label="Decision inspector">
+          <section id="battle-panel">
+            <p class="eyebrow">Attack preview</p><h2>Longshot <span class="arrow">→</span> Bulwark</h2>
+            <p class="muted">Know the result before you commit.</p>
+            <div class="outcome" aria-live="polite"><strong id="damage">3</strong><div>damage<span id="remaining-hp">Target: 5 → 2 HP</span></div></div>
+            <div class="hp-track" aria-label="Target health preview"><span id="hp-remaining"></span><span id="hp-lost"></span></div>
+            <details open><summary>Why this result?</summary><dl class="math"><div><dt>Weapon damage</dt><dd>5</dd></div><div><dt>Higher ground</dt><dd id="height-bonus">+1</dd></div><div><dt>Target defense</dt><dd>−2</dd></div><div><dt>Terrain defense</dt><dd>−1</dd></div></dl></details>
+            <label class="check"><input type="checkbox" id="high-ground" checked>Compare with +1 high ground</label>
+            <p class="micro">Comparison control for this study. It changes the forecast fixture; it does not move a game unit.</p>
+            <div class="next-choice"><strong>A decision, not a mystery.</strong><p>Is three damage worth using Longshot's attack here, or is there a better target?</p></div>
+          </section>
+          <section id="design-panel" hidden>
+            <p class="eyebrow">The workshop</p><h2>Build an answer.</h2><p class="muted">Start with a purpose. Adjust the trade-off.</p>
+            <label class="select-label" for="template">Example design</label><select id="template"><option value="longshot">Longshot — reach over resilience</option><option value="spotter">Spotter — eyes for the whole army</option><option value="bulwark">Bulwark — hold a position</option></select>
+            <div class="cost-line"><span>Unit cost</span><strong><output id="cost">17</output> <small>points</small></strong></div>
+            <div id="main-stats" class="stats"></div>
+            <details id="advanced-stats"><summary>Defense & vertical reach</summary><div id="extra-stats" class="stats"></div></details>
+            <p class="tradeoff" id="tradeoff" aria-live="polite"></p>
+            <p class="micro">All nine stats count toward cost. Creating a design and paying to deploy it are separate steps. Values here are illustrative.</p>
+          </section>
+          <section id="learn-panel" hidden>
+            <p class="eyebrow">First encounter / <span id="lesson-count">1 of 3</span></p><h2 id="lesson-title">Start with a useful move.</h2><p id="lesson-copy">Select Longshot. Its movement and attack markers should tell you what you can do this turn.</p>
+            <ol class="lesson-steps"><li class="active">Read your piece</li><li>Predict the hit</li><li>Build the counter</li></ol>
+            <div class="lesson-callout" id="lesson-goal">Success: explain the difference between moving and attacking, without opening the rules.</div>
+            <button id="next-lesson" class="primary">Preview next teaching moment →</button>
+            <p class="micro">A proposed teaching sequence. This button advances the concept text, not a playable tutorial.</p>
+          </section>
+        </aside>
+      </div>
+      <footer class="game-footer"><div class="readiness"><span class="ready-pip">●</span><div><strong>Move ready · Attack ready</strong><span id="footer-hint">Show the state of the selected unit where the decision happens.</span></div></div><span class="frame-note">Illustrative position · no hidden enemy intent</span></footer>
+    </section>
+    <section class="design-notes" aria-label="Design rationale"><article><span>01 / Clarity</span><h3>Put the consequence beside the choice.</h3><p>Existing reach highlights gain an exact forecast. Explain the exception where the player encounters it.</p></article><article><span>02 / Character</span><h3>Give the system a visual signature.</h3><p>Repeat the same material, role symbols and team marks across the battlefield and workshop.</p></article><article><span>03 / Another match</span><h3>Leave the player with a new idea.</h3><p>Preserve their designs. Let them retry the same battle and see whether a different allocation works.</p></article></section>
+    <p class="study-note">Review artifact: original CSS/SVG, system fonts, no downloaded art or analytics. Shared board geometry supports comparison of the three directions. Final materials, animation, audio and Unity behavior remain to be developed and tested.</p>
+  </main>
+</body>
+</html>

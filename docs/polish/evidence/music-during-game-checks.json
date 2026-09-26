@@ -1,0 +1,108 @@
+{
+  "date": "2026-09-25T20:03:56.222895+00:00",
+  "deployment_source_commit": "e7efc01959d7fba58c45bd2b920437d3da41204c",
+  "unity_source_commit": "1b7cd56",
+  "base_commit": "cf4adbeda618216ae711cb6e93aedbd9693290e1",
+  "unity": "6000.5.0f1",
+  "playmode": {
+    "result": "Passed",
+    "total": "44",
+    "passed": "44",
+    "failed": "0",
+    "duration": "10.8982059"
+  },
+  "webgl": {
+    "result": "Succeeded",
+    "errors": 0,
+    "cache_key": "6017a744",
+    "bytes": 27578629,
+    "all_staged_payloads_match_build": true
+  },
+  "browser": {
+    "errors": [],
+    "failed_requests": [],
+    "warning_count": 6,
+    "music_rms_off_on_off": [
+      2.428096351857759e-08,
+      0.007980157832930405,
+      2.071468003760573e-10
+    ],
+    "saved_preference_after_reload": "On, visually checked",
+    "viewports": [
+      [
+        1600,
+        900
+      ],
+      [
+        1280,
+        720
+      ]
+    ],
+    "screenshot": "music-during-game.png"
+  },
+  "clean_publish": {
+    "database": false,
+    "healthStatus": 200,
+    "files": [
+      {
+        "matchesTrackedSource": true,
+        "path": "index.html",
+        "sha256": "e577fe633d39edf5e7f01408ebe74680ffdca5580895f08170f18b8891674e52"
+      },
+      {
+        "matchesTrackedSource": true,
+        "path": "Build/WebGL.data.unityweb",
+        "sha256": "9ad7568bce6aecc738906b3b6685ba1aebde9a89588d5abd033df20676002328"
+      },
+      {
+        "matchesTrackedSource": true,
+        "path": "Build/WebGL.framework.js.unityweb",
+        "sha256": "a174f7420e5cd0e95856c0c7f7b3bff651f45135d4bfe517ce6403c547e432b7"
+      },
+      {
+        "matchesTrackedSource": true,
+        "path": "Build/WebGL.loader.js",
+        "sha256": "7ceecade5481817dac9d3c249f629e4816f8c1daa5f1cd50f4f218d61d82cf4b"
+      },
+      {
+        "matchesTrackedSource": true,
+        "path": "Build/WebGL.wasm.unityweb",
+        "sha256": "e2670ee4e99dbe9dadbd9f8f510832e4390bd1c41770f1548403d1a3619c87bf"
+      },
+      {
+        "matchesTrackedSource": true,
+        "path": "hexwars-mark.svg",
+        "sha256": "42b83016f25d5b92c37fdbeff8138860ccfc86b56084780e3825d03e0dc5085a"
+      }
+    ],
+    "steamCredentials": false,
+    "runtime": "8.0.28",
+    "environment": "Production",
+    "provider": "Legacy",
+    "gamesStatus": 200,
+    "tracked_deployment_files": 222,
+    "all_tracked_files_match_clean_export": true
+  },
+  "review_fixes": [
+    "Each of the four named movement clips must load.",
+    "Music retains its playhead while waiting for an online match to start."
+  ],
+  "retained_findings": [
+    "Initial runtime smoke used --roll-forward Disable and required missing ASP.NET 8.0.0; LatestPatch selected the installed 8.0.28 patch without permitting a major upgrade.",
+    "The first Coplay exit request timed out after successfully shutting the editor down; state, compile and console checks had completed.",
+    "Final Coplay compile call completed, then the console-log request was cancelled during the PlayMode scene transition. Unity tests and the final WebGL build completed successfully."
+  ],
+  "limits": [
+    "No merge or live Render deployment was performed.",
+    "Docker was unavailable in WSL; the tracked source was published and served on Windows .NET 8.0.28.",
+    "Windows player was not rebuilt for this web-focused update.",
+    "Piano tone and the replacement composition still await audition."
+  ],
+  "evidence_sha256": {
+    "play-tests.xml": "fc4b758b8ae3f6d785508c4467d744717ab15b2d9f5f4004d44f6f6186fb2550",
+    "webgl-build.log": "06b7bda5139b046630f5e4086748c5dc4f99388d7486727b3125d4b21c49cf02",
+    "publish.log": "fd0f6045f45c55c7ac675881903feee41dcab3e869ab3eaed2b0fe1942437964",
+    "deployment-checks.json": "941faf33e814de33ec12d796e81998daae78980d077b97bff6d1c8a041b6dd3c",
+    "browser-checks.json": "9febdd627741fc83ddd9a030a30c06e23e2531ddaef8a44cac21fcbfbec71a33"
+  }
+}

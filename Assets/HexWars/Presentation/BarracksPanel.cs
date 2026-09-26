@@ -25,6 +25,12 @@ namespace HexWars.Presentation
         readonly List<Button> _rows = new List<Button>();
 
         public bool IsDeploying => _deployIndex >= 0;
+        public bool Expanded { get; private set; } = true;
+        public void SetExpanded(bool open)
+        {
+            Expanded = open; if (!open) _deployIndex = -1;
+            if (_canvasGo != null) Rebuild();
+        }
 
         /// <summary>Spectator mode: still shows the active player's barracks, but the human can't deploy
         /// (the AI is playing). Set by <see cref="SpectatorDriver"/>.</summary>
@@ -91,10 +97,17 @@ namespace HexWars.Presentation
             UiKit.Label(panel.transform, "BARRACKS", 0f, -8f, w - 24f, 24f, 18, TextAnchor.MiddleLeft);
             _hint = UiKit.Label(panel.transform, "Design a unit, then deploy it here.", 0f, -34f, w - 24f, 22f, 13, TextAnchor.MiddleLeft);
 
+            var viewport = UiKit.Panel(panel.transform, "BarracksViewport", UiKit.Surface);
+            UiKit.SetRect(viewport.rectTransform, 0f, -60f, w, 348f);
+            viewport.gameObject.AddComponent<RectMask2D>();
+            var scroll = viewport.gameObject.AddComponent<ScrollRect>();
+            scroll.viewport = viewport.rectTransform; scroll.horizontal = false;
+            scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 26f;
             var listGo = new GameObject("List");
-            listGo.transform.SetParent(panel.transform, false);
+            listGo.transform.SetParent(viewport.transform, false);
             _list = listGo.AddComponent<RectTransform>();
-            UiKit.SetRect(_list, 0f, -60f, w, 360f);
+            UiKit.SetRect(_list, 0f, 0f, w, 360f);
+            scroll.content = _list;
         }
 
         /// <summary>Which seat's barracks this panel shows — deliberately NOT always
@@ -119,7 +132,7 @@ namespace HexWars.Presentation
             if (_game == null) return;
 
             // hidden during the title demo and the connecting window (no state yet)
-            if (_game.DemoMode || _game.State == null)
+            if (!Expanded || _game.DemoMode || _game.State == null)
             {
                 if (_canvasGo != null) _canvasGo.SetActive(false);
                 return;
@@ -137,6 +150,7 @@ namespace HexWars.Presentation
             var p = s.Player(seat);
             if (_deployIndex >= p.Barracks.Count) _deployIndex = -1;
 
+            _list.sizeDelta = new Vector2(_list.sizeDelta.x, Mathf.Max(348f, p.Barracks.Count * 52f + 8f));
             int cheapest = int.MaxValue;
             for (int i = 0; i < p.Barracks.Count; i++)
             {
@@ -158,13 +172,15 @@ namespace HexWars.Presentation
                 // Name and cost are separate texts so a 20-char player name can't shove "deploy N" out
                 // of the 170px row: the name is ellipsized left, the cost rides right-aligned on top
                 // (UiKit.Label never raycasts, so clicks land on the select button underneath).
-                var row = UiKit.Button(_list, UiKit.Ellipsize(name, 11), -28f, -(4f + i * 34f), 150f, 30f,
+                var row = UiKit.Button(_list, UiKit.Ellipsize(name, 13), -28f, -(4f + i * 52f), 150f, 48f,
                                        () => Select(idx), UiKit.ButtonStyle.Secondary, 14);
                 var rowText = row.GetComponentInChildren<Text>();
                 rowText.alignment = TextAnchor.MiddleLeft;
-                UiKit.SetRect(rowText.rectTransform, 0f, 0f, 132f, 30f); // 9px side insets inside the button
-                UiKit.Label(row.transform, $"deploy {cost}", 0f, 0f, 132f, 30f, 11,
-                            TextAnchor.MiddleRight, UiKit.TextFaint);
+                UiKit.SetRect(rowText.rectTransform, 20f, -2f, 101f, 22f); // 9px side insets inside the button
+                int art = UnitArt.Index(UnitArt.Resolve(template.ArtId, template.Stats));
+                GraphiteWorkshop.Portrait(row.transform, art, -52f, -3f, 43f, seat);
+                UiKit.Label(row.transform, $"{UnitArt.Names[art]} · {cost} pt", 20f, -25f, 101f, 18f, 10,
+                            TextAnchor.MiddleLeft, UiKit.TextDim);
                 UiKit.SetToggled(row, selected);
                 row.interactable = isActiveHuman;
                 row.gameObject.AddComponent<BarracksTemplateTooltipTarget>()
@@ -172,12 +188,12 @@ namespace HexWars.Presentation
                 _rows.Add(row);
 
                 // Explicit touch target opens info without selecting/deploying the template.
-                var info = UiKit.Button(_list, "i", 62f, -(4f + i * 34f), 28f, 30f,
+                var info = UiKit.Button(_list, "i", 62f, -(4f + i * 52f), 28f, 30f,
                                         () => _tooltip.Show(row.GetComponent<RectTransform>(), template, s.Config),
                                         UiKit.ButtonStyle.Secondary, 13);
                 _rows.Add(info);
 
-                var del = UiKit.Button(_list, "✕", 100f, -(4f + i * 34f), 32f, 30f,
+                var del = UiKit.Button(_list, "x", 100f, -(4f + i * 52f), 32f, 30f,
                                        () => DeleteAt(idx), UiKit.ButtonStyle.Danger, 14);
                 del.interactable = isActiveHuman;
                 _rows.Add(del);

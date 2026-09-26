@@ -5,6 +5,7 @@ Shader "HexWars/Matcap"
         _BaseColor ("Tint", Color) = (1,1,1,1)
         _Matcap ("Matcap", 2D) = "white" {}
         _Variation ("World Variation", Range(0,0.3)) = 0.1
+        _Sheen ("Highlight strength", Range(0,0.35)) = 0.35
     }
     SubShader
     {
@@ -25,6 +26,7 @@ Shader "HexWars/Matcap"
                 float4 _BaseColor;
                 float4 _Matcap_ST;
                 float _Variation;
+                float _Sheen;
             CBUFFER_END
 
             struct Attributes
@@ -57,7 +59,7 @@ Shader "HexWars/Matcap"
                 half3 mc = SAMPLE_TEXTURE2D(_Matcap, sampler_Matcap, IN.matcapUV).rgb;
                 half lum = mc.r;
                 half3 tinted = mc * _BaseColor.rgb;             // colored body
-                half spec = saturate((lum - 0.85) / 0.15) * 0.35; // subtle white sheen only at the brightest
+                half spec = saturate((lum - 0.85) / 0.15) * _Sheen; // subtle white sheen only at the brightest
                 half3 col = lerp(tinted, half3(lum, lum, lum), spec);
                 return half4(col, 1.0);
             }

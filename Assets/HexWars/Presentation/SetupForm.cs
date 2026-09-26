@@ -35,6 +35,7 @@ namespace HexWars.Presentation
         int _turnActions = 3;
         bool _fog = false;
         bool _private = false;
+        bool _manualPlacement;
         AiLevel _ai = AiLevel.Hard;
 
         readonly System.Collections.Generic.List<(Button btn, Func<bool> selected)> _toggles
@@ -152,7 +153,9 @@ namespace HexWars.Presentation
             if (_mode == SetupMode.Host)
             {
                 ToggleBtn("Fog of war", -140f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
-                ToggleBtn("Private (invite only)", 120f, y, 250f, 38f, () => _private, () => { _private = !_private; RefreshToggles(); });
+                // on Steam the same flag picks the lobby type instead of hiding a server room code
+                ToggleBtn(SteamRuntime.IsSteamBuild ? "Friends only (invite)" : "Private (invite only)",
+                          120f, y, 250f, 38f, () => _private, () => { _private = !_private; RefreshToggles(); });
             }
             else if (_mode == SetupMode.VsAi)
             {
@@ -175,6 +178,9 @@ namespace HexWars.Presentation
             }
             y -= 54f;
 
+            ToggleBtn("Place starting units", 0f, y, 340f, 38f, () => _manualPlacement,
+                () => { _manualPlacement = !_manualPlacement; RefreshToggles(); });
+            y -= 48f;
             string cta = _mode == SetupMode.Host ? "Create Game" : "Start Game";
             UiKit.Button(_form.transform, cta, 0f, y, 340f, 50f, OnCreate, UiKit.ButtonStyle.Cta);
 
@@ -286,7 +292,7 @@ namespace HexWars.Presentation
 
             bool fog = _mode != SetupMode.Hotseat && _fog;
             var setup = new GameSetup(_gameMode, _w, _h, _pts, _seed,
-                                      _armySize, _brutes, _strikers, _snipers, _turnActions, fog);
+                                      _armySize, _brutes, _strikers, _snipers, _turnActions, fog, _manualPlacement);
             if (_mode == SetupMode.VsAi)
             {
                 if (_ai == AiLevel.TrainedModel &&
@@ -316,6 +322,15 @@ namespace HexWars.Presentation
             {
                 _game.StartLocalGame(setup, false);
                 // form dismisses via Update when State exists
+                return;
+            }
+
+            if (SteamRuntime.IsSteamBuild)
+            {
+                // Steam hosting is a lobby, not a room code: the lobby screen owns the wait and the invite
+                SteamLobbyScreen.OpenHost(_game, setup,
+                                          _private ? SteamLobbyVisibility.FriendsOnly : SteamLobbyVisibility.Public);
+                Close();
                 return;
             }
 

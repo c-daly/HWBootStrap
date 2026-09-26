@@ -1,0 +1,329 @@
+using System.Net;
+using System.Diagnostics;
+using System.Net.Http.Headers;
+using System.Net.WebSockets;
+using System.Net.Sockets;
+using System.Text;
+using HexWars.NetServer.Hosting;
+using HexWars.NetServer.Tests.Fakes;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Hosting;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using NUnit.Framework;
+
+namespace HexWars.NetServer.Tests
+{
+    /// <summary>
+    /// The request limits against real Kestrel on a real socket.
+    ///
+    /// Every other test in this suite runs on the in-memory test server, which is the right place for
+    /// routing and handler behaviour and the wrong place for this: the transport limits are Kestrel
+    /// settings, the server header is written by Kestrel, and a body with no declared length only exists
+    /// once there is a wire to send it over. A test host cannot show any of that.
+    /// </summary>
+    [TestFixture]
+    public class KestrelRequestLimitTests
+    {
+        WebApplication _app = null!;
+        HttpClient _client = null!;
+        Uri _origin = null!;
+        FakeTimeProvider _clock = null!;
+        int _initialTimers;
+
+        [SetUp]
+        public async Task StartOnALoopbackPort()
+        {
+            _clock = new FakeTimeProvider(DateTimeOffset.UtcNow);
+            await StartServer(_clock);
+            // Kestrel already owns timers; wait for the additional request-body deadline.
+            _initialTimers = _clock.ScheduledTimers;
+        }
+
+        async Task StartServer(TimeProvider time)
+        {
+            var builder = WebApplication.CreateBuilder(new WebApplicationOptions
+            {
+                EnvironmentName = Environments.Development,
+            });
+
+            // Port zero: the operating system picks one, so a suite running in parallel with anything else
+            // cannot collide on a hard-coded number.
+            builder.WebHost.UseUrls("http://127.0.0.1:0");
+            builder.Logging.ClearProviders();
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                // The legacy lobby only: it needs no database and no Steam credentials, and this file is
+                // about the transport rather than about anything either of those decides.
+                ["LOBBY_PROVIDER"] = "Legacy",
+                ["MATCH_BUILD_ID"] = "kestrel-test",
+            });
+
+            builder.AddHexWarsServer();
+            builder.Services.AddSingleton(time);
+            _app = builder.Build();
+            _app.UseHexWarsServer();
+            _app.MapPost("/body-test", async (HttpRequest request) =>
+                Results.Bytes(Encoding.UTF8.GetBytes(await new StreamReader(request.Body).ReadToEndAsync())))
+                .WithHexWarsRequestBody();
+            _app.MapPost("/bodyless-test", () => "No body consumer");
+
+            await _app.StartAsync();
+
+            _origin = new Uri(_app.Urls.First());
+            _client = new HttpClient { BaseAddress = _origin };
+        }
+
+        [TearDown]
+        public async Task Stop()
+        {
+            _client?.Dispose();
+            if (_app is not null)
+            {
+                await _app.StopAsync();
+                await _app.DisposeAsync();
+            }
+        }
+
+        static HttpRequestMessage Chunked(int bytes)
+        {
+            var request = new HttpRequestMessage(HttpMethod.Post, "/body-test")
+            {
+                Content = new StreamContent(new UndeclaredLengthStream(new byte[bytes])),
+            };
+
+            request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
+            request.Headers.TransferEncodingChunked = true;
+            return request;
+        }
+
+        async Task<TcpClient> OpenUnfinishedBody(string method, string path)
+        {
+            var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port);
+            NetworkStream stream = socket.GetStream();
+            // A large enough first chunk to avoid the transport's minimum-rate deadline. The
+            // application must stop waiting even though the client never sends the final chunk.
+            string request = $"{method} {path} HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\n\r\n1000\r\n" + new string('x', 4096) + "\r\n";
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(request));
+            return socket;
+        }
+
+        async Task WaitForBodyDeadline()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            while (_clock.ScheduledTimers <= _initialTimers) await Task.Delay(5, deadline.Token);
+        }
+
+        [TestCase("GET", "/healthz")]
+        [TestCase("POST", "/healthz")]
+        [TestCase("POST", "/no-such-route")]
+        [TestCase("POST", "/bodyless-test")]
+        [TestCase("PUT", "/body-test")]
+        public async Task AnUnfinishedBodyWithoutAConsumerIsRejectedImmediately(string method, string path)
+        {
+            using TcpClient socket = await OpenUnfinishedBody(method, path);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(socket.GetStream());
+            Assert.That(await reader.ReadLineAsync(deadline.Token), Does.Contain("400"));
+        }
+
+        [Test]
+        public async Task AnUnfinishedChunkedPostHasAnIndependentDeadline()
+        {
+            using TcpClient socket = await OpenUnfinishedBody("POST", "/body-test");
+            await WaitForBodyDeadline();
+            _clock.Advance(RequestLimits.BodyReadTimeout);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(socket.GetStream());
+            string? response = await reader.ReadLineAsync(deadline.Token);
+            Assert.That(response, Does.Contain("408"));
+        }
+
+        [Test]
+        public async Task AMaximumSizeUploadCanFinishJustBeforeItsApplicationDeadline()
+        {
+            using TcpClient socket = await OpenUnfinishedBody("POST", "/body-test");
+            await WaitForBodyDeadline();
+            _clock.Advance(RequestLimits.BodyReadTimeout - TimeSpan.FromMilliseconds(500));
+            int remaining = (int)RequestLimits.MaxRequestBodyBytes - 4096;
+            await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes(
+                $"{remaining:x}\r\n{new string('x', remaining)}\r\n0\r\n\r\n"));
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var reader = new StreamReader(socket.GetStream());
+            Assert.That(await reader.ReadLineAsync(deadline.Token), Does.Contain("200"));
+        }
+
+        [Test]
+        public async Task AMaximumSizeUploadAtTheMinimumRateCompletes()
+        {
+            // Use elapsed wall time for both Kestrel's transport rate and the application's deadline.
+            // The controlled-clock tests above exercise cancellation without this deliberate wait.
+            await Stop();
+            await StartServer(TimeProvider.System);
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(90));
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port, deadline.Token);
+            NetworkStream stream = socket.GetStream();
+            var elapsed = Stopwatch.StartNew();
+            await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                $"POST /body-test HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n"), deadline.Token);
+
+            // Deliver 240 bytes per second for the full 16 KiB. Kestrel's grace period delays its
+            // first rate check; it does not exclude that time from the average. Absolute targets
+            // avoid accumulating timer overhead across the 69 writes.
+            int sent = 0;
+            while (sent < RequestLimits.MaxRequestBodyBytes)
+            {
+                TimeSpan target = TimeSpan.FromSeconds((double)sent / RequestLimits.MinimumBodyBytesPerSecond);
+                TimeSpan wait = target - elapsed.Elapsed;
+                if (wait > TimeSpan.Zero) await Task.Delay(wait, deadline.Token);
+                int take = (int)Math.Min(RequestLimits.MinimumBodyBytesPerSecond,
+                    RequestLimits.MaxRequestBodyBytes - sent);
+                await stream.WriteAsync(Encoding.ASCII.GetBytes(
+                    $"{take:x}\r\n{new string('x', take)}\r\n"), deadline.Token);
+                sent += take;
+            }
+            await stream.WriteAsync(Encoding.ASCII.GetBytes("0\r\n\r\n"), deadline.Token);
+
+            using var reader = new StreamReader(stream);
+            string response = await reader.ReadToEndAsync(deadline.Token);
+            Assert.That(response, Does.StartWith("HTTP/1.1 200"));
+            Assert.That(response, Does.EndWith(new string('x', (int)RequestLimits.MaxRequestBodyBytes)),
+                "the endpoint must receive every byte, including the final partial chunk");
+            Assert.That(elapsed.Elapsed, Is.GreaterThan(TimeSpan.FromSeconds(67)));
+        }
+
+        [TestCase(1)]
+        [TestCase(240)]
+        public async Task ChunkFramingDoesNotReduceThePayloadLimit(int chunkBytes)
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port, deadline.Token);
+            var wire = new StringBuilder(
+                $"POST /body-test HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n");
+            for (int sent = 0; sent < RequestLimits.MaxRequestBodyBytes; sent += chunkBytes)
+            {
+                int take = (int)Math.Min(chunkBytes, RequestLimits.MaxRequestBodyBytes - sent);
+                wire.Append($"{take:x}\r\n{new string('x', take)}\r\n");
+            }
+            wire.Append("0\r\n\r\n");
+            await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes(wire.ToString()), deadline.Token);
+            using var reader = new StreamReader(socket.GetStream());
+            string response = await reader.ReadToEndAsync(deadline.Token);
+            Assert.That(response, Does.StartWith("HTTP/1.1 200"));
+            Assert.That(response, Does.EndWith(new string('x', (int)RequestLimits.MaxRequestBodyBytes)));
+        }
+
+        [Test]
+        public async Task ChunkFramingHasItsOwnTransportLimit()
+        {
+            using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(3));
+            using var socket = new TcpClient();
+            await socket.ConnectAsync(_origin.Host, _origin.Port, deadline.Token);
+            string wire = $"POST /body-test HTTP/1.1\r\nHost: {_origin.Authority}\r\n"
+                + "Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n1;pad="
+                + new string('x', (int)RequestLimits.MaxChunkedRequestBytes) + "\r\nx\r\n0\r\n\r\n";
+            await socket.GetStream().WriteAsync(Encoding.ASCII.GetBytes(wire), deadline.Token);
+            using var reader = new StreamReader(socket.GetStream());
+            Assert.That(await reader.ReadLineAsync(deadline.Token), Does.Contain("413"));
+        }
+
+        [Test]
+        public async Task ABodyWithNoDeclaredLengthOverTheCap_IsRefused()
+        {
+            using HttpRequestMessage request = Chunked((int)RequestLimits.MaxRequestBodyBytes + 4096);
+            using HttpResponseMessage response = await _client.SendAsync(request);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.RequestEntityTooLarge),
+                "omitting Content-Length must not be a way around the cap");
+            Assert.That(await response.Content.ReadAsStringAsync(), Does.Contain("invalid_request"));
+        }
+
+        [Test]
+        public async Task ABodyWithADeclaredLengthOverTheCap_IsRefused()
+        {
+            using var content = new StringContent(
+                new string('a', (int)RequestLimits.MaxRequestBodyBytes + 1),
+                Encoding.UTF8, "application/json");
+            using HttpResponseMessage response = await _client.PostAsync("/games", content);
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.RequestEntityTooLarge));
+        }
+
+        [Test]
+        public async Task ABodyWithNoDeclaredLengthInsideTheCap_IsNotRefusedForItsSize()
+        {
+            using HttpRequestMessage request = Chunked(1024);
+            using HttpResponseMessage response = await _client.SendAsync(request);
+
+            Assert.That(response.StatusCode, Is.Not.EqualTo(HttpStatusCode.RequestEntityTooLarge),
+                "the cap is a ceiling, not a ban on chunked requests");
+        }
+
+        [Test]
+        public async Task NoResponseNamesTheSoftwareServingIt()
+        {
+            using HttpResponseMessage response = await _client.GetAsync("/healthz");
+
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That(response.Headers.Contains("Server"), Is.False,
+                "the server header names the software and its version to whoever is writing the scanner");
+        }
+
+        [Test]
+        public async Task AWebsocketUpgradeIsUnaffectedByTheBodyCap()
+        {
+            using var socket = new ClientWebSocket();
+            var address = new Uri("ws://" + _origin.Authority + "/ws?room=LIMITS");
+
+            await socket.ConnectAsync(address, CancellationToken.None);
+
+            Assert.That(socket.State, Is.EqualTo(WebSocketState.Open),
+                "an upgrade is a GET with no body, and the request-limit middleware must not touch it");
+
+            // Aborted rather than closed politely: the v1 lobby ends its side as soon as the client stops
+                // reading, so a close handshake here would fail on a socket that upgraded perfectly well.
+            socket.Abort();
+        }
+
+        /// <summary>A stream that will not say how long it is, so HttpClient sends it chunked.</summary>
+        sealed class UndeclaredLengthStream(byte[] content) : Stream
+        {
+            int _position;
+
+            public override bool CanRead => true;
+            public override bool CanSeek => false;
+            public override bool CanWrite => false;
+            public override long Length => throw new NotSupportedException();
+
+            public override long Position
+            {
+                get => throw new NotSupportedException();
+                set => throw new NotSupportedException();
+            }
+
+            public override int Read(byte[] buffer, int offset, int count)
+            {
+                int take = Math.Min(count, content.Length - _position);
+                if (take <= 0) return 0;
+
+                Array.Copy(content, _position, buffer, offset, take);
+                _position += take;
+                return take;
+            }
+
+            public override void Flush() { }
+            public override long Seek(long offset, SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+            public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+        }
+    }
+}

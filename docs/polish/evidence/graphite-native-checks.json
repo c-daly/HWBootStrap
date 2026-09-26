@@ -1,0 +1,70 @@
+{
+  "date": "2026-09-24",
+  "platform": "Windows x64",
+  "unity": "6000.5.0f1",
+  "branch": "codex/player-polish-20260924",
+  "build": {
+    "result": "Succeeded",
+    "errors": 0,
+    "reported_size_bytes": 114916576,
+    "exe_sha256": "e113b0d76537e3c1e41aa2623ae145e5869afb9095cf1771c10b43afc0e2918e",
+    "zip_sha256": "b1de4065be63a0c867144818035a197160350b074cd40b74d5e49c4a560d7dfe",
+    "zip_bytes": 46801142,
+    "runtime_files": 223
+  },
+  "validation": {
+    "engine_tests": 1174,
+    "unity_editmode": {
+      "id": "2",
+      "testcasecount": "664",
+      "result": "Passed",
+      "total": "664",
+      "passed": "664",
+      "failed": "0",
+      "inconclusive": "0",
+      "skipped": "0",
+      "asserts": "0",
+      "engine-version": "3.5.0.0",
+      "clr-version": "4.0.30319.42000",
+      "start-time": "2026-09-24 23:03:11Z",
+      "end-time": "2026-09-24 23:03:18Z",
+      "duration": "6.0634754"
+    },
+    "unity_playmode": {
+      "id": "2",
+      "testcasecount": "6",
+      "result": "Passed",
+      "total": "6",
+      "passed": "6",
+      "failed": "0",
+      "inconclusive": "0",
+      "skipped": "0",
+      "asserts": "0",
+      "engine-version": "3.5.0.0",
+      "clr-version": "4.0.30319.42000",
+      "start-time": "2026-09-24 22:57:41Z",
+      "end-time": "2026-09-24 22:57:42Z",
+      "duration": "1.8345559"
+    },
+    "runtime_capture_completed": true,
+    "runtime_errors": [],
+    "engine_plugin_sha256": "4efd23b00c86a9335ef2d1984069644996ffe31f50e03a51b9926743554c512d"
+  },
+  "screenshots": {
+    "unity-graphite-battlefield.png": {
+      "sha256": "ebd9a2ab03d37800b2fef8033429b7f032468b3d359db6954edf069f519df3b2",
+      "dimensions": [
+        3840,
+        2054
+      ]
+    },
+    "unity-graphite-collection.png": {
+      "sha256": "5e3e9da87dd7788f69c29893bcf7424eda41df61964e963cf11cbacff12370a8",
+      "dimensions": [
+        3840,
+        2054
+      ]
+    }
+  },
+  "scope": "Native local preview. Explicit appearance requires matching engine builds; mixed-version multiplayer and live server restart/reconnect are not validated here."
+}
