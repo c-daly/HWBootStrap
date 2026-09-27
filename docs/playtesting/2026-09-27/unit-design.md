@@ -1,4 +1,6 @@
-# Unit-design and role playtest — 2026-09-27
+# Unit-design and role playtest — K=0 whole-army mode — 2026-09-27
+
+**Scope correction:** all 42 matches below use the selectable K=0 whole-army pace. The browser SetupForm instead initializes K=3 (`Assets/HexWars/Presentation/SetupForm.cs:35`) and randomizes its starting seed. These original results do not establish balance at the browser default pace. The separate `unit-design-k3` follow-up repeats the same 42 seed/design cases at K=3. The 12 manual actions here are explicitly constructed K=0 encounters. Planned biome and generator modes were not assessed and this report does not recommend removing those systems.
 
 Release source: `/mnt/c/users/cddal/hexwars/.worktrees/player-polish-20260924`, main `1cd5f69`. Used the parent's fresh Release engine DLL, SHA 256 `459f67ad83cd61576d034ca1f9fc25d3dc3974fa4c25f96d6257fe6d53817312`. No repository edits. This is an engine playtest; I did not operate the browser or evaluate visual/audio presentation.
 

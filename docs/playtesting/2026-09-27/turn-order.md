@@ -1,12 +1,14 @@
-# Turn order, movement, and pace playtest — 2026-09-27
+# Selectable whole-army K0 playtest — 2026-09-27
 
-The strongest finding is a reproducible **odd-width board symmetry defect**, followed by a **whole-army reinforcement chain that can erase the opposing army before its next turn**. This study does **not** establish a universal first- or second-player advantage. Controller choice reverses the apparent initiative result.
+**Scope correction after browser-path inspection:** this report tests the selectable whole-army option (K0) and the engine `GameSetup.Default`. The browser actually defaults to K3 and a randomized seed (`SetupForm.cs:35,61,294–295`). See the separate `turn-order-k3/findings.md` follow-up for120 matched games at the actual browser pace. The original frozen protocol is retained; its initial public-default wording was mistaken. No prior game results were changed. The manual game and full-army wipe below are K0 examples, not browser-default examples.
+
+The strongest finding is a reproducible **odd-width board symmetry defect**, followed in the selectable whole-army mode by a **reinforcement chain that can erase the opposing army before its next turn**. This study does **not** establish a universal first- or second-player advantage. Controller choice reverses the apparent initiative result.
 
 ## Scope and evidence
 
 - Current release source: main `1cd5f6933702853ef1ed83a4f9f7f865175a5954`.
 - Fresh engine DLL supplied by parent: SHA256 `459f67ad83cd61576d034ca1f9fc25d3dc3974fa4c25f96d6257fe6d53817312`.
-- Public `GameFactory.Build(GameSetup.Default)` rules: annihilation, 9x7, zero starting bank, three standard roles per side, no biome modifiers, damage floor1, max elevation2, no fog, whole-army turns. Board seed varies only as declared below. No custom designs, training, or production changes.
+- Engine `GameFactory.Build(GameSetup.Default)` rules for the selectable whole-army mode: annihilation, 9x7, zero starting bank, three standard roles per side, no biome modifiers, damage floor1, max elevation2, no fog, whole-army turns. Board seed varies only as declared below. No custom designs, training, or production changes.
 - Frozen protocol in `protocol.md`. Batch: seeds1–24, five controller matchups =120 current-rule matches. Separately: seeds1–12, three matchups, KActions2 =36 counterfactual matches. All156 reached an engine terminal state; zero illegal commands and zero external command-cap stops. 16,884 accepted batch commands recorded.
 - **One additional match was chosen command-by-command by the playtesting subagent**, using legal-move/target inspection and a stated high-ground plan against the existing Greedy opponent. It completed in22 commands, round3. This is distinct from the156 bot simulations. Files `manual-vs-greedy.wire` and `.jsonl` contain the complete game.
 - I inspected every command of the default-seed Greedy game and manual game, the default-seed tactical stalemate, and the seed21 reinforcement wipe. No GUI/audio/player-experience claims derive from these engine-only tests.
@@ -27,7 +29,7 @@ Opening reachable-cell totals, summed across the three units before any action:
 | Width | Seeds | Seeds with unequal reach counts | P0 total | P1 total | Broken directed adjacencies per seed |
 |---|---:|---:|---:|---:|---:|
 | 8, exploratory control |24|0|818|818|0|
-| **9, public default** |24|**21**|804|862|**96**|
+| **9, browser-default width** |24|**21**|804|862|**96**|
 | 10, exploratory control |24|0|830|830|0|
 
 Default seed7 has27 options for P0 and31 for P1. P1 has more opening options on19 seeds; P0 has more on2;3 tie. Seeds4 and8 even have unequal corresponding cross-army pairwise distances because one role begins in a second column. These counts prove the symmetry defect; they do not measure its causal effect on game win rate.
@@ -78,7 +80,7 @@ Receipts: `replays/k0-greedy-greedy-seed21.jsonl`, `alpha-seed21.wire`, `alpha-c
 
 ## 3. Elevation is tactically powerful even with biomes disabled — observed in manual play
 
-My manual default-seed plan was to preserve the fragile shooters, move onto high ground, and use the Brute as a forward spotter. Every selected command was accepted. It won as P0 on round3 with all three starters alive: Brute3HP, Striker2HP, Sniper2HP.
+My manual engine-default-seed, whole-army plan was to preserve the fragile shooters, move onto high ground, and use the Brute as a forward spotter. Every selected command was accepted. It won as P0 on round3 with all three starters alive: Brute3HP, Striker2HP, Sniper2HP.
 
 - R1: Brute moved to`(3,-1)` height2; Sniper to`(2,2)` height2; Striker sheltered at`(2,0)` height0. Opponent advanced its whole army.
 - R2: Striker climbed to`(3,2)` height2 and hit the opposing height2 Brute for4. My Brute moved to`(6,-2)` height1 and killed its Sniper. My Sniper moved to`(3,0)` height2 and chipped its Brute to2HP.
@@ -111,7 +113,7 @@ Counterfactual K2, matched seeds1–12 and the same three charge-involving match
 - K2 seat results are11 P0 wins/10 P1 wins, but the controller mix and tiny paired sample preclude a fairness claim.
 - This changes the meaning of a round and units' budget-refresh cadence, not just how long the opponent waits. Raw round counts are not comparable playtime measures.
 
-**Recommendation:** do not change the default to K2 from these figures alone. First fix geometric symmetry and test the smaller reinforcement-activation intervention.
+**Recommendation:** do not recommend K2 from these figures alone; the browser already defaults to K3, which this original study did not test. First fix geometric symmetry and test the smaller reinforcement-activation intervention.
 
 ## 5. Stalemates need separate treatment from controller weakness
 

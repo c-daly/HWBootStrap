@@ -1,0 +1,18 @@
+GameSetup: 0 9 7 0 7 3 1 1 1 3 0
+M 0 2 3 0
+M 0 1 2 0
+M 0 3 2 1
+M 1 6 6 0
+A 1 6 2
+M 1 4 5 2
+M 0 3 3 2
+A 0 3 6
+M 0 1 4 1
+A 1 4 1
+M 1 5 6 0
+A 1 5 1
+A 0 3 5
+E 0
+D 1 3 6 -1
+A 1 7 3
+# Banked player now has no units but an affordable template; refusing deployment until round100 forces draw.

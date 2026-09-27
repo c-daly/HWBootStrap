@@ -1,12 +1,14 @@
-# Economy and endgame playtest — release main 1cd5f69
+# Economy and endgame playtest — selectable K0 whole-army mode
+
+**Scope correction:** these 56 matches use `GameSetup.Default`/turnActions0, the selectable whole-army option. The browser setup defaults to turnActions3 and randomizes the seed. This report is not evidence about the initial browser turn setting; see the separate `economy-k3` report for 24 follow-up games that use K3.
 
 Tested the actual engine DLL built from release main, SHA256 `459f67ad83cd61576d034ca1f9fc25d3dc3974fa4c25f96d6257fe6d53817312`, through legal `GameEngine.Apply` commands. All work is isolated in `/tmp/hexwars-balance-20260927/economy`; no game rules, repository source, training or remotes changed.
 
 ## Highest priority: an army-less player can deny a win by refusing reinforcements
 
-**Ordinary public default; no custom setup or injected state required.** A player with zero units but enough saved points for any barracks template is never eliminated. They can keep passing until the default round-100 backstop awards a draw. The winning player has nothing to attack and no command that forces the opponent to deploy. This creates an explicit incentive to decline a losing comeback, rather than play it.
+**Ordinary selectable whole-army mode (K0); no injected state required.** A player with zero units but enough saved points for any barracks template is never eliminated. They can keep passing until the default round-100 backstop awards a draw. The winning player has nothing to attack and no command that forces the opponent to deploy. This creates an explicit incentive to decline a losing comeback, rather than play it.
 
-Concrete default-seed7 reproduction: `minimal-stall-repro.txt` contains25 legal commands from fresh `GameSetup.Default`. In round 4 Player 0 destroys Player 1's last unit. Player 0 still has2 units and11 points; Player 1 has0 units,20 points and only the 5 stock templates. `stockseed7-bank1.jsonl` then records passes through round 100 and a draw. This is96 rounds after apparent victory.
+Concrete K0 seed7 reproduction: `minimal-stall-repro.txt` contains25 legal commands from fresh `GameSetup.Default`. In round 4 Player 0 destroys Player 1's last unit. Player 0 still has2 units and11 points; Player 1 has0 units,20 points and only the 5 stock templates. `stockseed7-bank1.jsonl` then records passes through round 100 and a draw. This is96 rounds after apparent victory.
 
 Counterplay check: at the empty-army position, Player 1 has 84 legal deployments and EndTurn. Player 0 has 16 moves, 2 captures and EndTurn, with no attack target. Replaying the same position and choosing a normal stock Artillery reinforcement results in Player 0 winning in round 5 after 5 more commands (`counterplay-results.json`). Thus the reserve supports real comeback play, but declining it grants a better result: draw instead of loss.
 
@@ -26,11 +28,11 @@ Suggested smallest controlled experiment: compare current rules with new units u
 
 Sources: `CombatResolver.cs:27–28`, `BarracksCatalog.cs:13–17`, `GameEngine.cs:196–227` and the immediate successful post-deploy attack in the trace.
 
-## Separate lower-priority rule/API mismatch: hidden generators in Annihilation
+## Separate lower-priority rule/API mismatch: per-mode generator visibility
 
-**Raw-command reachability, not a visible ordinary Annihilation button.** Fresh default seed7, legal move/combat opener, Player 1 kills the Striker for10 points. Sending legacy command `N 1 <empty deployment hex>` then succeeds, costs2points, and creates a generator. After one turn cycle Player 1 has9 points (10−2+1income). Exact commands and state receipts are in `counterplay-results.json`, kind `default-bounty-raw-wire-generator`. No custom points or state were injected.
+**Raw-command reachability, not a visible ordinary Annihilation button.** Fresh engine-factory K0 seed7, legal move/combat opener, Player 1 kills the Striker for10 points. Sending legacy command `N 1 <empty deployment hex>` then succeeds, costs2points, and creates a generator. After one turn cycle Player 1 has9 points (10−2+1income). Exact commands and state receipts are in `counterplay-results.json`, kind `default-bounty-raw-wire-generator`. No custom points or state were injected.
 
-The Annihilation UI hides territory build controls (`UnitInputController.cs:712`), and `LegalMoves.cs:44` says generators were removed. Yet `DeployGenerator` remains accepted without checking a mode/GeneratorsEnabled restriction (`GameEngine.cs:176–193`). This means an alternate client can access economy behavior stock players cannot discover. Guard or retire the legacy command consistently if Annihilation is intended to be bounty-only. This was an engine-command proof; I did not submit it to a live server.
+The Annihilation UI hides territory build controls (`UnitInputController.cs:712`), and `LegalMoves.cs:44` says generators were removed. Yet `DeployGenerator` remains accepted without checking a mode/GeneratorsEnabled restriction (`GameEngine.cs:176–193`). This means an alternate client can access economy behavior stock players cannot discover. Preserve generator and biome systems for the planned modes. Make per-mode visibility and command eligibility explicit: if this Annihilation option is bounty-only, reject hidden income commands here; modes with generators should expose and accept them consistently. This was an engine-command proof; I did not submit it to a live server.
 
 ## Territory generators: correct an initial hypothesis
 
