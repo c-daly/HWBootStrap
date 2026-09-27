@@ -236,13 +236,14 @@ namespace HexWars.Presentation.PlayModeTests
         }
 
         [UnityTest]
-        public IEnumerator DisabledBiomesHaveNoTerrainColorOrDetailsAndCanBeEnabledAgain()
+        public IEnumerator DisabledBiomesKeepVariedFinishesStableWithoutTerrainDetails()
         {
             var columns = _host.transform.Find("Columns");
-            var plain = columns.Find("Hex_0_0/Fill").GetComponent<MeshRenderer>().sharedMaterial;
+            var finishes = columns.Cast<Transform>().ToDictionary(c => c.GetComponent<TileView>().Coord,
+                c => c.Find("Fill").GetComponent<MeshRenderer>().sharedMaterial);
+            Assert.That(finishes.Values.Distinct().Count(), Is.GreaterThan(1), "Inert hexes still need visual variation.");
             foreach (Transform column in columns)
             {
-                Assert.That(column.Find("Fill").GetComponent<MeshRenderer>().sharedMaterial, Is.SameAs(plain));
                 var detail = column.Find("Terrain detail");
                 if (detail != null) Assert.That(detail.gameObject.activeSelf, Is.False);
             }
@@ -252,6 +253,14 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(columns.GetComponentsInChildren<MeshFilter>().Any(m => m.name == "Terrain detail"), Is.True);
             _board.RenderEntities(s);
             Assert.That(columns.GetComponentsInChildren<MeshFilter>().Any(m => m.name == "Terrain detail"), Is.False);
+            // Changing the hidden biome must not change a cosmetic finish or advertise a terrain rule.
+            var changedTiles = s.Board.Tiles.Select(t => new Tile(t.Coord, t.Elevation,
+                (TerrainType)(((int)t.Terrain + 1) % 4)));
+            var changed = new GameState(new Board(changedTiles), s.Config, s.Players, s.ActivePlayer, s.Round, s.NextEntityId);
+            _board.Render(changed.Board); _board.RenderEntities(changed);
+            foreach (Transform column in _host.transform.Find("Columns"))
+                Assert.That(column.Find("Fill").GetComponent<MeshRenderer>().sharedMaterial,
+                    Is.SameAs(finishes[column.GetComponent<TileView>().Coord]), "Finishes should survive a rebuild and biome changes.");
             yield return null;
         }
 
