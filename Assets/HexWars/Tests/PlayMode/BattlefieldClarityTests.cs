@@ -57,6 +57,41 @@ namespace HexWars.Presentation.PlayModeTests
             yield return null;
         }
 
+        [UnityTest]
+        public IEnumerator LiveTitleKeepsItsViewportAcrossHudRefreshAndReleasesItForSetup()
+        {
+            var camera = Camera.main;
+            var temporaryCamera = camera == null ? new GameObject("Title test camera", typeof(Camera)) : null;
+            if (temporaryCamera != null) { temporaryCamera.tag = "MainCamera"; camera = temporaryCamera.GetComponent<Camera>(); }
+            var original = camera.rect;
+            try
+            {
+                typeof(GameBootstrap).GetProperty("DemoMode").SetValue(_game, true);
+                var title = _host.AddComponent<TitleScreen>();
+                var hud = _host.AddComponent<TacticalHud>();
+                yield return null; yield return null;
+                var view = camera.rect;
+                Assert.That(view, Is.Not.EqualTo(new Rect(0, 0, 1, 1)));
+                Assert.That(view.width * view.height, Is.GreaterThan(.25f));
+                hud.SendMessage("Dirty");
+                yield return null;
+                Assert.That(camera.rect, Is.EqualTo(view), "A demo action refreshing the HUD must not reframe the title.");
+                title.SendMessage("Hide");
+                Assert.That(camera.rect, Is.EqualTo(new Rect(0, 0, 1, 1)), "Sub-screens need the full background camera back.");
+                yield return null;
+                typeof(GameBootstrap).GetProperty("DemoMode").SetValue(_game, false);
+                hud.SendMessage("Dirty");
+                yield return null;
+                Assert.That(camera.rect, Is.Not.EqualTo(view));
+                Assert.That(camera.rect, Is.Not.EqualTo(new Rect(0, 0, 1, 1)), "Starting a match must restore the tactical viewport.");
+            }
+            finally
+            {
+                camera.rect = original;
+                if (temporaryCamera != null) Object.Destroy(temporaryCamera);
+            }
+        }
+
         void BoardTap(int? unit, HexCoord? cell, double time)
         {
             var view = unit.HasValue ? _host.GetComponent<TokenStore>().UnitToken(unit.Value).GetComponent<UnitView>() : null;
@@ -236,13 +271,14 @@ namespace HexWars.Presentation.PlayModeTests
         }
 
         [UnityTest]
-        public IEnumerator DisabledBiomesHaveNoTerrainColorOrDetailsAndCanBeEnabledAgain()
+        public IEnumerator DisabledBiomesKeepVariedFinishesStableWithoutTerrainDetails()
         {
             var columns = _host.transform.Find("Columns");
-            var plain = columns.Find("Hex_0_0/Fill").GetComponent<MeshRenderer>().sharedMaterial;
+            var finishes = columns.Cast<Transform>().ToDictionary(c => c.GetComponent<TileView>().Coord,
+                c => c.Find("Fill").GetComponent<MeshRenderer>().sharedMaterial);
+            Assert.That(finishes.Values.Distinct().Count(), Is.GreaterThan(1), "Inert hexes still need visual variation.");
             foreach (Transform column in columns)
             {
-                Assert.That(column.Find("Fill").GetComponent<MeshRenderer>().sharedMaterial, Is.SameAs(plain));
                 var detail = column.Find("Terrain detail");
                 if (detail != null) Assert.That(detail.gameObject.activeSelf, Is.False);
             }
@@ -252,6 +288,14 @@ namespace HexWars.Presentation.PlayModeTests
             Assert.That(columns.GetComponentsInChildren<MeshFilter>().Any(m => m.name == "Terrain detail"), Is.True);
             _board.RenderEntities(s);
             Assert.That(columns.GetComponentsInChildren<MeshFilter>().Any(m => m.name == "Terrain detail"), Is.False);
+            // Changing the hidden biome must not change a cosmetic finish or advertise a terrain rule.
+            var changedTiles = s.Board.Tiles.Select(t => new Tile(t.Coord, t.Elevation,
+                (TerrainType)(((int)t.Terrain + 1) % 4)));
+            var changed = new GameState(new Board(changedTiles), s.Config, s.Players, s.ActivePlayer, s.Round, s.NextEntityId);
+            _board.Render(changed.Board); _board.RenderEntities(changed);
+            foreach (Transform column in _host.transform.Find("Columns"))
+                Assert.That(column.Find("Fill").GetComponent<MeshRenderer>().sharedMaterial,
+                    Is.SameAs(finishes[column.GetComponent<TileView>().Coord]), "Finishes should survive a rebuild and biome changes.");
             yield return null;
         }
 

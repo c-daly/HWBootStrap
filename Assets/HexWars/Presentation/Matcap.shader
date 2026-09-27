@@ -4,7 +4,7 @@ Shader "HexWars/Matcap"
     {
         _BaseColor ("Tint", Color) = (1,1,1,1)
         _Matcap ("Matcap", 2D) = "white" {}
-        _Variation ("World Variation", Range(0,0.3)) = 0.1
+        _Variation ("Surface finish", Range(0,0.3)) = 0
         _Sheen ("Highlight strength", Range(0,0.35)) = 0.35
     }
     SubShader
@@ -55,12 +55,15 @@ Shader "HexWars/Matcap"
 
             half4 frag (Varyings IN) : SV_Target
             {
-                // flat per-face shading, no grain noise (it read as fuzz)
+                // Broad, quiet finish variation; no high-frequency grain that shimmers at a distance.
                 half3 mc = SAMPLE_TEXTURE2D(_Matcap, sampler_Matcap, IN.matcapUV).rgb;
                 half lum = mc.r;
                 half3 tinted = mc * _BaseColor.rgb;             // colored body
                 half spec = saturate((lum - 0.85) / 0.15) * _Sheen; // subtle white sheen only at the brightest
                 half3 col = lerp(tinted, half3(lum, lum, lum), spec);
+                float2 p = IN.positionWS.xz;
+                half finish = sin(p.x * 3.1 + p.y * 1.7) * cos(p.y * 2.3 - p.x * 0.8);
+                col *= 1.0 + finish * _Variation;
                 return half4(col, 1.0);
             }
             ENDHLSL
