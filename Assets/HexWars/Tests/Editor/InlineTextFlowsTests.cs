@@ -182,6 +182,45 @@ namespace HexWars.Presentation.Tests
                 field => field.gameObject.name == "Room code"), Is.EqualTo(!steamBuild));
         }
 
+        [Test]
+        public void TitleResizeKeepsTheLiveBoardClearAndPreservesRoomCodeEntry()
+        {
+            var title = BuildTitle();
+            var field = FindField(title, "Room code");
+            field.text = "MYROOM";
+            var canvas = FindPrivate<GameObject>(title, "_canvasGo");
+            canvas.GetComponent<CanvasScaler>().enabled = false;
+            canvas.GetComponent<Canvas>().renderMode = RenderMode.WorldSpace;
+            var root = (RectTransform)canvas.transform;
+            foreach (var size in new[] { new Vector2(1600, 900), new Vector2(815, 1765), new Vector2(2500, 576) })
+            {
+                root.sizeDelta = size;
+                Invoke(title, "Layout");
+                var view = FindPrivate<Rect>(title, "_demoViewport");
+                var board = new Rect(view.x * size.x, view.y * size.y, view.width * size.x, view.height * size.y);
+                var menu = FindPrivate<RectTransform>(title, "_menu");
+                var corners = new Vector3[4];
+                menu.GetWorldCorners(corners);
+                var bottomLeft = (Vector2)root.InverseTransformPoint(corners[0]) - root.rect.min;
+                var topRight = (Vector2)root.InverseTransformPoint(corners[2]) - root.rect.min;
+                var menuArea = new Rect(bottomLeft, topRight - bottomLeft);
+                Assert.That(board.Overlaps(menuArea), Is.False, $"Menu covers the live match at {size}");
+                Assert.That(board.width, Is.GreaterThan(size.x * .5f));
+                Assert.That(board.height, Is.GreaterThan(size.y * .4f));
+                Assert.That(menuArea.xMin, Is.GreaterThanOrEqualTo(0));
+                Assert.That(menuArea.yMin, Is.GreaterThanOrEqualTo(0));
+                Assert.That(menuArea.xMax, Is.LessThanOrEqualTo(size.x));
+                Assert.That(menuArea.yMax, Is.LessThanOrEqualTo(size.y));
+                Assert.That(FindField(title, "Room code"), Is.SameAs(field));
+                Assert.That(field.text, Is.EqualTo("MYROOM"));
+            }
+            var usableView = FindPrivate<Rect>(title, "_demoViewport");
+            root.sizeDelta = new Vector2(1024, 768); // transient raw pixels before CanvasScaler catches up
+            Invoke(title, "Layout");
+            Assert.That(FindPrivate<Rect>(title, "_demoViewport"), Is.EqualTo(usableView),
+                "A transient layout with no room above the menu must not produce a zero-height camera.");
+        }
+
         TitleScreen BuildTitle(bool steamBuild = false)
         {
             _gameObject = new GameObject("Inline title test", typeof(BoardRenderer), typeof(GameBootstrap));
