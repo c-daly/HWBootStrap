@@ -1,0 +1,17 @@
+{
+  "release_commit": "1cd5f6933702853ef1ed83a4f9f7f865175a5954",
+  "engine_sha256": "459f67ad83cd61576d034ca1f9fc25d3dc3974fa4c25f96d6257fe6d53817312",
+  "files": {
+    "default-stall-commands.txt": "77798d613ac443416c8df82f862995c87c86829b913795c23d8711c12d77ee4f",
+    "economy-evidence.tar.gz": "7aea813c159118942d45b65d3b8b9455db89cc06d3d73426f3915502b1a60211",
+    "economy-k3-evidence.tar.gz": "8cb58008096ee976eda8265286ba0f0987e17083f1145bbcdb5fe631a5d3e718",
+    "independent-verification-k3.json": "d98c55388a26d9db33f0c8d025784d059a151a129ec98870ef5e9ae323413bb7",
+    "independent-verification.json": "cb7a86f90e27d16947c1efcc326382ad7ddd3dd8f0b03eef23e76d50551b280e",
+    "reinforcement-wipe-commands.txt": "db169ce4a7c9e91477d06bf9ecb71e5d24a6eb8d0796780abdd8d154abc7ba94",
+    "turn-order-evidence.tar.gz": "1ac2a8e8d622902a53c7bef8abe21e0ee28315430e9c03f9612da298fc998420",
+    "turn-order-k3-evidence.tar.gz": "0ccddd988747f91efdc8a61506351fae379e38260af96027affee94cf5c6d5d2",
+    "unit-design-evidence.tar.gz": "d97e640f03aad3d00ea810fd2210c1535d633f558af9a5005d7e5e0193c286ed",
+    "unit-design-k3-evidence.tar.gz": "3fff5c36e45886b640199f947d292e9db275e491668c4a386f8ee98c546439a2",
+    "web-k3-stall-commands.txt": "b8fbb57e9c6350b4847200c74e652100ebed80d409bf09ab14ae9c6441ea7a43"
+  }
+}
