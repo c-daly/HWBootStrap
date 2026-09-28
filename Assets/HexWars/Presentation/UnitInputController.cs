@@ -221,7 +221,7 @@ namespace HexWars.Presentation
             Vector2 mp = pointer.position.ReadValue();
             UnitView hoveredUnit = null;
             TileView hoveredTile = null;
-            if (Physics.Raycast(cam.ScreenPointToRay(mp), out var hit, 1000f))
+            if (cam.pixelRect.Contains(mp) && Physics.Raycast(cam.ScreenPointToRay(mp), out var hit, 1000f))
             {
                 hoveredUnit = hit.collider.GetComponentInParent<UnitView>();
                 hoveredTile = hit.collider.GetComponentInParent<TileView>();

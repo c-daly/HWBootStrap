@@ -30,7 +30,7 @@ namespace HexWars.Presentation
         public int RoughWeight = 10;
         public int WaterWeight = 5;
 
-        [Tooltip("Off = biomes are mechanically inert (every tile plays as flat plains); the board still renders varied terrain.")]
+        [Tooltip("Off = biome bonuses are disabled; hex finishes vary cosmetically without terrain symbols.")]
         public bool BiomesEnabled = false; // off for now
 
         [Tooltip("On = one action per turn (chess-like). Off = act with your whole army, then End Turn. Takes effect on a new game.")]

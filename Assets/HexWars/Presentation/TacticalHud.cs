@@ -101,7 +101,7 @@ namespace HexWars.Presentation
             Backdrop(width*view.xMax,height*(1-view.yMax),width*(1-view.xMax),height*view.height);
             var bar=Surface(_canvas.transform,"Match header",0,0,width,58,UiKit.Bg);
             var mark=HexBrandMark.Add(bar.transform,0,0,33);Place(mark.rectTransform,22,12,33,33);
-            Label(bar.transform,"HEXWARS",69,13,160,31,23);
+            Label(bar.transform,"HEXWARS",59,13,160,31,23);
             _turn=Label(bar.transform,"",narrow?230:width*.40f,9,narrow?200:280,23,17,GraphitePieces.Mint);
             _round=Label(bar.transform,"",narrow?230:width*.40f,32,narrow?200:340,17,12,Muted);
             float fieldW=narrow?width:width-W-54;
@@ -175,7 +175,8 @@ namespace HexWars.Presentation
         {
             if(Camera.main==null||_game==null)return;
             bool active=_game.State!=null&&!_game.DemoMode;
-            Rect rect=!active?new Rect(0,0,1,1):BoardViewport(_size);
+            var title = !active && _game.DemoMode ? _game.GetComponent<TitleScreen>() : null;
+            Rect rect=active?BoardViewport(_size):title!=null?title.DemoViewport:new Rect(0,0,1,1);
             if(Camera.main.rect!=rect){Camera.main.rect=rect;Camera.main.GetComponent<CameraRig>()?.Frame();}
         }
 
