@@ -12,6 +12,12 @@ publisher key or database. It includes invite links, browser multiplayer and loc
 Legacy matches remain in memory and end when the service restarts; this is not asynchronous
 email play or durable Steam matchmaking.
 
+The gameplay AI is selected through the shared
+[project/deployment model catalog](ai-model-configuration.md). Its Python CPU
+runtime and immutable checkpoint are shipped in the server image; the browser
+uses the server's current catalog and inference endpoint. Validate resident
+memory and decision latency on the selected hosting plan before release.
+
 For an existing Render Docker service, select `web-main` and use the repository-root
 `Dockerfile`. Match the settings in `render.web.yaml`. Remove any old `DATABASE_URL` or
 Steam-provider configuration that was copied from the separate Steam service. Change

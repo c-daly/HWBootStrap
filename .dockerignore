@@ -1,6 +1,19 @@
-# Send only the .NET server + engine (and the WebGL build under HexWars.NetServer/wwwroot) to the
-# Docker build. Excludes the multi-GB Unity project (Assets/Library/Temp), python, logs, etc.
+# Ship the game server, its bounded inference runtime and the single model catalog.
+# Research runs, virtual environments and Unity caches remain outside the image.
 *
 !engine
+!engine/**
+!python
+!python/*.py
+!python/ml_lab
+!python/ml_lab/**
+!python/requirements-inference.txt
+!models
+!models/ai
+!models/ai/**
+!Assets
+!Assets/StreamingAssets
+!Assets/StreamingAssets/ai-models.json
 **/bin/
 **/obj/
+**/__pycache__/

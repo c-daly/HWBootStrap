@@ -414,7 +414,7 @@ def _metadata_from_wire(value: object) -> StructuredCheckpointMetadata:
     objective_data = _plain_mapping(data["objective_config"], frozenset(field.name for field in fields(ObjectiveConfig)), "metadata.objective_config")
     objective = ObjectiveConfig(**{name: _float(item, f"metadata.objective_config.{name}") for name, item in objective_data.items()})
     trainer_data = _plain_mapping(data["trainer_config"], frozenset(field.name for field in fields(TrainerConfig)), "metadata.trainer_config")
-    trainer = TrainerConfig(
+    trainer = TrainerConfig.from_checkpoint_metadata(
         seed=_int(trainer_data["seed"], "metadata.trainer_config.seed", minimum=0),
         batch_size=_int(trainer_data["batch_size"], "metadata.trainer_config.batch_size", minimum=1),
         learning_rate=_float(trainer_data["learning_rate"], "metadata.trainer_config.learning_rate"),

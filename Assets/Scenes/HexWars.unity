@@ -165,7 +165,7 @@ MonoBehaviour:
   TerritoryMode: 0
   TerritoryStartingPoints: 40
   VsAI: 0
-  Difficulty: 1
+  Difficulty: 3
   DemoPieces: 1
   Networked: 0
 --- !u!114 &222244462

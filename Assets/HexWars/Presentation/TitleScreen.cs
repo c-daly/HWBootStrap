@@ -20,6 +20,7 @@ namespace HexWars.Presentation
         GameObject _canvasGo;
         InputField _roomCodeField;
         Text _roomCodeError;
+        Text _aiModelLabel;
         string _committedRoomCode = "";
         float _overSince = -1f;
         bool _steamBuild;      // evaluated once in Build() — the Steam menu replaces browse/join-by-code
@@ -55,6 +56,7 @@ namespace HexWars.Presentation
         void Update()
         {
             if (_dead || _game == null) return;
+            if (_aiModelLabel != null) _aiModelLabel.text = "AI difficulty: " + AiModelSettings.SelectionLabel;
 
             if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
             {
@@ -210,6 +212,10 @@ namespace HexWars.Presentation
 
             var collection = UiKit.Button(_canvasGo.transform, "Unit collection", 0, 0, 180, 42, () => GraphiteWorkshop.Open(_game), UiKit.ButtonStyle.Secondary, 17);
             var cr = collection.GetComponent<RectTransform>(); cr.anchorMin=cr.anchorMax=new Vector2(1,1); cr.pivot=new Vector2(1,1);cr.anchoredPosition=new Vector2(-20,-20);
+            _aiModelLabel = UiKit.Label(_canvasGo.transform, "Loading AI models…", 0, 0, 320, 42,
+                UiKit.SizeCaption, TextAnchor.MiddleRight, UiKit.TextDim);
+            var ar = _aiModelLabel.rectTransform; ar.anchorMin=ar.anchorMax=new Vector2(1,1);
+            ar.pivot=new Vector2(1,1); ar.anchoredPosition=new Vector2(-20,-72);
             var tipsBtn = TipsService.BuildToggle(_canvasGo.transform, 0f, 0f);
             var trt = tipsBtn.GetComponent<RectTransform>();
             trt.anchorMin = trt.anchorMax = new Vector2(0f, 0f);

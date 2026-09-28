@@ -19,6 +19,7 @@ namespace HexWars.Presentation
         FixedRun = 2,
         LiveRun = 3,
         Passive = 4,
+        Configured = 5,
     }
     public enum ModelInferenceMode { Deterministic, Stochastic }
     public enum ModelDuelObserverSeat { Player1, Player2 }
@@ -78,7 +79,7 @@ namespace HexWars.Presentation
     [Serializable]
     public sealed class ModelSeatConfiguration
     {
-        public ModelControllerKind Kind = ModelControllerKind.Greedy;
+        public ModelControllerKind Kind = ModelControllerKind.Configured;
         public string Path = string.Empty;
         public ModelInferenceMode InferenceMode = ModelInferenceMode.Deterministic;
 
@@ -86,6 +87,7 @@ namespace HexWars.Presentation
         {
             switch (Kind)
             {
+                case ModelControllerKind.Configured: return "configured";
                 case ModelControllerKind.Random: return "random";
                 case ModelControllerKind.Passive: return "passive";
                 case ModelControllerKind.FixedRun: return "run:" + Path;
@@ -111,7 +113,7 @@ namespace HexWars.Presentation
 
         public string ValidationError(string label)
         {
-            if (IsModel && string.IsNullOrWhiteSpace(Path)) return label + " requires a model or run path.";
+            if (IsModel && Kind != ModelControllerKind.Configured && string.IsNullOrWhiteSpace(Path)) return label + " requires a model or run path.";
             return string.Empty;
         }
 
@@ -127,9 +129,9 @@ namespace HexWars.Presentation
     [Serializable]
     public sealed class ModelDuelConfiguration
     {
-        public ModelSeatConfiguration P0 = new ModelSeatConfiguration { Kind = ModelControllerKind.LiveRun };
-        public ModelSeatConfiguration P1 = new ModelSeatConfiguration { Kind = ModelControllerKind.Greedy };
-        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV2;
+        public ModelSeatConfiguration P0 = new ModelSeatConfiguration();
+        public ModelSeatConfiguration P1 = new ModelSeatConfiguration();
+        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV3;
         public string ScenarioRunPath = string.Empty;
         // No longer editable via the Arena tab UI (its Observer dropdown was removed — review-fix
         // pass); retained for this class's EditorWindow-serialized-state round-trip and existing
@@ -191,9 +193,9 @@ namespace HexWars.Presentation
         public string PythonExe;
         public string ServerScript;
         public string WorkingDir;
-        public string P0Spec = "greedy";
-        public string P1Spec = "greedy";
-        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV1;
+        public string P0Spec = "configured";
+        public string P1Spec = "configured";
+        public MlEnvironmentContract Environment = MlEnvironmentContract.TacticalV3;
         public TrainingScenario Scenario;
         /// <summary>Spec §"Fog-of-War Indicator" (amended 2026-07-25): the single on/off toggle for the
         /// acting-player fog marking. Default on — the marking is the point of watching a fog run.</summary>
@@ -250,8 +252,8 @@ namespace HexWars.Presentation
             || Environment == MlEnvironmentContract.TacticalV2
             || Environment == MlEnvironmentContract.TacticalV3
             || (_duel != null && _view.DeploymentComplete);
-        public PolicySeatInfo P0Resolved => _bridge?.Seat0;
-        public PolicySeatInfo P1Resolved => _bridge?.Seat1;
+        public PolicySeatInfo P0Resolved => HostedInfo(0) ?? _bridge?.Seat0;
+        public PolicySeatInfo P1Resolved => HostedInfo(1) ?? _bridge?.Seat1;
         public string P0ArenaStatus { get; private set; }
         public string P1ArenaStatus { get; private set; }
         public int CurrentLearnerSeat => _activePresentationGame?.LearnerSeat ?? -1;
@@ -328,7 +330,10 @@ namespace HexWars.Presentation
         ModelDuelView _view;
         ModelDuelPresentationState _presentation;
         GameState _presentedState;
-        bool _p0Model, _p1Model, _p0Live, _p1Live, _done, _ended;
+        bool _p0Model, _p1Model, _p0Live, _p1Live, _done, _ended, _requestPending;
+        readonly AiModelSelection[] _configured = new AiModelSelection[2];
+        readonly bool[] _followsDefault = new bool[2];
+        readonly CancellationTokenSource _lifetime = new CancellationTokenSource();
         float _timer, _restTimer;
         CancellationTokenSource _startupCancellation;
         MlPresentationGame _activePresentationGame;
@@ -350,6 +355,8 @@ namespace HexWars.Presentation
                 _activePresentationGame = NextPresentationGame(0);
                 if (_activePresentationGame != null)
                     ApplyPresentationGame(_activePresentationGame);
+                await ResolveConfiguredSeats();
+                if (_done || this == null) return;
                 RefreshControllerFlags();
                 _activeScenario = ResolveScenario();
                 _contractIdentity =
@@ -436,7 +443,7 @@ namespace HexWars.Presentation
 
         void Update()
         {
-            if (_done || Paused || _duel == null) return;
+            if (_done || Paused || _duel == null || _requestPending) return;
             // Pacing gate: never request the next policy/step action while the last batch of
             // transitions is still queued or mid-animation — spec §"Viewer Playback". This governs the
             // Unity viewing duel only; headless training never touches this driver.
@@ -468,41 +475,49 @@ namespace HexWars.Presentation
             int seat = _view.Seat;
             bool seatIsModel = seat == 0 ? _p0Model : _p1Model;
             if (!seatIsModel) { _done = true; return; }
+            RequestAction(seat);
+        }
+
+        async void RequestAction(int seat)
+        {
+            _requestPending = true;
+            var requestedDuel = _duel;
+            var requestedView = _view;
             try
             {
                 if (_duel is IStructuredModelDuelEnvironment structured)
                 {
                     TacticalV3View decision = _view.StructuredDecision ??
-                        throw new InvalidOperationException(
-                            "structured environment did not expose a tactical-v3 decision");
+                        throw new InvalidOperationException("structured environment did not expose a tactical-v3 decision");
                     TacticalV3ViewDto payload = TacticalV3PolicyPayload.From(decision);
-                    PolicyCandidateResult selected =
-                        _bridge.ActStructured(seat, payload);
+                    PolicyCandidateResult selected = IsHosted(seat)
+                        ? await AiPolicySession.SelectHostedAsync(_configured[seat], seat, payload, _lifetime.Token)
+                        : await _bridge.ActStructuredAsync(seat, payload, AiPolicySession.DecisionTimeoutMs, _lifetime.Token);
+                    _lifetime.Token.ThrowIfCancellationRequested();
+                    if (_done || this == null || !ReferenceEquals(requestedDuel, _duel) || !ReferenceEquals(requestedView.StructuredDecision, _view.StructuredDecision)) return;
                     int matches = decision.Decision.Candidates.Count(candidate =>
-                        candidate.DecisionId == selected.DecisionId &&
-                        candidate.CandidateId == selected.CandidateId);
-                    if (matches != 1)
-                        throw new InvalidOperationException(
-                            "structured policy selected an unknown candidate identity");
-                    _view = structured.Step(
-                        selected.DecisionId, selected.CandidateId);
+                        candidate.DecisionId == selected.DecisionId && candidate.CandidateId == selected.CandidateId);
+                    if (matches != 1) throw new InvalidOperationException("structured policy selected an unknown candidate identity");
+                    _view = structured.Step(selected.DecisionId, selected.CandidateId);
                 }
                 else
                 {
                     var legacy = _duel as ILegacyModelDuelEnvironment ??
-                        throw new InvalidOperationException(
-                            "environment exposes neither structured nor legacy stepping");
-                    int action = _bridge.Act(
-                        seat, _view.Observation, _view.ActionMask);
+                        throw new InvalidOperationException("environment exposes neither structured nor legacy stepping");
+                    int action = _bridge.Act(seat, _view.Observation, _view.ActionMask);
                     _view = legacy.Step(action);
                 }
                 HandlePresentation();
             }
+            catch (OperationCanceledException) { }
             catch (Exception error)
             {
+                if (_done || _lifetime.IsCancellationRequested) return;
                 Debug.LogError("ModelDuelDriver: bridge error, stopping. " + error.Message);
+                MarkModelStatus("inference failed");
                 _done = true;
             }
+            finally { _requestPending = false; }
         }
 
         void RecordResult()
@@ -525,7 +540,18 @@ namespace HexWars.Presentation
         bool ValidateResolvedContracts()
         {
             var errors = ModelDuelContractCompatibility.Validate(
-                _contractIdentity, _p0Model, _bridge?.Seat0, _p1Model, _bridge?.Seat1);
+                _contractIdentity, _p0Model, P0Resolved, _p1Model, P1Resolved);
+            for (int seat = 0; seat < 2; seat++)
+            {
+                var selected = _configured[seat];
+                var loaded = seat == 0 ? P0Resolved : P1Resolved;
+                if (selected != null && selected.Model.IsTrained && loaded?.CheckpointSha256 != selected.Model.checkpoint_sha256)
+                {
+                    Debug.LogError("ModelDuelDriver: loaded checkpoint differs from the configured model.");
+                    _done = true;
+                    return false;
+                }
+            }
             if (errors.Count == 0) return true;
             if (_p0Model) P0ArenaStatus = "contract mismatch";
             if (_p1Model) P1ArenaStatus = "contract mismatch";
@@ -659,12 +685,14 @@ namespace HexWars.Presentation
             try
             {
                 MlPresentationGame next = NextPresentationGame(GamesPlayed);
-                if (ShouldReconfigure(_activePresentationGame, next, gameEnded: true))
+                if (_followsDefault[0] || _followsDefault[1] || ShouldReconfigure(_activePresentationGame, next, gameEnded: true))
                 {
                     _bridge?.Dispose();
                     _bridge = null;
                     ApplyPresentationGame(next);
                     _activePresentationGame = next;
+                    await ResolveConfiguredSeats();
+                    if (_done || this == null) return;
                     RefreshControllerFlags();
                     _activeScenario = ResolveScenario();
                     _contractIdentity =
@@ -729,12 +757,12 @@ namespace HexWars.Presentation
 
         async Task<bool> StartPolicyBridge(string failureStatus)
         {
-            if (!_p0Model && !_p1Model)
+            if ((!_p0Model || IsHosted(0)) && (!_p1Model || IsHosted(1)))
             {
                 _bridge?.Dispose();
                 _bridge = null;
                 P0ArenaStatus = P1ArenaStatus = string.Empty;
-                return true;
+                return ValidateResolvedContracts();
             }
 
             _bridge = new PolicyBridge();
@@ -743,8 +771,8 @@ namespace HexWars.Presentation
             IsStarting = true;
             bool ok = await _bridge.StartAsync(
                 PythonExe, ServerScript,
-                _p0Model ? P0Spec : null,
-                _p1Model ? P1Spec : null,
+                _p0Model && !IsHosted(0) ? P0Spec : null,
+                _p1Model && !IsHosted(1) ? P1Spec : null,
                 WorkingDir,
                 _contractIdentity.Environment,
                 _contractIdentity.Version,
@@ -775,6 +803,8 @@ namespace HexWars.Presentation
             if (game.Scenario == null)
                 throw new InvalidOperationException(
                     "presentation game scenario is required");
+            _followsDefault[0] = _followsDefault[1] = false;
+            _configured[0] = _configured[1] = null;
             P0Spec = game.P0Spec;
             P1Spec = game.P1Spec;
             Scenario = game.Scenario;
@@ -785,6 +815,46 @@ namespace HexWars.Presentation
                     : game.Scenario.Environment == MlContract.TacticalV3Version
                         ? MlEnvironmentContract.TacticalV3
                     : MlEnvironmentContract.TacticalV1;
+        }
+
+        async Task ResolveConfiguredSeats()
+        {
+            // Only the sentinel follows shared settings. Explicit lab run and scripted selections stay pinned.
+            if (P0Spec == "configured" || P1Spec == "configured" || _followsDefault[0] || _followsDefault[1])
+                await AiModelSettings.LoadAsync(refresh: true);
+            _lifetime.Token.ThrowIfCancellationRequested();
+            for (int seat = 0; seat < 2; seat++)
+            {
+                string spec = seat == 0 ? P0Spec : P1Spec;
+                if (spec != "configured" && !_followsDefault[seat]) { _configured[seat] = null; continue; }
+                _followsDefault[seat] = true;
+                var selected = AiModelSettings.Capture();
+                _configured[seat] = selected;
+                if (!selected.Model.IsTrained) spec = selected.Model.kind;
+                else if (selected.UsesHttp) spec = "hosted:" + selected.Model.id;
+                else
+                {
+                    string project = System.IO.Directory.GetParent(Application.dataPath)?.FullName;
+                    var launch = PlayableModelResolver.Resolve(project, selected);
+                    PythonExe = launch.PythonExecutable; ServerScript = launch.ServerScript;
+                    WorkingDir = launch.WorkingDirectory; spec = launch.ControllerSpec;
+                }
+                if (seat == 0) P0Spec = spec; else P1Spec = spec;
+            }
+        }
+
+        bool IsHosted(int seat) => _configured[seat]?.Model.IsTrained == true && _configured[seat].UsesHttp;
+        PolicySeatInfo HostedInfo(int seat)
+        {
+            if (!IsHosted(seat)) return null;
+            var model = _configured[seat].Model;
+            return new PolicySeatInfo
+            {
+                Seat = seat, Kind = "run", Path = model.id, InferenceMode = "deterministic",
+                Environment = model.contract_version, ContractVersion = model.contract_version,
+                EncodingHash = model.encoding_hash, CapacityHash = model.capacity_hash,
+                CheckpointSha256 = model.checkpoint_sha256,
+            };
         }
 
         void RefreshControllerFlags()
@@ -804,11 +874,12 @@ namespace HexWars.Presentation
         public void StopDuel()
         {
             _done = true;
+            _lifetime.Cancel();
             _startupCancellation?.Cancel();
             _startupCancellation?.Dispose();
             _startupCancellation = null;
             IsStarting = false;
-            _bridge?.Dispose();
+            _bridge?.Abort();
             _bridge = null;
         }
         void OnDestroy()
