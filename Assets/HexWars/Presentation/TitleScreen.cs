@@ -18,8 +18,15 @@ namespace HexWars.Presentation
 
         GameBootstrap _game;
         GameObject _canvasGo;
+        RectTransform _menu;
+        readonly RectTransform[] _surround = new RectTransform[4];
+        Text _demoStatus;
+        Vector2 _layoutSize;
+        Rect _demoViewport = new Rect(0, 0, 1, 1);
+        internal Rect DemoViewport => _dead ? new Rect(0, 0, 1, 1) : _demoViewport;
         InputField _roomCodeField;
         Text _roomCodeError;
+        Text _aiModelLabel;
         string _committedRoomCode = "";
         float _overSince = -1f;
         bool _steamBuild;      // evaluated once in Build() — the Steam menu replaces browse/join-by-code
@@ -55,6 +62,11 @@ namespace HexWars.Presentation
         void Update()
         {
             if (_dead || _game == null) return;
+            if (_aiModelLabel != null) _aiModelLabel.text = "AI difficulty: " + AiModelSettings.SelectionLabel;
+
+            if (_demoStatus != null && _game.State != null)
+                _demoStatus.text = $"AI exhibition   ·   Round {_game.State.Round}   ·   "
+                    + (_game.State.IsGameOver ? "Match complete" : $"Player {(int)_game.State.ActivePlayer + 1} to move");
 
             if (DeviceInput.Allowed && UiKit.InputOwnsFocus(_roomCodeField) && Keyboard.current != null)
             {
@@ -90,15 +102,83 @@ namespace HexWars.Presentation
             else _overSince = -1f;
         }
 
+        void LateUpdate()
+        {
+            if (_dead || _game == null) return;
+            // CanvasScaler updates in Update. During a browser resize its canvas can briefly report
+            // raw pixels; wait for the scaled dimensions before laying out the menu and camera.
+            Layout();
+            ApplyDemoCamera();
+        }
+
         void Close()
         {
             _dead = true;
             UnsubscribeSteam();
+            RestoreCamera();
             if (_canvasGo != null) Destroy(_canvasGo);
             Destroy(this);
         }
 
-        void OnDestroy() => UnsubscribeSteam(); // Destroy(this) is deferred; a destroyed screen must not hold the event
+        void OnDestroy()
+        {
+            UnsubscribeSteam();
+            RestoreCamera();
+        }
+
+        void RestoreCamera()
+        {
+            var camera = Camera.main;
+            // Do not overwrite a viewport already assigned by the match HUD or a new title.
+            if (camera != null && camera.rect == _demoViewport)
+            {
+                camera.rect = new Rect(0, 0, 1, 1);
+                camera.GetComponent<CameraRig>()?.Frame();
+            }
+        }
+
+        void ApplyDemoCamera()
+        {
+            var camera = Camera.main;
+            if (!_game.DemoMode || camera == null || camera.rect == _demoViewport) return;
+            camera.rect = _demoViewport;
+            camera.GetComponent<CameraRig>()?.Frame();
+        }
+
+        void Layout()
+        {
+            if (_canvasGo == null || _menu == null) return;
+            var size = ((RectTransform)_canvasGo.transform).rect.size;
+            if (size.x <= 0 || size.y <= 0 || Vector2.Distance(size, _layoutSize) < 1) return;
+            float scale = Mathf.Min(1f, (size.y - 90f) / 640f, (size.x - 48f) / 440f);
+            float menuWidth = 440f * scale, menuHeight = 640f * scale;
+            bool beside = size.x >= 1100f;
+            float left = beside ? 48f + menuWidth : 16f;
+            float bottom = beside ? 50f : menuHeight + 100f;
+            float width = size.x - left - 20f, height = size.y - bottom - 80f;
+            if (scale <= 0 || width <= 0 || height <= 0) return; // keep the last usable viewport during a transient resize
+            _layoutSize = size;
+            _menu.localScale = Vector3.one * scale;
+            _menu.anchoredPosition = beside
+                ? new Vector2(24f, -(size.y - menuHeight) * .5f)
+                : new Vector2((size.x - menuWidth) * .5f, -(size.y - menuHeight - 68f));
+            _demoViewport = new Rect(left / size.x, bottom / size.y, width / size.x, height / size.y);
+
+            // A partial camera only clears its own viewport. Cover its surroundings each frame,
+            // including after a resize, so moving text and the old board cannot leave trails.
+            PlaceFromBottom(_surround[0], 0, 0, size.x, bottom);
+            PlaceFromBottom(_surround[1], 0, bottom + height, size.x, 80f);
+            PlaceFromBottom(_surround[2], 0, bottom, left, height);
+            PlaceFromBottom(_surround[3], left + width, bottom, 20f, height);
+            PlaceFromBottom(_demoStatus.rectTransform, left, bottom - 32f, width, 24f);
+        }
+
+        static void PlaceFromBottom(RectTransform rect, float x, float y, float width, float height)
+        {
+            rect.anchorMin = rect.anchorMax = rect.pivot = Vector2.zero;
+            rect.anchoredPosition = new Vector2(x, y);
+            rect.sizeDelta = new Vector2(width, height);
+        }
 
         void UnsubscribeSteam()
         {
@@ -141,26 +221,31 @@ namespace HexWars.Presentation
             UiKit.EnsureEventSystem();
             _canvasGo = UiKit.Canvas("TitleCanvas", UiKit.OrderMenu, transform);
 
+            for (int i = 0; i < _surround.Length; i++)
+            {
+                var background = UiKit.Panel(_canvasGo.transform, "Demo surround", UiKit.Bg);
+                background.sprite = null;
+                background.raycastTarget = false;
+                _surround[i] = background.rectTransform;
+            }
+
             // left-anchored column: the menu reads over the demo without hiding the action
             var col = new GameObject("Menu");
             col.transform.SetParent(_canvasGo.transform, false);
-            var crt = col.AddComponent<RectTransform>();
-            crt.anchorMin = crt.anchorMax = new Vector2(0.5f, 0.5f);
-            crt.pivot = new Vector2(0.5f, 0.5f);
-            var canvasRt = _canvasGo.GetComponent<RectTransform>();
-            float availW = canvasRt != null && canvasRt.rect.width > 0f ? canvasRt.rect.width : 1200f;
-            crt.sizeDelta = new Vector2(Mathf.Min(520f, availW - 40f), 640f);
-            crt.anchoredPosition = new Vector2(0f, 20f);
+            _menu = col.AddComponent<RectTransform>();
+            _menu.anchorMin = _menu.anchorMax = _menu.pivot = new Vector2(0f, 1f);
+            _menu.sizeDelta = new Vector2(440f, 640f);
 
-            var plate = UiKit.Panel(col.transform, "Plate", new Color(UiKit.Bg.r, UiKit.Bg.g, UiKit.Bg.b, 0.82f));
-            UiKit.Stretch(plate.GetComponent<RectTransform>());
-            plate.raycastTarget = false;
-
-            HexBrandMark.Add(col.transform, -191f, -45f, 48f);
-            var word = UiKit.Label(col.transform, "HEXWARS", 34f, -34f, 330f, 70f, 52, TextAnchor.MiddleCenter, UiKit.Accent);
+            var brand = new GameObject("HexWars wordmark", typeof(RectTransform));
+            brand.transform.SetParent(col.transform, false);
+            var word = UiKit.Label(brand.transform, "HEXWARS", 28f, 0f, 330f, 70f, 52, TextAnchor.MiddleLeft, UiKit.Accent);
             word.fontStyle = FontStyle.Bold;
-            UiKit.Label(col.transform, "hex-grid tactics — design an army, take the field",
-                        0f, -104f, 520f, 24f, UiKit.SizeBody, TextAnchor.MiddleCenter, UiKit.TextDim);
+            float wordWidth = word.preferredWidth;
+            UiKit.SetRect(word.rectTransform, 28f, 0f, wordWidth, 70f);
+            UiKit.SetRect((RectTransform)brand.transform, 0f, -28f, wordWidth + 56f, 70f);
+            HexBrandMark.Add(brand.transform, -wordWidth * .5f - 4f, -11f, 48f);
+            UiKit.Label(col.transform, "Design an army. Take the field.",
+                        0f, -104f, 400f, 24f, UiKit.SizeBody, TextAnchor.MiddleCenter, UiKit.TextDim);
 
             float y = -170f;
             const float bw = 380f, bh = 52f, gap = 62f;
@@ -185,14 +270,14 @@ namespace HexWars.Presentation
                 UiKit.Button(col.transform, "Host Game", 0f, y, bw, bh, () =>
                 { Hide(); SetupForm.Open(_game, SetupForm.SetupMode.Host); }, UiKit.ButtonStyle.Primary); y -= gap;
 
-                _roomCodeField = UiKit.InputField(col.transform, _committedRoomCode, -65f, y, 245f, bh,
+                _roomCodeField = UiKit.InputField(col.transform, _committedRoomCode, -65f, y, 250f, bh,
                                                    "Room code");
                 _roomCodeField.gameObject.name = "Room code";
                 _roomCodeField.GetComponent<WebGlInputBridge>().CancelRequested += RestoreRoomCodeEdit;
                 _roomCodeField.onSubmit.AddListener(_ => OnJoinByCode());
                 _roomCodeError = UiKit.Label(col.transform, "", -65f, y - 39f, 245f, 18f,
                                              UiKit.SizeCaption, TextAnchor.MiddleLeft, UiKit.Danger);
-                UiKit.Button(col.transform, "Join", 135f, y, 125f, bh, OnJoinByCode,
+                UiKit.Button(col.transform, "Join", 130f, y, 120f, bh, OnJoinByCode,
                              UiKit.ButtonStyle.Primary); y -= gap;
             }
 
@@ -206,10 +291,18 @@ namespace HexWars.Presentation
             { GameRules.Show(_canvasGo.transform, UiKit.Font(), 1100); }, UiKit.ButtonStyle.Secondary); y -= gap;
 
             UiKit.Label(col.transform, "v" + Application.version + "   ·   local, AI, or online play",
-                        0f, y - 6f, 520f, 22f, UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
+                        0f, y - 6f, 400f, 22f, UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextFaint);
+
+            _demoStatus = UiKit.Label(_canvasGo.transform, "AI exhibition", 0, 0, 400, 24,
+                UiKit.SizeCaption, TextAnchor.MiddleCenter, UiKit.TextDim);
+            Layout();
 
             var collection = UiKit.Button(_canvasGo.transform, "Unit collection", 0, 0, 180, 42, () => GraphiteWorkshop.Open(_game), UiKit.ButtonStyle.Secondary, 17);
             var cr = collection.GetComponent<RectTransform>(); cr.anchorMin=cr.anchorMax=new Vector2(1,1); cr.pivot=new Vector2(1,1);cr.anchoredPosition=new Vector2(-20,-20);
+            _aiModelLabel = UiKit.Label(_canvasGo.transform, "Loading AI models…", 0, 0, 320, 42,
+                UiKit.SizeCaption, TextAnchor.MiddleRight, UiKit.TextDim);
+            var ar = _aiModelLabel.rectTransform; ar.anchorMin=ar.anchorMax=new Vector2(1,1);
+            ar.pivot=new Vector2(1,1); ar.anchoredPosition=new Vector2(-20,-72);
             var tipsBtn = TipsService.BuildToggle(_canvasGo.transform, 0f, 0f);
             var trt = tipsBtn.GetComponent<RectTransform>();
             trt.anchorMin = trt.anchorMax = new Vector2(0f, 0f);

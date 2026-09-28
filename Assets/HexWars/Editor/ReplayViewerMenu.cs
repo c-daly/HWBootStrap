@@ -90,8 +90,8 @@ namespace HexWars.Presentation.EditorTools
 
         // Challenge the computer: you play Player 1, the AI plays Player 2. AiOpponent auto-attaches on
         // play from these prefs (the saved scene is untouched). In a build, set GameBootstrap.VsAI instead.
-        [MenuItem("HexWars/Play vs AI/Trained model")]
-        public static void PlayVsAiModel() => PlayVsAi(AiLevel.TrainedModel);
+        [MenuItem("HexWars/Play vs AI/Configured model")]
+        public static void PlayVsAiModel() => PlayVsAi(AiLevel.Configured);
 
         [MenuItem("HexWars/Play vs AI/Greedy")]
         public static void PlayVsAiHard() => PlayVsAi(AiLevel.Hard);

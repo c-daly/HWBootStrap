@@ -38,7 +38,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
         public static MlArenaLaunchPlan Create(ModelDuelConfiguration config)
         {
             if (config == null) throw new ArgumentNullException(nameof(config));
-            if (config.Environment == MlEnvironmentContract.TacticalV3)
+            bool configuredDefault = config.P0?.Kind == ModelControllerKind.Configured &&
+                config.P1?.Kind == ModelControllerKind.Configured && string.IsNullOrWhiteSpace(config.ScenarioRunPath);
+            if (config.Environment == MlEnvironmentContract.TacticalV3 && !configuredDefault)
             {
                 if (HasDotPathComponent(config.ScenarioRunPath))
                     throw new InvalidOperationException(
@@ -253,7 +255,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
             TacticalV3Contract structuredExpected,
             List<string> errors)
         {
-            if (seat == null || !seat.IsModel ||
+            if (seat == null || !seat.IsModel || seat.Kind == ModelControllerKind.Configured ||
                 string.IsNullOrWhiteSpace(seat.Path))
                 return;
             if (structuredExpected != null && HasDotPathComponent(seat.Path))
@@ -2596,7 +2598,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         {
             EditorGUILayout.LabelField(label, EditorStyles.boldLabel);
             seat.Kind = (ModelControllerKind)EditorGUILayout.EnumPopup("Controller", seat.Kind);
-            if (seat.IsModel)
+            if (seat.IsModel && seat.Kind != ModelControllerKind.Configured)
             {
                 EditorGUILayout.BeginHorizontal();
                 seat.Path = EditorGUILayout.TextField("Run directory", seat.Path);
@@ -2610,6 +2612,7 @@ namespace HexWars.Presentation.EditorTools.MlLab
         string DescribeSeat(ModelSeatConfiguration seat)
         {
             if (seat == null) return "missing configuration";
+            if (seat.Kind == ModelControllerKind.Configured) return "Project/deployment default (resolved when the duel starts)";
             if (!seat.IsModel) return seat.Kind.ToString();
             if (string.IsNullOrWhiteSpace(seat.Path)) return "model path required";
             string manifest = Path.Combine(seat.Path, "run.json");
@@ -2635,7 +2638,9 @@ namespace HexWars.Presentation.EditorTools.MlLab
             var errors = new List<string>(_arena.Validate());
             ValidateSeatFiles(_arena.P0, "Seat 0", errors);
             ValidateSeatFiles(_arena.P1, "Seat 1", errors);
-            if (!File.Exists(PythonExe)) errors.Add("Python environment not found: " + PythonExe);
+            bool bothConfigured = _arena.P0?.Kind == ModelControllerKind.Configured &&
+                _arena.P1?.Kind == ModelControllerKind.Configured;
+            if (!bothConfigured && !File.Exists(PythonExe)) errors.Add("Python environment not found: " + PythonExe);
             if (errors.Count > 0) { _arenaError = string.Join("\n", errors); return; }
             MlArenaLaunchPlan plan;
             try

@@ -109,163 +109,70 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void ResolverUsesTheSelectedLineageDeclaredSourcePolicy()
+        public void ResolverLoadsOnlyTheCatalogPinnedPackageAndAuthenticatesItsCheckpoint()
         {
             string root = CreateResolverProject();
             try
             {
-                CreateCompletedModel(root, "declared-source");
-                WriteInventory(root, published: null, source: "declared-source");
-
-                PlayableModelLaunch launch = PlayableModelResolver.Resolve(root);
-
-                Assert.That(launch.ModelName, Is.EqualTo("declared-source"));
+                var selection = SharedAiModelTests.Selection();
+                PlayableModelLaunch launch = PlayableModelResolver.Resolve(root, selection, null, null);
+                Assert.That(launch.RunDirectory, Is.EqualTo(Path.Combine(root, "models", "ai", "focused")));
+                Assert.That(launch.ControllerSpec, Is.EqualTo("run:" + launch.RunDirectory));
+                File.WriteAllText(Path.Combine(launch.RunDirectory, "checkpoints", "best.pt"), "changed");
+                Assert.Throws<InvalidDataException>(() => PlayableModelResolver.Resolve(root, selection, null, null));
             }
-            finally
-            {
-                Directory.Delete(root, recursive: true);
-            }
+            finally { Directory.Delete(root, true); }
         }
 
         [Test]
-        public void ResolverDoesNotHideAMalformedSelectedLineageBehindThePinnedFallback()
+        public void MissingConfiguredPackageDoesNotFallBackToAnotherRun()
         {
             string root = CreateResolverProject();
             try
             {
-                CreateCompletedModel(root, PlayableModelResolver.PinnedCompletedModel);
-                string selected = Path.Combine(
-                    root, "python", "runs", PlayableModelResolver.SelectedLineage);
-                Directory.CreateDirectory(selected);
-                File.WriteAllText(Path.Combine(selected, "run.json"), "{}");
-
-                Assert.Throws<InvalidDataException>(() =>
-                    PlayableModelResolver.Resolve(root));
+                File.Delete(Path.Combine(root, "models", "ai", "focused", "run.json"));
+                Directory.CreateDirectory(Path.Combine(root, "python", "runs", "some-other-completed-model"));
+                Assert.Throws<FileNotFoundException>(() => PlayableModelResolver.Resolve(root, SharedAiModelTests.Selection(), null, null));
             }
-            finally
-            {
-                Directory.Delete(root, recursive: true);
-            }
+            finally { Directory.Delete(root, true); }
         }
 
         [Test]
-        public void ResolverTreatsADeclaredPublicationAsAuthoritativeAndFailsClosed()
+        public void ExplicitRuntimeAndPythonPathsWorkIndependentlyOfGitWorktreeMarkers()
         {
             string root = CreateResolverProject();
             try
             {
-                CreateCompletedModel(root, PlayableModelResolver.PinnedCompletedModel);
-                CreateCompletedModel(root, "declared-source");
-                WriteInventory(root, published: "missing-publication", source: "declared-source");
-
-                Assert.Throws<DirectoryNotFoundException>(() =>
-                    PlayableModelResolver.Resolve(root));
+                File.WriteAllText(Path.Combine(root, ".git"), "gitdir: /unavailable/wsl/repo/.git/worktrees/other");
+                string python = Path.Combine(root, "python", "winenv", "Scripts", "python.exe");
+                var launch = PlayableModelResolver.Resolve(Path.Combine(root, "unrelated"), SharedAiModelTests.Selection(), root, python);
+                Assert.That(launch.PythonExecutable, Is.EqualTo(python));
+                Assert.That(launch.ServerScript, Is.EqualTo(Path.Combine(root, "python", "policy_server.py")));
             }
-            finally
-            {
-                Directory.Delete(root, recursive: true);
-            }
+            finally { Directory.Delete(root, true); }
         }
 
-        [Test]
-        public void ResolverRejectsCheckpointTraversalBeforeLaunchingPython()
+        [TestCase("../outside")]
+        [TestCase("/absolute")]
+        [TestCase("models/../../outside")]
+        public void PackageTraversalIsRejected(string relative)
         {
-            string root = CreateResolverProject();
-            try
-            {
-                CreateCompletedModel(
-                    root, "unsafe-checkpoint", latestCheckpoint: "../outside.pt");
-                WriteInventory(root, published: "unsafe-checkpoint", source: null);
-
-                Assert.Throws<InvalidDataException>(() =>
-                    PlayableModelResolver.Resolve(root));
-            }
-            finally
-            {
-                Directory.Delete(root, recursive: true);
-            }
-        }
-
-        [Test]
-        public void ResolverUsesPinnedModelOnlyWhenSelectedLineageIsAbsent()
-        {
-            string root = CreateResolverProject();
-            try
-            {
-                CreateCompletedModel(root, PlayableModelResolver.PinnedCompletedModel);
-
-                PlayableModelLaunch launch = PlayableModelResolver.Resolve(root);
-
-                Assert.That(launch.ModelName,
-                    Is.EqualTo(PlayableModelResolver.PinnedCompletedModel));
-            }
-            finally
-            {
-                Directory.Delete(root, recursive: true);
-            }
+            Assert.Throws<ArgumentException>(() => PlayableModelResolver.ContainedPath(Path.GetTempPath(), relative));
         }
 
         static string CreateResolverProject()
         {
-            string root = Path.Combine(
-                Path.GetTempPath(), "HexWars-playable-model-" + Guid.NewGuid().ToString("N"));
-            string python = Path.Combine(root, "python");
-            string scripts = Path.Combine(python, "winenv", "Scripts");
+            string root = Path.Combine(Path.GetTempPath(), "HexWars-ai-" + Guid.NewGuid().ToString("N"));
+            string scripts = Path.Combine(root, "python", "winenv", "Scripts");
             Directory.CreateDirectory(scripts);
-            Directory.CreateDirectory(Path.Combine(python, "runs"));
             File.WriteAllText(Path.Combine(scripts, "python.exe"), string.Empty);
-            File.WriteAllText(Path.Combine(python, "policy_server.py"), string.Empty);
+            File.WriteAllText(Path.Combine(root, "python", "policy_server.py"), string.Empty);
+            string package = Path.Combine(root, "models", "ai", "focused");
+            Directory.CreateDirectory(Path.Combine(package, "checkpoints"));
+            File.WriteAllText(Path.Combine(package, "checkpoints", "best.pt"), string.Empty);
+            File.WriteAllText(Path.Combine(package, "run.json"), "{}");
+            File.WriteAllText(Path.Combine(package, "policy-identity.json"), "{}");
             return root;
         }
-
-        static void WriteInventory(string root, string published, string source)
-        {
-            string selected = Path.Combine(
-                root, "python", "runs", PlayableModelResolver.SelectedLineage);
-            Directory.CreateDirectory(selected);
-            string publishedJson = published == null ? "null" : "\"" + Json(published) + "\"";
-            string sourceJson = source == null
-                ? "null"
-                : "{\"run\":\"" + Json(source) + "\"}";
-            File.WriteAllText(Path.Combine(selected, "run.json"),
-                "{\"schema_version\":1," +
-                "\"config\":{\"algorithm\":\"structured_dagger\"}," +
-                "\"contract\":{\"environment\":\"tactical-v3\"}," +
-                "\"published_run\":" + publishedJson + "," +
-                "\"source_policy\":" + sourceJson + "}");
-        }
-
-        static void CreateCompletedModel(
-            string root, string name, string latestCheckpoint = "checkpoints/best.pt")
-        {
-            const string contractHash =
-                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-            const string encodingHash =
-                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
-            const string capacityHash =
-                "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-            string run = Path.Combine(root, "python", "runs", name);
-            Directory.CreateDirectory(Path.Combine(run, "checkpoints"));
-            File.WriteAllText(Path.Combine(run, "checkpoints", "best.pt"), string.Empty);
-            File.WriteAllText(Path.Combine(run, "policy-identity.json"),
-                "{\"contract_version\":\"tactical-v3\"," +
-                "\"environment_kind\":\"duel\"," +
-                "\"contract_hash\":\"" + contractHash + "\"," +
-                "\"encoding_hash\":\"" + encodingHash + "\"," +
-                "\"capacity_hash\":\"" + capacityHash + "\"}");
-            File.WriteAllText(Path.Combine(run, "run.json"),
-                "{\"schema_version\":2,\"state\":\"completed\"," +
-                "\"config\":{\"algorithm\":\"structured_imitation\"}," +
-                "\"contract\":{\"environment\":\"tactical-v3\"," +
-                "\"version\":\"tactical-v3\",\"environment_kind\":\"duel\"," +
-                "\"contract_hash\":\"" + contractHash + "\"," +
-                "\"encoding_hash\":\"" + encodingHash + "\"," +
-                "\"capacity_hash\":\"" + capacityHash + "\"}," +
-                "\"policy_identity\":\"policy-identity.json\"," +
-                "\"latest_checkpoint\":\"" + Json(latestCheckpoint) + "\"}");
-        }
-
-        static string Json(string value) =>
-            value.Replace("\\", "\\\\").Replace("\"", "\\\"");
     }
 }

@@ -36,7 +36,10 @@ namespace HexWars.Presentation
         bool _fog = false;
         bool _private = false;
         bool _manualPlacement;
-        AiLevel _ai = AiLevel.Hard;
+        AiLevel _ai = AiLevel.Configured;
+        Text _aiLabel;
+        string _difficultyId;
+        bool _creating;
 
         readonly System.Collections.Generic.List<(Button btn, Func<bool> selected)> _toggles
             = new System.Collections.Generic.List<(Button, Func<bool>)>();
@@ -55,16 +58,22 @@ namespace HexWars.Presentation
             return form; // Build runs in Start so _game/_mode are set first
         }
 
-        void Start()
+        async void Start()
         {
             if (_game == null) _game = FindAnyObjectByType<GameBootstrap>();
             _seed = UnityEngine.Random.Range(1, 9999);
             Build();
             RefreshToggles();
+            if (_mode == SetupMode.VsAi)
+            {
+                try { await AiModelSettings.LoadAsync(); }
+                catch (Exception error) { if (this != null) Toast.Show(error.Message); }
+            }
         }
 
         void Update()
         {
+            if (_aiLabel != null) _aiLabel.text = "Difficulty: " + AiModelSettings.DifficultyLabel(_difficultyId) + " ▾";
             if (DeviceInput.Allowed && Keyboard.current != null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {
                 var eventSystem = EventSystem.current ?? FindAnyObjectByType<EventSystem>();
@@ -160,16 +169,8 @@ namespace HexWars.Presentation
             else if (_mode == SetupMode.VsAi)
             {
                 ToggleBtn("Fog of war", -140f, y, 220f, 38f, () => _fog, () => { _fog = !_fog; RefreshToggles(); });
-                ToggleBtn(AiLabel(_ai), 120f, y, 250f, 38f, () => _ai == AiLevel.Hard, () =>
-                {
-                    _ai = _ai == AiLevel.Hard ? AlternateAiLevel() : AiLevel.Hard;
-                    RefreshToggles();
-                    foreach (var (btn, sel) in _toggles)
-                    {
-                        var t = btn.GetComponentInChildren<Text>();
-                        if (t != null && t.text.StartsWith("AI: ")) t.text = AiLabel(_ai);
-                    }
-                });
+                _aiLabel = UiKit.Button(_form.transform, "Difficulty…", 120f, y, 280f, 38f,
+                    OpenDifficulty, UiKit.ButtonStyle.Secondary, UiKit.SizeBody).GetComponentInChildren<Text>();
             }
             else
             {
@@ -280,8 +281,17 @@ namespace HexWars.Presentation
             foreach (var (btn, selected) in _toggles) UiKit.SetToggled(btn, selected());
         }
 
-        void OnCreate()
+        async void OnCreate()
         {
+            if (_creating) return;
+            if (_mode == SetupMode.VsAi)
+            {
+                _creating = true;
+                try { await AiModelSettings.LoadAsync(refresh: true); }
+                catch (Exception error) { if (this != null) Toast.Show(error.Message); return; }
+                finally { _creating = false; }
+                if (this == null) return;
+            }
             bool valid = true;
             foreach (var binding in _bindings) valid &= binding.Commit();
             if (!valid)
@@ -295,21 +305,19 @@ namespace HexWars.Presentation
                                       _armySize, _brutes, _strikers, _snipers, _turnActions, fog, _manualPlacement);
             if (_mode == SetupMode.VsAi)
             {
-                if (_ai == AiLevel.TrainedModel &&
-                    !PlayableModelAdapter.Supports(setup, out string reason))
-                {
-                    Toast.Show(reason);
-                    return;
-                }
                 try
                 {
+                    if (AiModelSettings.Capture(_difficultyId).Model.IsTrained &&
+                        !PlayableModelAdapter.Supports(setup, out string reason))
+                    {
+                        Toast.Show(reason);
+                        return;
+                    }
                     // StartLocalGame performs a full tactical-v3 observation preflight before it
                     // publishes the state, including cached barracks and table capacities.
-                    _game.StartLocalGame(setup, true, _ai);
+                    _game.StartLocalGame(setup, true, _ai, _difficultyId);
                 }
-                catch (Exception error) when (
-                    _ai == AiLevel.TrainedModel &&
-                    (error is ArgumentException || error is InvalidOperationException))
+                catch (Exception error)
                 {
                     Toast.Show(error.Message);
                     return;
@@ -337,6 +345,12 @@ namespace HexWars.Presentation
             string room = RandomCode();
             _game.StartNetGame(room, setup.ToWire(), _private);
             ShowWaiting(room);
+        }
+
+        void OpenDifficulty()
+        {
+            if (!AiModelSettings.IsLoaded) { Toast.Show(AiModelSettings.Error ?? "AI difficulties are still loading."); return; }
+            AiDifficultyPicker.Open(_canvasGo.transform, _difficultyId, id => _difficultyId = id);
         }
 
         void ShowWaiting(string room)
@@ -387,22 +401,5 @@ namespace HexWars.Presentation
             return page + "?room=" + room;
         }
 
-        static AiLevel AlternateAiLevel()
-        {
-#if UNITY_WEBGL && !UNITY_EDITOR
-            // Browser builds cannot spawn the separate Python policy server.  Keep the existing
-            // shippable Random/Greedy pair until a frozen in-process model is promoted.
-            return AiLevel.Easy;
-#else
-            return AiLevel.TrainedModel;
-#endif
-        }
-
-        static string AiLabel(AiLevel level)
-        {
-            if (level == AiLevel.Hard) return "AI: Greedy";
-            if (level == AiLevel.TrainedModel) return "AI: Trained model";
-            return "AI: Random";
-        }
     }
 }

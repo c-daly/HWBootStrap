@@ -23,8 +23,9 @@ namespace HexWars.Presentation
 
         Material _plains, _forest, _water, _rough, _black, _p0, _p1, _p0Dim, _p1Dim;
         Material _fogMarkCell, _p0Fog, _p1Fog;
+        readonly Material[] _surfaces = new Material[8];
         readonly Dictionary<UnitRole, Material> _iconMats = new Dictionary<UnitRole, Material>();
-        readonly Dictionary<(TerrainType, PlayerId), Material> _controlMats = new Dictionary<(TerrainType, PlayerId), Material>();
+        readonly Dictionary<(Material, PlayerId), Material> _controlMats = new Dictionary<(Material, PlayerId), Material>();
         static Texture2D _matcap;
 
         internal static Texture2D MetalMatcap()
@@ -94,12 +95,14 @@ namespace HexWars.Presentation
                 var tv = col.GetComponent<TileView>();
                 var fillT = col.Find("Fill");
                 if (tv == null || fillT == null) continue;
-                var terrain = state.Config.BiomesEnabled ? state.Board.TileAt(tv.Coord).Terrain : TerrainType.Plains;
+                var surface = state.Config.BiomesEnabled
+                    ? MaterialFor(state.Board.TileAt(tv.Coord).Terrain)
+                    : SurfaceMaterial(tv.Coord);
                 var detail = col.Find("Terrain detail");
                 if (detail != null) detail.gameObject.SetActive(state.Config.BiomesEnabled);
                 var owner = state.Board.Controller(tv.Coord);
                 fillT.GetComponent<MeshRenderer>().sharedMaterial =
-                    owner == null ? MaterialFor(terrain) : ControlTintMaterial(terrain, owner.Value);
+                    owner == null ? surface : ControlTintMaterial(surface, owner.Value);
             }
         }
 
@@ -177,11 +180,10 @@ namespace HexWars.Presentation
         }
 
         // tint a controlled hex toward its owner's colour, keeping the matcap metal look (opaque → WebGL-safe)
-        Material ControlTintMaterial(TerrainType terrain, PlayerId owner)
+        Material ControlTintMaterial(Material baseMat, PlayerId owner)
         {
-            var key = (terrain, owner);
+            var key = (baseMat, owner);
             if (_controlMats.TryGetValue(key, out var m)) return m;
-            var baseMat = MaterialFor(terrain);
             m = new Material(baseMat); // clone: same matcap shader + texture
             Color baseC = baseMat.HasProperty("_BaseColor") ? baseMat.GetColor("_BaseColor") : baseMat.color;
             Color ownerC = owner == PlayerId.Player0 ? GraphitePieces.Mint : GraphitePieces.Amber;
@@ -189,6 +191,29 @@ namespace HexWars.Presentation
             if (m.HasProperty("_BaseColor")) m.SetColor("_BaseColor", tint);
             m.color = tint;
             return _controlMats[key] = m;
+        }
+
+        // Cosmetic finish only: independent of hidden biome, height, owner and Unity's random stream.
+        // Reusing eight materials keeps the palette stable through moves, captures and board rebuilds.
+        Material SurfaceMaterial(HexCoord cell)
+        {
+            unchecked
+            {
+                uint hash = (uint)cell.Q * 0x9e3779b9u ^ (uint)cell.R * 0x85ebca6bu ^ 0x27d4eb2du;
+                hash ^= hash >> 16;
+                hash *= 0x7feb352du;
+                hash ^= hash >> 15;
+                return _surfaces[hash % (uint)_surfaces.Length];
+            }
+        }
+
+        void OnDestroy()
+        {
+            // These materials belong to this board, unlike the shared procedural mesh/matcap caches.
+            foreach (var material in _surfaces)
+                if (material != null) { if (Application.isPlaying) Destroy(material); else DestroyImmediate(material); }
+            foreach (var material in _controlMats.Values)
+                if (material != null) { if (Application.isPlaying) Destroy(material); else DestroyImmediate(material); }
         }
 
         // ---- internals ----
@@ -211,7 +236,7 @@ namespace HexWars.Presentation
             var fill = new GameObject("Fill");
             fill.transform.SetParent(col.transform, false);
             fill.AddComponent<MeshFilter>().sharedMesh = HexMesh.Prism(R, htot);
-            fill.AddComponent<MeshRenderer>().sharedMaterial = MaterialFor(tile.Terrain);
+            fill.AddComponent<MeshRenderer>().sharedMaterial = SurfaceMaterial(tile.Coord);
 
             // fog-marking overlay: a thin translucent cap just above the fill top, independent of the
             // Fill renderer's own material (see UpdateFogMarking) — starts hidden; UpdateFogMarking
@@ -363,6 +388,20 @@ namespace HexWars.Presentation
             _forest = Metal(new Color(.18f, .32f, .27f));
             _water  = Metal(new Color(.16f, .28f, .38f));
             _rough  = Metal(new Color(.36f, .31f, .26f));
+            // A restrained mix of slate, charcoal and warm grey. These finishes carry no terrain rules.
+            var finishes = new[]
+            {
+                new Color(.18f, .22f, .25f), new Color(.24f, .29f, .32f),
+                new Color(.30f, .31f, .30f), new Color(.25f, .24f, .23f),
+                new Color(.32f, .34f, .35f), new Color(.21f, .25f, .28f),
+                new Color(.29f, .28f, .26f), new Color(.26f, .30f, .31f),
+            };
+            for (int i = 0; i < _surfaces.Length; i++)
+            {
+                _surfaces[i] = Metal(finishes[i]);
+                _surfaces[i].name = "Hex surface " + i;
+                if (_surfaces[i].HasProperty("_Variation")) _surfaces[i].SetFloat("_Variation", .045f);
+            }
             _p0     = Matte(GraphitePieces.Mint);   // units stay matte for readability
             _p1     = Matte(GraphitePieces.Amber);
             _p0Dim  = Matte(GraphitePieces.Mint * .48f); // dimmed = opponent's, or spent this turn

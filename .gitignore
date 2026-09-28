@@ -101,12 +101,14 @@ engine/**/obj/
 
 # Local isolated feature worktrees
 .worktrees/
+.serena/
 
 # Engine DLL placed in Unity is a build artifact — regenerate with engine/build-to-unity.ps1
 Assets/HexWars/Plugins/HexWars.Engine.dll
 Assets/HexWars/Plugins/HexWars.Engine.dll.meta
 
 # Local ML environments, experiments, trackers, and generated replays
+/.ai-venv/
 __pycache__/
 *.py[cod]
 .pytest_cache/
@@ -115,6 +117,7 @@ python/runs/
 python/wandb/
 python/events.out.tfevents.*
 /replays/*.replay
+.python/
 
 # Generated annihilation-imitation experiment artifacts (identity-bound, never committed).
 /python/datasets/annihilation-imitation-v1/manifest.json

@@ -82,6 +82,20 @@ class TrainerConfig:
                 )
         object.__setattr__(self, "device", _canonical_device(self.device))
 
+    @classmethod
+    def from_checkpoint_metadata(cls, **values: object) -> TrainerConfig:
+        """Parse recorded training settings without requiring that training hardware.
+
+        CPU inference must retain truthful CUDA training provenance on CPU-only hosts.
+        Normal construction and training entrypoints still validate the active device.
+        """
+        device = values.get("device", "cpu")
+        if type(device) is not str or re.fullmatch(r"cpu|cuda:[0-9]+", device) is None:
+            raise ValueError("recorded device must be cpu or canonical cuda:<index>")
+        config = cls(**{**values, "device": "cpu"})
+        object.__setattr__(config, "device", device)
+        return config
+
 
 @dataclass(frozen=True, slots=True)
 class EpochMetrics:

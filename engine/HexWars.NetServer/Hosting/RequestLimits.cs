@@ -17,7 +17,7 @@ namespace HexWars.NetServer.Hosting
     public static class RequestLimits
     {
         /// <summary>
-        /// The largest request body this server will accept, on any route.
+        /// The default request body cap. Explicit tactical inference consumers opt into a larger cap.
         ///
         /// Comfortably above a Steam auth ticket wrapped in JSON and far below anything worth buffering. The
         /// endpoints apply their own, tighter cap when they read the body; this is the outer bound that
@@ -51,10 +51,14 @@ namespace HexWars.NetServer.Hosting
 
         // Opt in only handlers that actually read a body. A POST method alone is not evidence of a
         // consumer: routing may have selected a 405 rejection, or there may be no endpoint at all.
-        sealed class BodyConsumerMetadata { }
+        sealed record BodyConsumerMetadata(int MaxBytes);
 
-        public static RouteHandlerBuilder WithHexWarsRequestBody(this RouteHandlerBuilder endpoint) =>
-            endpoint.WithMetadata(new BodyConsumerMetadata());
+        public static RouteHandlerBuilder WithHexWarsRequestBody(this RouteHandlerBuilder endpoint,
+            int maxBytes = (int)MaxRequestBodyBytes)
+        {
+            if (maxBytes <= 0 || maxBytes > 32 * 1024 * 1024) throw new ArgumentOutOfRangeException(nameof(maxBytes));
+            return endpoint.WithMetadata(new BodyConsumerMetadata(maxBytes));
+        }
 
         /// <summary>The Kestrel side: the limits the server itself enforces, before any middleware runs.</summary>
         public static void Configure(KestrelServerOptions kestrel)
@@ -93,6 +97,10 @@ namespace HexWars.NetServer.Hosting
 
             return app.Use(async (context, next) =>
             {
+                BodyConsumerMetadata? consumer = context.GetEndpoint()?.Metadata.GetMetadata<BodyConsumerMetadata>();
+                long maxBytes = consumer?.MaxBytes ?? MaxRequestBodyBytes;
+                if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } size)
+                    size.MaxRequestBodySize = context.Request.ContentLength is null ? 6 * maxBytes + 5 : maxBytes;
                 if (context.Request.ContentLength is long declared)
                 {
                     // A length that is not one. Kestrel refuses this before the middleware runs, but this
@@ -105,7 +113,7 @@ namespace HexWars.NetServer.Hosting
                         return;
                     }
 
-                    if (declared > MaxRequestBodyBytes)
+                    if (declared > maxBytes)
                     {
                         await RefuseAsync(context, StatusCodes.Status413PayloadTooLarge, TooLargeMessage)
                             .ConfigureAwait(false);
@@ -114,23 +122,21 @@ namespace HexWars.NetServer.Hosting
                 }
                 else if (CarriesAnUndeclaredBody(context.Request))
                 {
-                    if (context.GetEndpoint()?.Metadata.GetMetadata<BodyConsumerMetadata>() is null)
+                    if (consumer is null)
                     {
                         context.Response.Headers.Connection = "close";
                         await RefuseAsync(context, StatusCodes.Status400BadRequest, ApiErrors.InvalidRequestMessage)
                             .ConfigureAwait(false);
                         return;
                     }
-                    if (context.Features.Get<IHttpMaxRequestBodySizeFeature>() is { IsReadOnly: false } transport)
-                        transport.MaxRequestBodySize = MaxChunkedRequestBytes;
-
                     TimeProvider time = context.RequestServices.GetRequiredService<TimeProvider>();
-                    using var deadline = new CancellationTokenSource(BodyReadTimeout, time);
+                    using var deadline = new CancellationTokenSource(maxBytes == MaxRequestBodyBytes
+                        ? BodyReadTimeout : TimeSpan.FromSeconds(60), time);
                     using var read = CancellationTokenSource.CreateLinkedTokenSource(
                         deadline.Token, context.RequestAborted);
                     try
                     {
-                        if (await IsOverTheCapAsync(context.Request, read.Token).ConfigureAwait(false))
+                        if (await IsOverTheCapAsync(context.Request, maxBytes, read.Token).ConfigureAwait(false))
                         {
                             await RefuseAsync(context, StatusCodes.Status413PayloadTooLarge, TooLargeMessage)
                                 .ConfigureAwait(false);
@@ -182,20 +188,20 @@ namespace HexWars.NetServer.Hosting
         /// Buffering first is what lets the endpoint read the same body afterwards. The buffer is bounded by
         /// the cap plus one, so a client streaming megabytes is measured in kilobytes and then refused.
         /// </summary>
-        static async Task<bool> IsOverTheCapAsync(HttpRequest request, CancellationToken ct)
+        static async Task<bool> IsOverTheCapAsync(HttpRequest request, long maxBytes, CancellationToken ct)
         {
             request.EnableBuffering();
 
-            var probe = new byte[MaxRequestBodyBytes + 1];
+            var probe = new byte[Math.Min(maxBytes + 1, 8192)];
             var filled = 0;
 
             try
             {
-                while (filled < probe.Length)
+                while (filled <= maxBytes)
                 {
                     int read = await request.Body
                         .ReadAsync(
-                            probe.AsMemory(filled, probe.Length - filled),
+                            probe.AsMemory(0, (int)Math.Min(probe.Length, maxBytes + 1 - filled)),
                             ct)
                         .ConfigureAwait(false);
 
@@ -213,7 +219,7 @@ namespace HexWars.NetServer.Hosting
             }
 
             request.Body.Position = 0;
-            return filled > MaxRequestBodyBytes;
+            return filled > maxBytes;
         }
 
         static Task RefuseAsync(HttpContext context, int status, string message)

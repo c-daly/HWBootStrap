@@ -25,6 +25,7 @@ class StructuredController:
         "structured_imitation"
     )
     checkpoint_step: int | None = None
+    package_metadata: Mapping[str, str] | None = None
 
 
 def _run_identity_and_checkpoint(
@@ -99,6 +100,7 @@ def load_structured_controller(
 ) -> StructuredController:
     """Load only a sealed-by-validation structured run, never an isolated tensor file."""
     for _attempt in range(3):
+        package_metadata = None
         before = _run_identity_and_checkpoint(run_dir)
         identity, checkpoint_path, algorithm, checkpoint_step, _state = before
         if identity.encoding_hash != expected_encoding_hash:
@@ -110,7 +112,19 @@ def load_structured_controller(
                 "structured controller capacity hash does not match expected capacity hash"
             )
         if algorithm == "structured_imitation":
-            loaded = validate_structured_run(Path(run_dir))
+            manifest_bytes = (Path(run_dir) / "run.json").read_bytes()
+            manifest = json.loads(manifest_bytes)
+            if manifest.get("kind") == "tactical-v3-playable-export":
+                from .tactical_v3_playable import validate_playable_package
+
+                loaded = validate_playable_package(Path(run_dir))
+                if (Path(run_dir) / "run.json").read_bytes() != manifest_bytes:
+                    continue
+                package_metadata = {name: manifest[name] for name in (
+                    "checkpoint_sha256", "package_sha256", "model_state_sha256", "package_id",
+                )}
+            else:
+                loaded = validate_structured_run(Path(run_dir))
             validated_step = loaded.metadata.best_epoch
         else:
             from .tactical_v3_outcome_checkpoint import validate_outcome_run
@@ -135,6 +149,7 @@ def load_structured_controller(
             identity=identity,
             algorithm=algorithm,
             checkpoint_step=checkpoint_step,
+            package_metadata=package_metadata,
         )
     raise ValueError("structured run changed repeatedly while loading its checkpoint")
 

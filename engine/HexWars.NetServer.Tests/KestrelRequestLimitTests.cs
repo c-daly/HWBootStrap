@@ -70,6 +70,9 @@ namespace HexWars.NetServer.Tests
                 Results.Bytes(Encoding.UTF8.GetBytes(await new StreamReader(request.Body).ReadToEndAsync())))
                 .WithHexWarsRequestBody();
             _app.MapPost("/bodyless-test", () => "No body consumer");
+            _app.MapPost("/larger-body-test", async (HttpRequest request) =>
+                Results.Bytes(Encoding.UTF8.GetBytes(await new StreamReader(request.Body).ReadToEndAsync())))
+                .WithHexWarsRequestBody(64 * 1024);
 
             await _app.StartAsync();
 
@@ -98,6 +101,25 @@ namespace HexWars.NetServer.Tests
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
             request.Headers.TransferEncodingChunked = true;
             return request;
+        }
+
+        [TestCase(false)]
+        [TestCase(true)]
+        public async Task ExplicitConsumerCapReachesKestrelWithoutChangingOtherRoutes(bool chunked)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "/larger-body-test")
+            { Content = chunked ? new StreamContent(new UndeclaredLengthStream(new byte[32 * 1024]))
+                : new ByteArrayContent(new byte[32 * 1024]) };
+            if (chunked) request.Headers.TransferEncodingChunked = true;
+            using HttpResponseMessage response = await _client.SendAsync(request);
+            Assert.That(response.StatusCode, Is.EqualTo(HttpStatusCode.OK));
+            Assert.That((await response.Content.ReadAsByteArrayAsync()).Length, Is.EqualTo(32 * 1024));
+            using var oversized = new HttpRequestMessage(HttpMethod.Post, "/larger-body-test")
+            { Content = chunked ? new StreamContent(new UndeclaredLengthStream(new byte[64 * 1024 + 1]))
+                : new ByteArrayContent(new byte[64 * 1024 + 1]) };
+            if (chunked) oversized.Headers.TransferEncodingChunked = true;
+            using HttpResponseMessage refused = await _client.SendAsync(oversized);
+            Assert.That(refused.StatusCode, Is.EqualTo(HttpStatusCode.RequestEntityTooLarge));
         }
 
         async Task<TcpClient> OpenUnfinishedBody(string method, string path)

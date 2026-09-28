@@ -56,6 +56,8 @@ namespace HexWars.Presentation
             if(Vector2.Distance(size,_size)>2){Build();_dirty=true;}
             int status = (_game.Reconnecting?1:0) | (_input!=null&&_input.CanCommand?2:0)
                 | (_input!=null&&_input.AwaitingServer?4:0) | (_game.DemoMode?8:0);
+            var opponent = _game.GetComponent<AiOpponent>();
+            if (opponent != null && opponent.IsThinking) status |= 16;
             if(status!=_statusBits){_statusBits=status;_dirty=true;}
             if(ModalOpen && !UiKit.EscapeHandledThisFrame && DeviceInput.FocusProbe() && Keyboard.current!=null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {UiKit.MarkInputEscapeHandled();CloseDialog();}
@@ -99,7 +101,7 @@ namespace HexWars.Presentation
             Backdrop(width*view.xMax,height*(1-view.yMax),width*(1-view.xMax),height*view.height);
             var bar=Surface(_canvas.transform,"Match header",0,0,width,58,UiKit.Bg);
             var mark=HexBrandMark.Add(bar.transform,0,0,33);Place(mark.rectTransform,22,12,33,33);
-            Label(bar.transform,"HEXWARS",69,13,160,31,23);
+            Label(bar.transform,"HEXWARS",59,13,160,31,23);
             _turn=Label(bar.transform,"",narrow?230:width*.40f,9,narrow?200:280,23,17,GraphitePieces.Mint);
             _round=Label(bar.transform,"",narrow?230:width*.40f,32,narrow?200:340,17,12,Muted);
             float fieldW=narrow?width:width-W-54;
@@ -173,7 +175,8 @@ namespace HexWars.Presentation
         {
             if(Camera.main==null||_game==null)return;
             bool active=_game.State!=null&&!_game.DemoMode;
-            Rect rect=!active?new Rect(0,0,1,1):BoardViewport(_size);
+            var title = !active && _game.DemoMode ? _game.GetComponent<TitleScreen>() : null;
+            Rect rect=active?BoardViewport(_size):title!=null?title.DemoViewport:new Rect(0,0,1,1);
             if(Camera.main.rect!=rect){Camera.main.rect=rect;Camera.main.GetComponent<CameraRig>()?.Frame();}
         }
 
@@ -212,10 +215,15 @@ namespace HexWars.Presentation
             if(s.PlacingStartingUnits&&WorkshopOpen)SetWorkshop(false);
             var viewer=Seat;bool waiting=_game.WaitingHumanSeat()!=null;
             _turn.text=s.PlacingStartingUnits?$"Player {(int)s.ActivePlayer+1}: starting positions":s.IsGameOver?"Match complete":_game.Reconnecting?"Reconnecting...":waiting?"Opponent's turn":_game.Networked||_game.GetComponent<AiOpponent>()!=null?"Your turn":$"Player {(int)s.ActivePlayer+1}'s turn";
+            var opponent = _game.GetComponent<AiOpponent>();
+            if (opponent != null && !s.IsGameOver && !s.PlacingStartingUnits && waiting)
+                _turn.text = opponent.IsThinking ? "AI is thinking…" : "Opponent's turn";
             _turn.color=GraphitePieces.TeamColor(s.ActivePlayer);
             string pace=s.Config.TurnPolicy.RemainingActions(s)?.ToString();
             _round.text=s.PlacingStartingUnits?$"SETUP   /   {s.Player(viewer).Points} points":$"ROUND {s.Round:00}   /   {s.Player(viewer).Points} points"+(pace!=null?$"   /   {pace} actions left":"");
             _mission.text=s.PlacingStartingUnits?"Arrange your army inside the highlighted starting area":WorkshopOpen?"":s.Config.TerritoryMode?"Territory · control the battlefield":"Annihilation · eliminate the opposing army";
+            if (opponent != null && !WorkshopOpen && !s.PlacingStartingUnits)
+                _mission.text += " · Difficulty: " + opponent.ModelLabel;
             _panel.gameObject.SetActive(!WorkshopOpen);
             _workshop.GetComponentInChildren<Text>().text=WorkshopOpen?"Back to battle":"Design army";
             _workshop.interactable=!s.PlacingStartingUnits;

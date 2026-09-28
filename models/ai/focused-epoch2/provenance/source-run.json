@@ -1,0 +1,24 @@
+{
+  "best_epoch": 2,
+  "best_weighted_validation_nll": 1.3323207354808653,
+  "config": {
+    "algorithm": "structured_curriculum",
+    "backend": "structured_curriculum",
+    "device": "cuda:0",
+    "environment": "tactical-v3",
+    "run_name": "combat-matchup-beacon-seed236-replay-v3"
+  },
+  "created_at": "2026-09-06T14:55:05.229112Z",
+  "curriculum_sha256": "6233cd4ad0ef140ed42e3370d9820571092cab54c9ac2957113970421e001d43",
+  "epoch": 2,
+  "latest_checkpoint": "training/checkpoints/best.pt",
+  "latest_checkpoint_step": 2,
+  "latest_message": "stopped with exact-resume checkpoint preserved",
+  "pid": 94522,
+  "published_run": null,
+  "schema_version": 1,
+  "state": "stopped",
+  "train_examples": 9451,
+  "updated_at": "2026-09-06T15:51:33.438068Z",
+  "validation_examples": 4118
+}

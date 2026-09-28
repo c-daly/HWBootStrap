@@ -30,7 +30,7 @@ namespace HexWars.Presentation
         public int RoughWeight = 10;
         public int WaterWeight = 5;
 
-        [Tooltip("Off = biomes are mechanically inert (every tile plays as flat plains); the board still renders varied terrain.")]
+        [Tooltip("Off = biome bonuses are disabled; hex finishes vary cosmetically without terrain symbols.")]
         public bool BiomesEnabled = false; // off for now
 
         [Tooltip("On = one action per turn (chess-like). Off = act with your whole army, then End Turn. Takes effect on a new game.")]
@@ -48,8 +48,8 @@ namespace HexWars.Presentation
         [Header("Opponent")]
         [Tooltip("On = Player 2 is played by the AI; you play Player 1. (How a vs-AI game starts in a build.)")]
         public bool VsAI = false;
-        [Tooltip("Greedy is built in. Trained Model uses the selected fixed tactical-v3 package through the local Python policy server.")]
-        public AiLevel Difficulty = AiLevel.Hard;
+        [Tooltip("Configured follows the project difficulty mapping; explicit scripted levels are for developer checks.")]
+        public AiLevel Difficulty = AiLevel.Configured;
 
         [Header("Demo")]
         public bool DemoPieces = true;
@@ -86,6 +86,7 @@ namespace HexWars.Presentation
         /// started afterward.</summary>
         public GameSetup? LastLocalSetup { get; private set; }
         public AiLevel LastLocalAi { get; private set; }
+        public string LastLocalDifficultyId { get; private set; }
 
         /// <summary>Game-over banner shows Rematch only for a local vs-AI game (spec §6).</summary>
         public bool RematchAvailable => LastLocalSetup.HasValue;
@@ -96,7 +97,7 @@ namespace HexWars.Presentation
 
         public ActionPresenter Presenter { get; private set; }
 
-        void Start()
+        async void Start()
         {
             if (GetComponent<TacticalHud>() == null) gameObject.AddComponent<TacticalHud>();
             if (System.Array.IndexOf(System.Environment.GetCommandLineArgs(), "-graphite-workshop") >= 0)
@@ -126,6 +127,12 @@ namespace HexWars.Presentation
                 else { StartDemo(); gameObject.AddComponent<TitleScreen>(); } // front door: demo + title menu
                 return;
             }
+            if (VsAI)
+            {
+                try { await AiModelSettings.LoadAsync(refresh: true); }
+                catch (System.Exception error) { Toast.Show("AI unavailable: " + error.Message); return; }
+                if (this == null) return;
+            }
             NewGame();
             if (VsAI)
             {
@@ -144,7 +151,7 @@ namespace HexWars.Presentation
 
             // damageFloor 1 matches GameFactory (the lobby path): a landed hit always deals at least 1,
             // so an attacker with damage > 0 never "does nothing" against high defense
-            bool trainedModelRules = VsAI && Difficulty == AiLevel.TrainedModel &&
+            bool trainedModelRules = VsAI && AiModelSettings.UsesTrainedModel(Difficulty) &&
                                      !TerritoryMode && !FogOfWar;
             var config = TerritoryMode
                 ? GameConfig.Default(biomesEnabled: BiomesEnabled,
@@ -206,7 +213,7 @@ namespace HexWars.Presentation
 
             var trainedOpponent = GetComponent<AiOpponent>();
             if (trainedOpponent != null &&
-                trainedOpponent.Level == AiLevel.TrainedModel &&
+                trainedOpponent.UsesTrainedModel &&
                 !PlayableModelAdapter.PreservesCapacity(State, cmd, out string capacityReason))
             {
                 Debug.Log("[HexWars] " + cmd.GetType().Name +
@@ -301,17 +308,21 @@ namespace HexWars.Presentation
         /// <summary>Start a single-machine game from the lobby's setup (no server). <paramref name="vsAi"/>
         /// adds an AI opponent on Player 2 at <paramref name="level"/>; otherwise it's a local hotseat.
         /// Used by the lobby's vs-AI and Hotseat options.</summary>
-        public void StartLocalGame(GameSetup setup, bool vsAi, AiLevel level = AiLevel.Hard)
+        public void StartLocalGame(GameSetup setup, bool vsAi, AiLevel level = AiLevel.Configured, string difficultyId = null)
         {
+            AiModelSelection aiSelection = !vsAi ? null :
+                level == AiLevel.Configured || level == AiLevel.TrainedModel
+                    ? AiModelSettings.Capture(difficultyId) : AiModelSettings.ForLevel(level);
+            bool trained = aiSelection != null && aiSelection.Model.IsTrained;
             var p0Barracks = SessionBarracksCache.ForLocalPlayer(0).Snapshot();
             var p1Barracks = vsAi
                 ? BarracksCatalog.DefaultTemplates
                 : SessionBarracksCache.ForLocalPlayer(1).Snapshot();
-            GameState nextState = vsAi && level == AiLevel.TrainedModel
+            GameState nextState = trained
                 ? GameFactory.BuildTacticalV3Compatible(
                     setup, p0Barracks, p1Barracks)
                 : GameFactory.Build(setup, p0Barracks, p1Barracks);
-            if (vsAi && level == AiLevel.TrainedModel)
+            if (trained)
             {
                 var preflight = nextState;
                 if (preflight.PlacingStartingUnits)
@@ -342,11 +353,13 @@ namespace HexWars.Presentation
                 // AI all driving Player1 (doubled action rate), and ReturnToMenu destroys only one,
                 // leaking a phantom AI into the next game. Guarding here protects every caller.
                 var oldAi = GetComponent<AiOpponent>();
-                if (oldAi != null) Destroy(oldAi);
+                if (oldAi != null) { oldAi.enabled = false; Destroy(oldAi); }
                 var ai = gameObject.AddComponent<AiOpponent>();
                 ai.Level = level;
+                ai.Selection = aiSelection;
                 LastLocalSetup = setup;
                 LastLocalAi = level;
+                LastLocalDifficultyId = aiSelection.DifficultyId;
             }
             else
             {
@@ -359,22 +372,26 @@ namespace HexWars.Presentation
         /// <summary>Game-over banner's Rematch button: same setup, fresh seed, instant restart. A no-op
         /// if the last game wasn't local vs-AI (defensive — the banner only shows the button when
         /// RematchAvailable is already true, so this guard should never actually trigger).</summary>
-        public void Rematch()
+        public async void Rematch()
         {
             if (!LastLocalSetup.HasValue) return;
+            var previousState = State;
+            try { await AiModelSettings.LoadAsync(refresh: true); }
+            catch (System.Exception error) { if (this != null) Toast.Show("AI unavailable: " + error.Message); return; }
+            if (this == null || !ReferenceEquals(previousState, State) || !LastLocalSetup.HasValue) return;
             var s = LastLocalSetup.Value;
             var reseeded = new GameSetup(s.Mode, s.Width, s.Height, s.StartingPoints,
                                          UnityEngine.Random.Range(1, 99999), s.ArmySize, s.Brutes, s.Strikers,
                                          s.Snipers, s.TurnActions, s.Fog, s.ManualPlacement);
-            StartLocalGame(reseeded, true, LastLocalAi);
+            try { StartLocalGame(reseeded, true, LastLocalAi, LastLocalDifficultyId); }
+            catch (System.Exception error) { Toast.Show("AI unavailable: " + error.Message); }
         }
 
-        /// <summary>The title screen's living background: a muted Greedy-vs-Random match on a fresh
-        /// standard map, driven by SpectatorDriver through the normal presenter path (camera glides
-        /// and all), with every gameplay UI surface suppressed via <see cref="DemoMode"/>.
-        /// Greedy-vs-Greedy is deliberately avoided: mirror matches draw ~93% as standoffs.</summary>
+        /// <summary>The title background uses the shared configured AI and model-compatible rules.</summary>
         public void StartDemo()
         {
+            var previous = GetComponent<SpectatorDriver>();
+            if (previous != null) { previous.enabled = false; Destroy(previous); }
             Presenter?.ResetQueue();
             Networked = false;
             DemoMode = true;
@@ -383,12 +400,12 @@ namespace HexWars.Presentation
             SoundManager.StopAmbience();
             var setup = new GameSetup(GameMode.Annihilation, 11, 8, 0,
                                       UnityEngine.Random.Range(1, 99999), 5, 2, 2, 1, 3);
-            State = GameFactory.Build(setup);
+            State = GameFactory.BuildTacticalV3Compatible(setup);
             var renderer = GetComponent<BoardRenderer>();
             renderer.Render(State.Board);
             renderer.RenderEntities(State, FogViewer());
             FindAnyObjectByType<CameraRig>()?.Frame();
-            if (GetComponent<SpectatorDriver>() == null) gameObject.AddComponent<SpectatorDriver>();
+            gameObject.AddComponent<SpectatorDriver>();
             StateChanged?.Invoke();
         }
 
@@ -401,12 +418,13 @@ namespace HexWars.Presentation
             SoundManager.Muted = false;
             SoundManager.StopTitleMusic();
             var driver = GetComponent<SpectatorDriver>();
-            if (driver != null) Destroy(driver);
+            if (driver != null) { driver.enabled = false; Destroy(driver); }
             var input = FindAnyObjectByType<UnitInputController>();
             if (input != null) input.ReadOnly = false;
             var barracks = FindAnyObjectByType<BarracksPanel>();
             if (barracks != null) barracks.ReadOnly = false;
         }
+
 
         static string RoomFromPageUrl()
         {
@@ -437,7 +455,7 @@ namespace HexWars.Presentation
             Seat = null;
             Reconnecting = false;
             var ai = GetComponent<AiOpponent>();
-            if (ai != null) Destroy(ai);
+            if (ai != null) { ai.enabled = false; Destroy(ai); }
             State = null;
             StateChanged?.Invoke();
             GetComponent<SetupForm>()?.Close();
