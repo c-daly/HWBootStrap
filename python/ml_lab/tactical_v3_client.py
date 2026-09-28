@@ -13,7 +13,6 @@ import subprocess
 import threading
 from typing import Any, Literal
 
-from hexwars_gym.env import no_window_creationflags
 from .tactical_v3_schema import (
     TacticalV3SemanticIdentity,
     TacticalV3View,
@@ -26,6 +25,14 @@ from .tactical_v3_schema import (
 _STDERR_TAIL_LIMIT = 8192
 _REAP_TIMEOUT_SECONDS = 2
 _REPLY_TIMEOUT_SECONDS = 30
+
+
+def no_window_creationflags() -> int:
+    # Pure policy inference imports the wire dataclasses without creating an
+    # environment. Keep Gymnasium optional until an actual Gym client is used.
+    from hexwars_gym.env import no_window_creationflags as flags
+
+    return flags()
 
 
 @dataclass(frozen=True, slots=True)

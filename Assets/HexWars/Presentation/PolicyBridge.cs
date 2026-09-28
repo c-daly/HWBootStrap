@@ -24,6 +24,7 @@ namespace HexWars.Presentation
         public string Environment { get; internal set; }
         public string EncodingHash { get; internal set; }
         public string CapacityHash { get; internal set; }
+        public string CheckpointSha256 { get; internal set; }
     }
 
     public sealed class PolicyReadyResult
@@ -68,6 +69,7 @@ namespace HexWars.Presentation
         readonly Queue<string> _stderr = new Queue<string>();
         readonly object _stderrGate = new object();
         Process _proc;
+        readonly SemaphoreSlim _structuredRequests = new SemaphoreSlim(1, 1);
 
         public PolicyReadyResult ReadyInfo { get; private set; }
         public PolicySeatInfo Seat0 => FindSeat(0);
@@ -124,13 +126,13 @@ namespace HexWars.Presentation
             }
             catch (OperationCanceledException)
             {
-                Dispose();
+                Abort();
                 return false;
             }
             catch (Exception error)
             {
                 string message = error.Message;
-                Dispose();
+                Abort();
                 UnityEngine.Debug.LogError("PolicyBridge: " + WithStderr(message));
                 return false;
             }
@@ -175,6 +177,56 @@ namespace HexWars.Presentation
                 throw new InvalidOperationException(
                     WithStderr(error.Message), error);
             }
+        }
+
+        /// <summary>Cancelable request for normal play. Timeout destroys this stream rather than reusing a late reply.</summary>
+        public async Task<PolicyCandidateResult> ActStructuredAsync(
+            int seat, TacticalV3ViewDto decision, int timeoutMs, CancellationToken cancellationToken)
+        {
+            if (decision == null || seat != decision.seat) throw new ArgumentException("structured policy seat differs");
+            if (timeoutMs <= 0) throw new ArgumentOutOfRangeException(nameof(timeoutMs));
+            await _structuredRequests.WaitAsync(cancellationToken);
+            Process process = null;
+            try
+            {
+                EnsureRunning();
+                process = _proc;
+                var request = new TacticalV3PolicyRequestDto { seat = seat, decision = decision };
+                Task<string> reply = ExchangeAsync(process, PolicyJson.Serialize(request));
+                Task deadline = Task.Delay(timeoutMs, cancellationToken);
+                if (await Task.WhenAny(reply, deadline) != reply)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    throw new TimeoutException("The trained model did not respond in time.");
+                }
+                string response = await reply;
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(process, _proc)) throw new OperationCanceledException("AI match ended.");
+                if (response == null) throw new InvalidOperationException(WithStderr("policy server closed unexpectedly"));
+                return ParseStructuredAction(response, decision.decision_id);
+            }
+            catch
+            {
+                if (ReferenceEquals(process, _proc)) Abort();
+                throw;
+            }
+            finally { _structuredRequests.Release(); }
+        }
+
+        static async Task<string> ExchangeAsync(Process process, string request)
+        {
+            await process.StandardInput.WriteLineAsync(request);
+            await process.StandardInput.FlushAsync();
+            return await process.StandardOutput.ReadLineAsync();
+        }
+
+        public void Abort()
+        {
+            var process = Interlocked.Exchange(ref _proc, null);
+            if (process == null) return;
+            process.ErrorDataReceived -= OnError;
+            try { if (!process.HasExited) process.Kill(); } catch { }
+            process.Dispose();
         }
 
         public PolicyReloadResult Reload()
@@ -263,6 +315,7 @@ namespace HexWars.Presentation
                     Environment = seat.environment ?? string.Empty,
                     EncodingHash = seat.encoding_hash ?? string.Empty,
                     CapacityHash = seat.capacity_hash ?? string.Empty,
+                    CheckpointSha256 = seat.checkpoint_sha256 ?? string.Empty,
                 };
             }
             return result;
@@ -444,6 +497,7 @@ namespace HexWars.Presentation
             public string environment;
             public string encoding_hash;
             public string capacity_hash;
+            public string checkpoint_sha256;
         }
     }
 }

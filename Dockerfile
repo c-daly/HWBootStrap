@@ -10,6 +10,7 @@ RUN dotnet restore engine/HexWars.NetServer/HexWars.NetServer.csproj
 # copy sources (engine/HexWars.NetServer/wwwroot holds the compiled WebGL client) and publish
 COPY engine/HexWars.Engine/    engine/HexWars.Engine/
 COPY engine/HexWars.NetServer/ engine/HexWars.NetServer/
+COPY Assets/StreamingAssets/ai-models.json Assets/StreamingAssets/ai-models.json
 RUN dotnet publish engine/HexWars.NetServer/HexWars.NetServer.csproj -c Release -o /app /p:UseAppHost=false
 
 # One repository, two deployments. The legacy WebGL service serves the browser client out of wwwroot and
@@ -25,7 +26,25 @@ RUN if [ "$INCLUDE_WEBGL" != "true" ]; then rm -rf /app/wwwroot; fi
 # ---- runtime ----
 FROM mcr.microsoft.com/dotnet/aspnet:8.0
 WORKDIR /app
+# The browser uses the same checkpoint package as desktop through the hosted policy bridge.
+# Install CPU wheels here; CUDA training environments are never copied into a release image.
+RUN apt-get update && apt-get install -y --no-install-recommends python3 python3-venv ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY python/requirements-inference.txt /tmp/requirements-inference.txt
+RUN python3 -m venv /opt/ai-venv \
+    && /opt/ai-venv/bin/pip install --no-cache-dir -r /tmp/requirements-inference.txt \
+    && rm /tmp/requirements-inference.txt
 COPY --from=build /app ./
+COPY python/ /app/python/
+COPY models/ai/ /app/models/ai/
+COPY Assets/StreamingAssets/ai-models.json /app/ai-models.json
+ENV HEXWARS_AI_RUNTIME_ROOT=/app
+ENV HEXWARS_AI_CONFIG_PATH=/app/ai-models.json
+ENV HEXWARS_AI_PYTHON=/opt/ai-venv/bin/python
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV OMP_NUM_THREADS=1
+ENV MKL_NUM_THREADS=1
+ENV OPENBLAS_NUM_THREADS=1
 ENV PORT=8080
 # The deployed image is immutable, so live appsettings reload is unnecessary. Disabling it also
 # prevents ASP.NET Core default configuration providers from allocating inotify watchers on hosts

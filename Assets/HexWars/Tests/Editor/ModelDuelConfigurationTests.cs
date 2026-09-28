@@ -520,11 +520,14 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void Defaults_SelectTacticalV2Environment()
+        public void Defaults_SelectSharedModelAndTacticalV3Environment()
         {
             var config = new ModelDuelConfiguration();
 
-            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV2));
+            Assert.That(config.Environment, Is.EqualTo(MlEnvironmentContract.TacticalV3));
+            Assert.That(config.P0.BuildSpec(), Is.EqualTo("configured"));
+            Assert.That(config.P1.BuildSpec(), Is.EqualTo("configured"));
+            Assert.That(config.Validate(), Is.Empty);
             Assert.That(config.Observer, Is.EqualTo(ModelDuelObserverSeat.Player1));
             Assert.That(ModelDuelObserver.Resolve(config.Observer), Is.EqualTo(PlayerId.Player0));
         }

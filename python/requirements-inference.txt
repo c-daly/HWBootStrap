@@ -1,0 +1,4 @@
+# CPU serving only. Training keeps its separately configured CUDA environment.
+--extra-index-url https://download.pytorch.org/whl/cpu
+numpy==2.4.6
+torch==2.12.1+cpu

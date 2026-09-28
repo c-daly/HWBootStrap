@@ -59,19 +59,78 @@ namespace HexWars.Presentation.Tests
         }
 
         [Test]
-        public void DifficultyChoiceOffersGreedyAndTrainedModelInsteadOfRandom()
+        public void AiSetupOffersOnlyConfiguredDifficultyNamesAndPreservesTheSelectedId()
         {
-            Button choice = _form.GetComponentsInChildren<Button>(true)
-                .Single(button =>
-                    (button.GetComponentInChildren<Text>()?.text ?? string.Empty)
-                    .StartsWith("AI: "));
-            Assert.That(choice.GetComponentInChildren<Text>().text,
-                Is.EqualTo("AI: Greedy"));
+            Invoke(_form, "Update");
+            var field = typeof(SetupForm).GetField("_ai", BindingFlags.Instance | BindingFlags.NonPublic);
+            Assert.That(field.GetValue(_form), Is.EqualTo(AiLevel.Configured));
+            Text label = (Text)typeof(SetupForm).GetField("_aiLabel", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(_form);
+            Assert.That(label.text, Is.EqualTo("Difficulty: " + AiModelSettings.SelectionLabel + " ▾"));
+            Invoke(_form, "OpenDifficulty");
+            var picker = _form.GetComponentsInChildren<Canvas>(true).Single(canvas => canvas.name == "AiDifficultyPicker");
+            AssertPickerLayout(picker, (RectTransform)picker.transform.parent);
+            var buttons = picker.GetComponentsInChildren<Button>(true);
+            var names = buttons.Select(button => button.GetComponentInChildren<Text>()?.text ?? string.Empty).ToArray();
+            foreach (var difficulty in AiModelSettings.Catalog.difficulties) Assert.That(names, Does.Contain(difficulty.label));
+            foreach (var model in AiModelSettings.Catalog.models) Assert.That(names, Does.Not.Contain(model.label));
+            // Headless EditMode has undrawn Graphic.depth=-1, so EventSystem skips these
+            // graphics. Check the actual sorting priority and mask eligibility here;
+            // rendered click dispatch is covered by the browser integration gate.
+            Canvas.ForceUpdateCanvases();
+            var setupCanvas = picker.transform.parent.GetComponent<Canvas>();
+            Assert.That(picker.GetComponent<GraphicRaycaster>().sortOrderPriority,
+                Is.GreaterThan(setupCanvas.GetComponent<GraphicRaycaster>().sortOrderPriority));
+            foreach (var difficulty in AiModelSettings.Catalog.difficulties)
+            {
+                var button = buttons.Single(item => item.GetComponentInChildren<Text>()?.text == difficulty.label);
+                var buttonRect = (RectTransform)button.transform;
+                var point = RectTransformUtility.WorldToScreenPoint(null, buttonRect.TransformPoint(buttonRect.rect.center));
+                Assert.That(button.targetGraphic.canvas, Is.SameAs(picker));
+                Assert.That(button.targetGraphic.raycastTarget, Is.True);
+                Assert.That(RectTransformUtility.RectangleContainsScreenPoint(buttonRect, point, null), Is.True);
+                Assert.That(button.targetGraphic.Raycast(point, null), Is.True, difficulty.label + " must pass its viewport masks.");
+            }
+            var selected = AiModelSettings.Catalog.difficulties[0];
+            buttons.Single(button => button.GetComponentInChildren<Text>()?.text == selected.label).onClick.Invoke();
+            Invoke(_form, "Update");
+            Assert.That(typeof(SetupForm).GetField("_difficultyId", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(_form), Is.EqualTo(selected.id));
+            Assert.That(label.text, Is.EqualTo("Difficulty: " + selected.label + " ▾"));
+            Assert.That(typeof(SetupForm).GetField("_gameMode", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(_form), Is.EqualTo(GameMode.Annihilation));
+            Assert.That(typeof(SetupForm).GetField("_fog", BindingFlags.Instance | BindingFlags.NonPublic).GetValue(_form), Is.False);
+        }
 
-            choice.onClick.Invoke();
+        [TestCase(360f, 640f)]
+        [TestCase(1600f, 900f)]
+        public void DifficultyOverlayFillsItsNestedParentBeforeTheFirstFrame(float width, float height)
+        {
+            // The real picker also runs under SetupCanvas, not as a root screen canvas.
+            var setupCanvas = _form.GetComponentsInChildren<Canvas>(true).Single(canvas => canvas.name == "SetupCanvas");
+            var viewport = new GameObject("Simulated viewport", typeof(RectTransform));
+            viewport.transform.SetParent(setupCanvas.transform, false);
+            UiKit.SetRect((RectTransform)viewport.transform, 0, 0, width, height);
+            AiDifficultyPicker.Open(viewport.transform, null, _ => { });
+            var picker = viewport.GetComponentInChildren<Canvas>();
+            AssertPickerLayout(picker, (RectTransform)viewport.transform);
+            var card = (RectTransform)picker.transform.Find("Choices");
+            Assert.That(card.rect.width, Is.EqualTo(Mathf.Min(440, width - 40)).Within(0.1f));
+            foreach (var button in card.Find("DifficultyList/Content").GetComponentsInChildren<Button>())
+                Assert.That(((RectTransform)button.transform).rect.width, Is.GreaterThanOrEqualTo(270f));
+        }
 
-            Assert.That(choice.GetComponentInChildren<Text>().text,
-                Is.EqualTo("AI: Trained model"));
+        static void AssertPickerLayout(Canvas picker, RectTransform parent)
+        {
+            var overlay = (RectTransform)picker.transform;
+            var dim = (RectTransform)picker.transform.Find("Dim");
+            Assert.That(picker.overrideSorting, Is.True, "Nested popup must render above its setup parent.");
+            Assert.That(picker.sortingOrder, Is.EqualTo(UiKit.OrderMenu + 10));
+            Assert.That(picker.sortingOrder, Is.GreaterThan(parent.GetComponentInParent<Canvas>().sortingOrder));
+            Assert.That(overlay.rect.width, Is.EqualTo(parent.rect.width).Within(0.1f));
+            Assert.That(overlay.rect.height, Is.EqualTo(parent.rect.height).Within(0.1f));
+            Assert.That(dim.rect.width, Is.EqualTo(parent.rect.width).Within(0.1f));
+            Assert.That(dim.rect.height, Is.EqualTo(parent.rect.height).Within(0.1f));
+            var card = (RectTransform)picker.transform.Find("Choices");
+            foreach (var button in card.Find("DifficultyList/Content").GetComponentsInChildren<Button>())
+                Assert.That(((RectTransform)button.transform).rect.width, Is.EqualTo(card.rect.width - 50).Within(0.1f));
         }
 
         [Test]

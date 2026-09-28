@@ -65,7 +65,7 @@ class ResolvedController:
 
     def metadata(self) -> dict[str, Any]:
         """JSON-safe information for policy-server status replies."""
-        return {
+        result = {
             "kind": self.spec.kind,
             "inference_mode": self.spec.inference_mode,
             "path": str(self.path) if self.path is not None else None,
@@ -91,6 +91,10 @@ class ResolvedController:
             "legacy": self.legacy,
             "promotable": self.promotable,
         }
+        package_metadata = getattr(self.model, "package_metadata", None)
+        if package_metadata is not None:
+            result.update(package_metadata)
+        return result
 
 
 ModelLoader = Callable[[Path, Algorithm], Any]

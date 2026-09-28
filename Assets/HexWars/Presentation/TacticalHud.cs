@@ -56,6 +56,8 @@ namespace HexWars.Presentation
             if(Vector2.Distance(size,_size)>2){Build();_dirty=true;}
             int status = (_game.Reconnecting?1:0) | (_input!=null&&_input.CanCommand?2:0)
                 | (_input!=null&&_input.AwaitingServer?4:0) | (_game.DemoMode?8:0);
+            var opponent = _game.GetComponent<AiOpponent>();
+            if (opponent != null && opponent.IsThinking) status |= 16;
             if(status!=_statusBits){_statusBits=status;_dirty=true;}
             if(ModalOpen && !UiKit.EscapeHandledThisFrame && DeviceInput.FocusProbe() && Keyboard.current!=null && Keyboard.current.escapeKey.wasPressedThisFrame)
             {UiKit.MarkInputEscapeHandled();CloseDialog();}
@@ -213,10 +215,15 @@ namespace HexWars.Presentation
             if(s.PlacingStartingUnits&&WorkshopOpen)SetWorkshop(false);
             var viewer=Seat;bool waiting=_game.WaitingHumanSeat()!=null;
             _turn.text=s.PlacingStartingUnits?$"Player {(int)s.ActivePlayer+1}: starting positions":s.IsGameOver?"Match complete":_game.Reconnecting?"Reconnecting...":waiting?"Opponent's turn":_game.Networked||_game.GetComponent<AiOpponent>()!=null?"Your turn":$"Player {(int)s.ActivePlayer+1}'s turn";
+            var opponent = _game.GetComponent<AiOpponent>();
+            if (opponent != null && !s.IsGameOver && !s.PlacingStartingUnits && waiting)
+                _turn.text = opponent.IsThinking ? "AI is thinking…" : "Opponent's turn";
             _turn.color=GraphitePieces.TeamColor(s.ActivePlayer);
             string pace=s.Config.TurnPolicy.RemainingActions(s)?.ToString();
             _round.text=s.PlacingStartingUnits?$"SETUP   /   {s.Player(viewer).Points} points":$"ROUND {s.Round:00}   /   {s.Player(viewer).Points} points"+(pace!=null?$"   /   {pace} actions left":"");
             _mission.text=s.PlacingStartingUnits?"Arrange your army inside the highlighted starting area":WorkshopOpen?"":s.Config.TerritoryMode?"Territory · control the battlefield":"Annihilation · eliminate the opposing army";
+            if (opponent != null && !WorkshopOpen && !s.PlacingStartingUnits)
+                _mission.text += " · Difficulty: " + opponent.ModelLabel;
             _panel.gameObject.SetActive(!WorkshopOpen);
             _workshop.GetComponentInChildren<Text>().text=WorkshopOpen?"Back to battle":"Design army";
             _workshop.interactable=!s.PlacingStartingUnits;

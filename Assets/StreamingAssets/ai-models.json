@@ -1,0 +1,25 @@
+{
+  "schema_version": 1,
+  "default_difficulty_id": "hard",
+  "inference_path": "/api/ai/decision",
+  "models_root": "models/ai",
+  "difficulties": [
+    { "id": "easy", "label": "Easy", "model_id": "random" },
+    { "id": "normal", "label": "Normal", "model_id": "greedy" },
+    { "id": "hard", "label": "Hard", "model_id": "focused-epoch2" }
+  ],
+  "models": [
+    {
+      "id": "focused-epoch2",
+      "label": "Trained AI - Focused",
+      "kind": "trained",
+      "package": "focused-epoch2",
+      "checkpoint_sha256": "5d14e6c8b37724317d0179c15d1f187f1fd8813ba2b74277da5a8718af3fefc1",
+      "contract_version": "tactical-v3",
+      "encoding_hash": "e7a62d698a5f516c72ca3d1269ebd4b1afc61e7950c8ff0aeb2716f80e45f4b6",
+      "capacity_hash": "7aea1db4f008dc192e83811b2c13abd8ce2304d2a6a209f37f9847be5f367364"
+    },
+    { "id": "greedy", "label": "Greedy", "kind": "greedy" },
+    { "id": "random", "label": "Random", "kind": "random" }
+  ]
+}

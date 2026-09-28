@@ -2,6 +2,7 @@ using System.Net;
 using System.Text;
 using System.Threading.RateLimiting;
 using HexWars.Engine;
+using HexWars.NetServer.AI;
 using HexWars.NetServer.Auth;
 using HexWars.NetServer.Configuration;
 using HexWars.NetServer.Contracts;
@@ -57,6 +58,11 @@ namespace HexWars.NetServer.Hosting
                 "System.Net.Http.HttpClient." + SteamWebApiRegistration.HttpClientName + ".", LogLevel.None);
 
             builder.Services.AddHexWarsOptions(builder.Configuration, builder.Environment);
+            builder.Services.TryAddSingleton(_ => AiRuntimeOptions.Discover(builder.Configuration, builder.Environment));
+            builder.Services.TryAddSingleton<IPolicyProcessFactory, PolicyProcessFactory>();
+            builder.Services.TryAddSingleton(services => new HostedAiService(
+                services.GetRequiredService<AiRuntimeOptions>(), services.GetRequiredService<IPolicyProcessFactory>(),
+                services.GetRequiredService<ILogger<HostedAiService>>()));
 
             // Every ceiling on the work an unauthenticated caller can make this process do, set on the
             // server itself so it applies before any middleware or endpoint is reached. Harmless on a host
@@ -73,6 +79,10 @@ namespace HexWars.NetServer.Hosting
                 (cors, hosting) => cors.AddPolicy(
                     WebGlCorsPolicy,
                     policy => policy.WithOrigins(hosting.Value.AllowedWebOrigins).WithMethods("GET")));
+            builder.Services.AddOptions<CorsOptions>().Configure<IOptions<MatchHostingOptions>>(
+                (cors, hosting) => cors.AddPolicy(AiEndpoints.CorsPolicy,
+                    policy => policy.WithOrigins(hosting.Value.AllowedWebOrigins)
+                        .WithMethods("GET", "POST").WithHeaders("Content-Type")));
 
             // Both process-wide by necessity: a per-request block list would re-parse the configuration on
             // every call, and a per-request quota would count to one and never refuse.
@@ -219,6 +229,13 @@ namespace HexWars.NetServer.Hosting
             builder.Services.AddRateLimiter(limiter =>
             {
                 limiter.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+                // Global, before request buffering: the largest inputs cannot multiply without bound
+                // across anonymous clients. The per-model worker also limits its own pending requests.
+                limiter.AddConcurrencyLimiter(AiEndpoints.RateLimitPolicy, options =>
+                {
+                    options.PermitLimit = 4;
+                    options.QueueLimit = 0;
+                });
 
                 // The default rejection writes an empty body, which a client cannot tell apart from any
                 // other 429 a proxy might have produced. Answering in the same shape as every other
@@ -336,6 +353,7 @@ namespace HexWars.NetServer.Hosting
             types.Mappings[".data"] = "application/octet-stream";
             types.Mappings[".wasm"] = "application/wasm";
             app.UseStaticFiles(new StaticFileOptions { ContentTypeProvider = types });
+            app.MapAiEndpoints();
 
             // The operations surface, mapped for every deployment. A probe that only worked under one
             // lobby provider would be a probe that reports a healthy legacy host as a missing route.
